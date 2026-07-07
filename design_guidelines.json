@@ -1,0 +1,180 @@
+{
+  "app_name": "Hymn",
+  "personality": "3 Editorial Mobile LIGHT",
+  "personality_one_liner": "A calm, restorative personal operating system where beautiful typography and intentional whitespace make logging life feel like a mindful ritual, not a chore.",
+  "color": {
+    "surface": "#FBFBF9",
+    "onSurface": "#1E1E1C",
+    "surfaceSecondary": "#F4F4F2",
+    "onSurfaceSecondary": "#5A5A55",
+    "surfaceTertiary": "#EBEBE9",
+    "onSurfaceTertiary": "#82827C",
+    "surfaceInverse": "#1E1E1C",
+    "onSurfaceInverse": "#FBFBF9",
+    "brand": "#808B76",
+    "brandPrimary": "#808B76",
+    "onBrandPrimary": "#FFFFFF",
+    "brandSecondary": "#9DA893",
+    "onBrandSecondary": "#1E1E1C",
+    "brandTertiary": "#E7EAE3",
+    "onBrandTertiary": "#2D3328",
+    "success": "#5D7B61",
+    "onSuccess": "#FFFFFF",
+    "warning": "#C58B44",
+    "onWarning": "#FFFFFF",
+    "error": "#A65646",
+    "onError": "#FFFFFF",
+    "info": "#75816B",
+    "onInfo": "#FFFFFF",
+    "border": "#EBEBE9",
+    "borderStrong": "#D1D1CE",
+    "divider": "#EBEBE9"
+  },
+  "typography": {
+    "displayFontFamily": "Playfair Display",
+    "textFontFamily": "DM Sans",
+    "scale": {
+      "sm": 12,
+      "base": 14,
+      "lg": 16,
+      "xl": 20,
+      "2xl": 24
+    }
+  },
+  "spacing": {
+    "rule": "Generous vertical breathing room. Use spacing to create hierarchy instead of borders or heavy cards. Keep margins wide to frame content like a page in a book.",
+    "xs": 4,
+    "sm": 8,
+    "md": 12,
+    "lg": 16,
+    "xl": 24,
+    "2xl": 32,
+    "3xl": 48
+  },
+  "radius_tokens": {
+    "sm": 6,
+    "md": 12,
+    "lg": 20,
+    "pill": 999
+  },
+  "shadow_tier": 0,
+  "navigation": "bottom_tabs",
+  "icon_set": "Phosphor",
+  "glassmorphism": {
+    "enabled": false,
+    "do's": [],
+    "dont's": [
+      "No glassmorphism for Editorial personality. Keep surfaces matte and paper-like (solid colors)."
+    ]
+  },
+  "platform_libraries": {
+    "glass": {
+      "ios": "expo-glass-effect",
+      "android": "expo-blur",
+      "low_end_android_fallback": "solid surfaceSecondary"
+    },
+    "image": "expo-image",
+    "blur": "expo-blur",
+    "bottom_sheet": "@gorhom/bottom-sheet",
+    "animation": "react-native-reanimated",
+    "gesture": "react-native-gesture-handler"
+  },
+  "haptics": {
+    "events": {
+      "tab_press": "light",
+      "button_press": "medium",
+      "add_event_open": "medium",
+      "save_success": "success",
+      "error_state": "error"
+    }
+  },
+  "screens": [
+    {
+      "name": "Auth (Sign In / Sign Up / Forgot Password)",
+      "purpose": "Provide a secure, serene entry point to the user's private data.",
+      "states": {
+        "loading": "Centered brand-colored activity indicator.",
+        "empty": "N/A",
+        "error": "Readable inline error message below the affected input field, colored in error (#A65646)."
+      },
+      "layout": "Stack layout. Large 'Hymn.' wordmark at the top (Playfair Display, 3xl, centered). Inputs are single column, floating slightly off the edges with `md` padding. Inputs have solid `surfaceSecondary` background, `sm` radius, and no heavy borders. Sticky primary CTA anchored at the bottom inside KeyboardAvoidingView. Forgot Password screen displays an input for the Security Question with identical minimalist styling."
+    },
+    {
+      "name": "Today Dashboard",
+      "purpose": "A calm daily overview displaying the user's required check-ins, tasks, events, and spending.",
+      "states": {
+        "loading": "Skeleton loaders for the four blocks.",
+        "empty": "Each of the 4 blocks displays a minimalist empty state: a small muted icon + a single quiet sentence ('No events today.') + an optional subtle text CTA.",
+        "error": "Error message with 'Retry' text button."
+      },
+      "layout": "ScrollView with a generous top safe area. Large header displaying the date (e.g., 'Monday, Oct 14') in Playfair Display. The 4 sections (Required Check-ins, Upcoming Tasks, Today's Events, Today's Spending) are rendered as a single-column stack of soft blocks. Each block uses `surfaceSecondary` background, `sm` radius, `lg` internal padding, and an `xl` margin between blocks. No drop shadows. Each block is pressable and navigates to its respective detailed view."
+    },
+    {
+      "name": "Timeline",
+      "purpose": "Chronological history of all logged items.",
+      "states": {
+        "loading": "Centered spinner.",
+        "empty": "Empty state illustration + 'Your timeline is waiting. Record what happened today.' + Primary CTA to Add Event.",
+        "error": "Error message + Retry button."
+      },
+      "layout": "SectionList grouped by Date. Section headers ('October 14') are bold serif, sticky at the top, solid `surface` background. Each row displays the time on the left (DM Sans, onSurfaceTertiary), separated by a subtle vertical `divider` line and a dot, with the title and note snippet on the right. Rows have generous vertical padding (`md`) to breathe. Tapping a row opens Event Detail."
+    },
+    {
+      "name": "Add Event / Edit Event",
+      "purpose": "Frictionless form to record what happened or what matters.",
+      "states": {
+        "loading": "Saving spinner overlay.",
+        "empty": "N/A",
+        "error": "Toast or inline text showing validation error."
+      },
+      "layout": "Presented as a full-screen modal (or Bottom Sheet if preferred). Top header has a subtle 'Cancel' and 'Save' (if not using sticky bottom CTA). Form fields: Type (rendered as a horizontal scroll of selectable pills in `brandTertiary`), Title (large input, Playfair Display), Date and Time rows, and a multiline Notes area. Sticky 'Save' button pinned to the bottom above the keyboard."
+    },
+    {
+      "name": "Event Detail",
+      "purpose": "A beautiful, magazine-like reading view for a single event.",
+      "states": {
+        "loading": "Skeleton view.",
+        "empty": "N/A",
+        "error": "Error loading event data + Retry."
+      },
+      "layout": "Scrollable view. Top header with a back button and an 'Edit' text button. The content starts with the Title (Playfair Display, 2xl, generous line height), followed by metadata (Date, Time, Type) in small caps or muted DM Sans. The Notes section is treated like an article body: DM Sans, `lg` font size, 1.5x line height, no borders. The layout should feel like a page in a well-typeset book."
+    },
+    {
+      "name": "Finance / Me (Placeholders)",
+      "purpose": "Hold space for future modules while maintaining the app's aesthetic.",
+      "states": {
+        "loading": "N/A",
+        "empty": "Full screen flex-center. Empty state minimalist line art illustration. A short, calm sentence ('Financial tracking is quiet right now' or 'Your profile space').",
+        "error": "N/A"
+      },
+      "layout": "Centered content. Minimalist image on top, 1 sentence in Playfair Display below it."
+    }
+  ],
+  "images": {
+    "auth_background": {
+      "url": "https://images.unsplash.com/photo-1580744789283-e7d146bae255?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDF8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMG1pbmltYWwlMjBsaW5lJTIwYXJ0JTIwY2FsbXxlbnwwfHx8fDE3ODMyNTg0MzN8MA&ixlib=rb-4.1.0&q=85",
+      "dark": "https://images.unsplash.com/photo-1580744789283-e7d146bae255?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDF8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMG1pbmltYWwlMjBsaW5lJTIwYXJ0JTIwY2FsbXxlbnwwfHx8fDE3ODMyNTg0MzN8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "A black and white minimal photo of a window with blinds, creating a calm atmosphere."
+    },
+    "empty_state_art": {
+      "url": "https://images.unsplash.com/photo-1768353142176-378dd9630e43?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDF8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMG1pbmltYWwlMjBsaW5lJTIwYXJ0JTIwY2FsbXxlbnwwfHx8fDE3ODMyNTg0MzN8MA&ixlib=rb-4.1.0&q=85",
+      "dark": "https://images.unsplash.com/photo-1768353142176-378dd9630e43?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDF8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMG1pbmltYWwlMjBsaW5lJTIwYXJ0JTIwY2FsbXxlbnwwfHx8fDE3ODMyNTg0MzN8MA&ixlib=rb-4.1.0&q=85",
+      "alt": "Minimalist calm figure on a cream wall."
+    },
+    "today_hero": {
+      "url": "https://images.pexels.com/photos/36270903/pexels-photo-36270903.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "dark": "https://images.pexels.com/photos/36270903/pexels-photo-36270903.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "alt": "Tranquil sunrise over a calm ocean, minimalist pastel hues."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Strictly adhere to the '3 Editorial Mobile LIGHT' personality. The interface must feel like a calming, high-quality editorial magazine: generous margins (xl, 2xl), zero heavy drop shadows, and no generic blue/purple AI colors.",
+    "Colors: Use the defined muted Sage Green (#808B76) as the primary brand color against Paper White (#FBFBF9). Ensure contrast ratios meet WCAG AA standards.",
+    "Typography: Use Playfair Display for all major headings and dates to bring an elegant, restorative feel. Use DM Sans (weight max 500) for all body text, UI controls, and labels.",
+    "Bottom Navigation: Build a 5-item tab bar (Today, Timeline, Center-Plus, Finance, Me). The background should be solid surface (NOT glass, per Editorial constraints) with a subtle top border (borderStrong). The center '+' button must be prominently styled as a floating pill or circle filled with `brandPrimary` (#808B76) and an `onBrandPrimary` icon, triggering the Add Event flow.",
+    "Today Screen layout: Avoid bulky floating cards. The 4 sections (Check-ins, Tasks, Events, Spending) should be rendered as soft, flat blocks using `surfaceSecondary` with `sm` border radius. Empty states inside these blocks must be minimal (small icon + one line of text).",
+    "Timeline Screen: Group list items cleanly by Date. Implement a sleek vertical line with a dot indicator on the left side of each row to establish the chronological feel.",
+    "Any time text sits on top of an image (e.g., if you use `today_hero`), you MUST use a vertical gradient scrim (transparent to surfaceInverse) to guarantee readability.",
+    "Ensure the sticky 'Save' or 'Submit' Primary CTA buttons are anchored at the bottom of the screens above the safe area or keyboard (KeyboardAvoidingView) on all forms (Auth, Add Event, Edit Event)."
+  ]
+}
