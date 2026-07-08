@@ -12,6 +12,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+import httpx
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -51,6 +52,10 @@ class ForgotPasswordRequest(BaseModel):
     email: EmailStr
     security_answer: str
     new_password: str = Field(min_length=6)
+
+
+class GoogleSessionRequest(BaseModel):
+    session_token: str
 
 
 class SecurityQuestionResponse(BaseModel):
@@ -116,6 +121,19 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         detail="Invalid or expired token",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    # Try session_token (Google) first — cheap DB lookup.
+    session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if session:
+        expires_at = session.get("expires_at")
+        if isinstance(expires_at, datetime):
+            exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+            if exp < datetime.now(timezone.utc):
+                raise credentials_exc
+        user = await db.users.find_one({"id": session["user_id"]})
+        if not user:
+            raise credentials_exc
+        return user
+    # Fallback: JWT (email/password flow).
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
         user_id: str = payload.get("sub")
@@ -223,9 +241,68 @@ async def me(current_user: dict = Depends(get_current_user)):
 
 
 @api_router.post("/auth/logout")
-async def logout(current_user: dict = Depends(get_current_user)):
-    # Stateless JWT; client discards token.
+async def logout(current_user: dict = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
+    # Stateless JWT for email/password users. For Google users, delete their session row.
+    await db.user_sessions.delete_one({"session_token": token})
     return {"detail": "Logged out"}
+
+
+@api_router.post("/auth/google-session", response_model=TokenResponse)
+async def google_session(body: GoogleSessionRequest):
+    """Verify session_token with Emergent auth service, upsert user, persist session."""
+    session_token = body.session_token.strip()
+    if not session_token:
+        raise HTTPException(status_code=400, detail="Missing session token")
+    async with httpx.AsyncClient(timeout=10.0) as http_client:
+        try:
+            resp = await http_client.get(
+                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+                headers={"X-Session-ID": session_token},
+            )
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=502, detail=f"Auth service unreachable: {e}")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=401, detail="Invalid Google session")
+    data = resp.json()
+    email = (data.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(status_code=401, detail="Google session missing email")
+    verified_token = data.get("session_token") or session_token
+
+    now = datetime.now(timezone.utc)
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        user_id = existing["id"]
+        await db.users.update_one(
+            {"id": user_id},
+            {"$set": {"updated_at": now.isoformat(), "google_name": data.get("name"), "google_picture": data.get("picture")}},
+        )
+    else:
+        user_id = str(uuid.uuid4())
+        await db.users.insert_one({
+            "id": user_id,
+            "email": email,
+            "hashed_password": None,
+            "security_question": None,
+            "hashed_security_answer": None,
+            "auth_provider": "google",
+            "google_name": data.get("name"),
+            "google_picture": data.get("picture"),
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        })
+
+    await db.user_sessions.update_one(
+        {"session_token": verified_token},
+        {"$set": {
+            "session_token": verified_token,
+            "user_id": user_id,
+            "expires_at": now + timedelta(days=7),
+            "created_at": now,
+        }},
+        upsert=True,
+    )
+    return TokenResponse(access_token=verified_token, user=UserResponse(id=user_id, email=email))
 
 
 # ---------- Event Routes ----------
@@ -299,6 +376,15 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+@app.on_event("startup")
+async def startup_indexes():
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("id", unique=True)
+    await db.user_sessions.create_index("session_token", unique=True)
+    await db.user_sessions.create_index("user_id")
+    await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
 
 
 @app.on_event("shutdown")

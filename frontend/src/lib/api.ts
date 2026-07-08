@@ -50,6 +50,12 @@ export const api = {
 
   logout: () => request<{ detail: string }>("/auth/logout", { method: "POST", auth: true }),
 
+  googleSession: (session_token: string) =>
+    request<{ access_token: string; user: { id: string; email: string } }>("/auth/google-session", {
+      method: "POST",
+      body: { session_token },
+    }),
+
   getSecurityQuestion: (email: string) =>
     request<{ security_question: string }>("/auth/security-question", { method: "POST", body: { email } }),
 

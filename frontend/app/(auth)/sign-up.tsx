@@ -13,6 +13,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Link } from "expo-router";
 import { useAuth } from "@/src/lib/AuthContext";
+import GoogleAuthButton from "@/src/components/GoogleAuthButton";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
 export default function SignUpScreen() {
@@ -110,6 +111,15 @@ export default function SignUpScreen() {
           >
             {busy ? <ActivityIndicator color={colors.onBrandPrimary} /> : <Text style={styles.ctaText}>Create account</Text>}
           </Pressable>
+
+          <View style={styles.dividerRow}>
+            <View style={styles.divider} />
+            <Text style={styles.dividerText}>or</Text>
+            <View style={styles.divider} />
+          </View>
+
+          <GoogleAuthButton testID="sign-up-google-button" />
+
           <View style={styles.footerRow}>
             <Text style={styles.footerText}>Already have an account? </Text>
             <Link href="/(auth)/sign-in" asChild>
@@ -146,4 +156,7 @@ const styles = StyleSheet.create({
   ctaText: { color: colors.onSurfaceInverse, fontSize: 16, fontWeight: "600" },
   footerRow: { flexDirection: "row", justifyContent: "center", alignItems: "center" },
   footerText: { color: colors.onSurfaceSecondary, fontSize: 14 },
+  dividerRow: { flexDirection: "row", alignItems: "center", gap: spacing.md, marginVertical: spacing.xs },
+  divider: { flex: 1, height: 1, backgroundColor: colors.border },
+  dividerText: { color: colors.onSurfaceTertiary, fontSize: 12 },
 });
