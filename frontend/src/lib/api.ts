@@ -80,4 +80,7 @@ export const api = {
     id: string,
     payload: { type?: string; title?: string; date?: string; time?: string; notes?: string },
   ) => request<{ id: string }>(`/events/${id}`, { method: "PUT", body: payload, auth: true }),
+
+  deleteEvent: (id: string) =>
+    request<{ detail: string }>(`/events/${id}`, { method: "DELETE", auth: true }),
 };

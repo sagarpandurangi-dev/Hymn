@@ -360,6 +360,14 @@ async def update_event(event_id: str, body: EventUpdate, current_user: dict = De
     return event_to_response(updated)
 
 
+@api_router.delete("/events/{event_id}", status_code=200)
+async def delete_event(event_id: str, current_user: dict = Depends(get_current_user)):
+    result = await db.events.delete_one({"id": event_id, "user_id": current_user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Event not found")
+    return {"detail": "Event deleted"}
+
+
 # ---------- App wiring ----------
 app.include_router(api_router)
 

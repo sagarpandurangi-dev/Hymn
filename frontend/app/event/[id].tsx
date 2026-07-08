@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -23,6 +23,9 @@ export default function EventDetailScreen() {
   const [event, setEvent] = useState<EventItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -39,6 +42,22 @@ export default function EventDetailScreen() {
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
+  const onConfirmDelete = async () => {
+    if (!id) return;
+    setDeleteError(null);
+    setDeleting(true);
+    try {
+      await api.deleteEvent(id);
+      setConfirmOpen(false);
+      // Navigate back to Timeline; useFocusEffect there will refresh the list.
+      router.replace("/(tabs)/timeline");
+    } catch (e: any) {
+      setDeleteError(e?.message || "Could not delete");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       <View style={styles.headerRow}>
@@ -46,9 +65,14 @@ export default function EventDetailScreen() {
           <Ionicons name="chevron-back" size={22} color={colors.onSurface} />
         </Pressable>
         {event && (
-          <Pressable onPress={() => router.push(`/event/edit/${event.id}`)} testID="event-detail-edit-button" hitSlop={12}>
-            <Text style={styles.edit}>Edit</Text>
-          </Pressable>
+          <View style={styles.headerActions}>
+            <Pressable onPress={() => router.push(`/event/edit/${event.id}`)} testID="event-detail-edit-button" hitSlop={12}>
+              <Text style={styles.edit}>Edit</Text>
+            </Pressable>
+            <Pressable onPress={() => setConfirmOpen(true)} testID="event-detail-delete-button" hitSlop={12}>
+              <Ionicons name="trash-outline" size={20} color={colors.error} />
+            </Pressable>
+          </View>
         )}
       </View>
 
@@ -83,6 +107,45 @@ export default function EventDetailScreen() {
           )}
         </ScrollView>
       ) : null}
+
+      <Modal
+        visible={confirmOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => (deleting ? null : setConfirmOpen(false))}
+      >
+        <View style={styles.modalBackdrop} testID="delete-confirm-modal">
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>Delete this event?</Text>
+            <Text style={styles.modalBody}>
+              This will remove &quot;{event?.title || "the event"}&quot; permanently.
+            </Text>
+            {deleteError ? <Text style={styles.deleteError} testID="delete-error">{deleteError}</Text> : null}
+            <View style={styles.modalButtonRow}>
+              <Pressable
+                style={[styles.modalBtn, styles.modalBtnSecondary]}
+                onPress={() => setConfirmOpen(false)}
+                disabled={deleting}
+                testID="delete-cancel-button"
+              >
+                <Text style={styles.modalBtnSecondaryText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.modalBtn, styles.modalBtnDanger, deleting && styles.modalBtnDisabled]}
+                onPress={onConfirmDelete}
+                disabled={deleting}
+                testID="delete-confirm-button"
+              >
+                {deleting ? (
+                  <ActivityIndicator color={colors.onError} />
+                ) : (
+                  <Text style={styles.modalBtnDangerText}>Delete</Text>
+                )}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -93,6 +156,7 @@ const styles = StyleSheet.create({
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",
     paddingHorizontal: spacing.xl, paddingTop: spacing.md, paddingBottom: spacing.md,
   },
+  headerActions: { flexDirection: "row", alignItems: "center", gap: spacing.lg },
   edit: { color: colors.brandPrimary, fontSize: 15, fontWeight: "600" },
   scroll: { paddingHorizontal: spacing.xl, paddingBottom: spacing.xxxl },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
@@ -107,4 +171,25 @@ const styles = StyleSheet.create({
   errorText: { color: colors.error, marginBottom: spacing.md },
   retry: { paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, backgroundColor: colors.surfaceSecondary, borderRadius: radius.pill },
   retryText: { color: colors.onSurface },
+  modalBackdrop: {
+    flex: 1, backgroundColor: "rgba(30,30,28,0.55)",
+    alignItems: "center", justifyContent: "center", padding: spacing.xl,
+  },
+  modalCard: {
+    width: "100%", maxWidth: 360, backgroundColor: colors.surface,
+    borderRadius: radius.lg, padding: spacing.xl,
+  },
+  modalTitle: { fontFamily: fonts.displayBold, fontSize: 20, color: colors.onSurface, fontWeight: "700", marginBottom: spacing.sm },
+  modalBody: { fontSize: 14, color: colors.onSurfaceSecondary, lineHeight: 20 },
+  deleteError: { color: colors.error, fontSize: 13, marginTop: spacing.md },
+  modalButtonRow: { flexDirection: "row", gap: spacing.md, marginTop: spacing.xl },
+  modalBtn: {
+    flex: 1, paddingVertical: spacing.md + 2, borderRadius: radius.pill,
+    alignItems: "center", justifyContent: "center",
+  },
+  modalBtnSecondary: { backgroundColor: colors.surfaceSecondary },
+  modalBtnSecondaryText: { color: colors.onSurface, fontSize: 15, fontWeight: "500" },
+  modalBtnDanger: { backgroundColor: colors.error },
+  modalBtnDangerText: { color: colors.onError, fontSize: 15, fontWeight: "600" },
+  modalBtnDisabled: { opacity: 0.7 },
 });
