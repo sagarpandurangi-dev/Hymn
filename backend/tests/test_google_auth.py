@@ -77,8 +77,8 @@ class TestEmailPasswordRegression:
 
     def test_events_with_jwt(self, session, state):
         headers = {"Authorization": f"Bearer {state['jwt']}"}
-        r = session.post(f"{API}/events", headers=headers, json={
-            "type": "Note", "title": "TEST_jwt_regression",
+        r = session.post(f"{API}/checkins", headers=headers, json={
+            "type": "life", "title": "TEST_jwt_regression",
             "date": "2026-01-20", "time": "09:00", "notes": "",
         })
         assert r.status_code == 201, r.text
@@ -120,8 +120,8 @@ class TestSimulatedGoogleSession:
 
     def test_create_event_with_session_token(self, session, state):
         headers = {"Authorization": f"Bearer {state['g_token']}"}
-        r = session.post(f"{API}/events", headers=headers, json={
-            "type": "Meeting", "title": "TEST_google_event",
+        r = session.post(f"{API}/checkins", headers=headers, json={
+            "type": "life", "title": "TEST_google_event",
             "date": "2026-01-21", "time": "11:00", "notes": "via session_token",
         })
         assert r.status_code == 201, r.text
@@ -129,7 +129,7 @@ class TestSimulatedGoogleSession:
 
     def test_list_events_with_session_token(self, session, state):
         headers = {"Authorization": f"Bearer {state['g_token']}"}
-        r = session.get(f"{API}/events", headers=headers)
+        r = session.get(f"{API}/checkins", headers=headers)
         assert r.status_code == 200
         ids = [e["id"] for e in r.json()]
         assert state["g_event_id"] in ids
@@ -147,9 +147,9 @@ class TestSimulatedGoogleSession:
         assert r.status_code == 401
 
     def test_cleanup(self, mongo, state):
-        mongo.events.delete_many({"user_id": state.get("g_user_id")})
+        mongo.checkins.delete_many({"user_id": state.get("g_user_id")})
         mongo.users.delete_one({"id": state.get("g_user_id")})
-        mongo.events.delete_many({"user_id": state.get("jwt_user_id")})
+        mongo.checkins.delete_many({"user_id": state.get("jwt_user_id")})
         mongo.users.delete_one({"id": state.get("jwt_user_id")})
 
 
