@@ -3,7 +3,7 @@ import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollVie
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
-import { colors, EO_STATUSES, spacing } from "@/src/lib/theme";
+import { colors, EO_STATUSES, OUTCOME_TYPES, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 
 type Props = {
@@ -18,6 +18,7 @@ type Props = {
 function EOForm({ initial, headerTitle, submitLabel, testIDPrefix, onSubmit }: Props) {
   const router = useRouter();
   const [title, setTitle] = useState(initial?.title || "");
+  const [outcomeType, setOutcomeType] = useState<string>(initial?.outcome_type || "generic");
   const [targetValue, setTargetValue] = useState(initial?.target_value || "");
   const [currentValue, setCurrentValue] = useState(initial?.current_value || "");
   const [unit, setUnit] = useState(initial?.unit || "");
@@ -33,7 +34,8 @@ function EOForm({ initial, headerTitle, submitLabel, testIDPrefix, onSubmit }: P
     setBusy(true);
     try {
       await onSubmit({
-        title: title.trim(), target_value: targetValue.trim(), current_value: currentValue.trim(),
+        title: title.trim(), outcome_type: outcomeType,
+        target_value: targetValue.trim(), current_value: currentValue.trim(),
         unit: unit.trim(), deadline: deadline.trim(), status, notes: notes.trim(),
       });
     } catch (e: any) { setError(e?.message || "Could not save"); }
@@ -52,6 +54,17 @@ function EOForm({ initial, headerTitle, submitLabel, testIDPrefix, onSubmit }: P
           <Text style={s.label}>Title</Text>
           <TextInput style={s.titleInput} value={title} onChangeText={setTitle} placeholder="What outcome are you tracking?" placeholderTextColor={colors.onSurfaceTertiary} testID={`${testIDPrefix}-title-input`} />
 
+          <Text style={s.label}>Type</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
+            {OUTCOME_TYPES.map((ot) => {
+              const sel = outcomeType === ot;
+              return (
+                <Pressable key={ot} onPress={() => setOutcomeType(ot)} style={[s.chip, sel && s.chipSelected]} testID={`${testIDPrefix}-type-chip-${ot}`}>
+                  <Text style={[s.chipText, sel && s.chipTextSelected, { textTransform: "capitalize" }]}>{ot.replace("_", " ")}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
           <View style={{ flexDirection: "row", gap: spacing.md }}>
             <View style={{ flex: 1 }}>
               <Text style={s.label}>Current</Text>

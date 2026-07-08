@@ -65,6 +65,14 @@ export default function TaskDetailScreen() {
           <Text style={styles.meta}>{(t.status || "").toUpperCase()} · {(t.priority || "").toUpperCase()} · from {t.origin}</Text>
           <Text style={styles.title} testID="task-detail-title">{t.title}</Text>
           {t.due_date ? <Text style={styles.due}>due {t.due_date}</Text> : null}
+          {t.assigned_to_type === "external" ? (
+            <Text style={styles.due} testID="task-detail-assignee">
+              Assigned to {t.assigned_to_name || t.assigned_to_phone}
+              {t.assigned_to_phone && t.assigned_to_name ? ` · ${t.assigned_to_phone}` : ""}
+            </Text>
+          ) : (
+            <Text style={styles.due} testID="task-detail-assignee">Assigned to you</Text>
+          )}
           {t.notes ? <Text style={styles.notes} testID="task-detail-notes">{t.notes}</Text> : null}
 
           <View style={styles.actionsRow}>

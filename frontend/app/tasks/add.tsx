@@ -3,7 +3,7 @@ import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollVie
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
-import { colors, spacing, TASK_PRIORITIES, TASK_STATUSES } from "@/src/lib/theme";
+import { colors, spacing, TASK_PRIORITIES, TASK_STATUSES, TASK_ASSIGNMENT_TYPES } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 
 type Project = { id: string; title: string };
@@ -16,6 +16,7 @@ type Props = {
   initial?: {
     title: string; due_date: string; priority: string; status: string; notes: string;
     origin: string; expected_outcome_id: string | null; project_id: string | null;
+    assigned_to_type?: string; assigned_to_name?: string; assigned_to_phone?: string;
   } | null;
   mode: "add" | "edit";
   headerTitle: string;
@@ -35,6 +36,9 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
   const [projectId, setProjectId] = useState<string>(initial?.project_id || "");
   const [goalId, setGoalId] = useState<string>("");
   const [eoId, setEoId] = useState<string>(initial?.expected_outcome_id || "");
+  const [assignedType, setAssignedType] = useState<string>(initial?.assigned_to_type || "self");
+  const [assignedName, setAssignedName] = useState<string>(initial?.assigned_to_name || "");
+  const [assignedPhone, setAssignedPhone] = useState<string>(initial?.assigned_to_phone || "");
   const [projects, setProjects] = useState<Project[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [eos, setEos] = useState<EO[]>([]);
@@ -66,9 +70,15 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
     if (!title.trim()) { setError("Title is required."); return; }
     if (mode === "add" && origin === "project" && !projectId) { setError("Choose a project."); return; }
     if (mode === "add" && origin === "expected_outcome" && !eoId) { setError("Choose a goal and expected outcome."); return; }
+    if (assignedType === "external" && !assignedName.trim() && !assignedPhone.trim()) {
+      setError("Enter a name or phone for the external assignee."); return;
+    }
     setBusy(true);
     try {
       const payload: any = { title: title.trim(), due_date: dueDate.trim(), priority, status, notes: notes.trim() };
+      payload.assigned_to_type = assignedType;
+      payload.assigned_to_name = assignedType === "external" ? assignedName.trim() : "";
+      payload.assigned_to_phone = assignedType === "external" ? assignedPhone.trim() : "";
       if (mode === "add") {
         payload.origin = origin;
         payload.expected_outcome_id = origin === "expected_outcome" ? eoId : null;
@@ -180,6 +190,30 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
 
           <Text style={s.label}>Notes</Text>
           <TextInput style={s.notes} value={notes} onChangeText={setNotes} multiline textAlignVertical="top" testID={`${testIDPrefix}-notes-input`} />
+
+          <Text style={s.label}>Assigned To</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
+            {TASK_ASSIGNMENT_TYPES.map((a) => {
+              const sel = assignedType === a;
+              return (
+                <Pressable key={a} onPress={() => setAssignedType(a)} style={[s.chip, sel && s.chipSelected]} testID={`${testIDPrefix}-assign-chip-${a}`}>
+                  <Text style={[s.chipText, sel && s.chipTextSelected, { textTransform: "capitalize" }]}>{a === "self" ? "Self" : "External"}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          {assignedType === "external" && (
+            <View style={{ flexDirection: "row", gap: spacing.md }}>
+              <View style={{ flex: 1 }}>
+                <Text style={s.label}>Name</Text>
+                <TextInput style={s.input} value={assignedName} onChangeText={setAssignedName} placeholder="e.g. Alex" placeholderTextColor={colors.onSurfaceTertiary} testID={`${testIDPrefix}-assign-name-input`} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={s.label}>Phone</Text>
+                <TextInput style={s.input} value={assignedPhone} onChangeText={setAssignedPhone} placeholder="+1 555 …" placeholderTextColor={colors.onSurfaceTertiary} keyboardType="phone-pad" testID={`${testIDPrefix}-assign-phone-input`} />
+              </View>
+            </View>
+          )}
 
           {error ? <Text style={s.errorText} testID={`${testIDPrefix}-error`}>{error}</Text> : null}
         </ScrollView>

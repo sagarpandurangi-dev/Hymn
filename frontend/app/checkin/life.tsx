@@ -29,7 +29,7 @@ export default function LifeCheckinScreen() {
     if (!title.trim()) { setError("Title is required."); return; }
     setBusy(true);
     try {
-      const payload: any = { type: "life", title: title.trim(), date, time, notes: notes.trim(), attachment };
+      const payload: any = { type: "life", title: title.trim(), date, time, notes: notes.trim(), attachment, source: "manual" };
       if (addFollowUp && followUpTitle.trim()) payload.follow_up_task = { title: followUpTitle.trim() };
       await api.createCheckin(payload);
       router.back();

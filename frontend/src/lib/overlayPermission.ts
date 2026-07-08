@@ -16,7 +16,13 @@ import { Platform } from "react-native";
 
 const STORAGE_KEY = "hymn_overlay_permission_status";
 
-export type OverlayPermissionStatus = "unsupported" | "unknown" | "granted" | "denied" | "not_yet_supported";
+export type OverlayPermissionStatus =
+  | "unsupported"       // Not Android — feature not available
+  | "supported"         // Android, permission not yet requested
+  | "enabled"           // Permission granted
+  | "disabled"          // Permission explicitly denied by user
+  | "not_yet_supported" // Placeholder: native module not shipped yet
+  | "unknown";
 
 export function isOverlayCapable(): boolean {
   return Platform.OS === "android";
@@ -24,13 +30,13 @@ export function isOverlayCapable(): boolean {
 
 export async function getOverlayPermissionStatus(): Promise<OverlayPermissionStatus> {
   if (!isOverlayCapable()) return "unsupported";
-  // Persistent state is stored via existing storage utility; kept simple to avoid coupling here.
   try {
     const { storage } = await import("@/src/utils/storage");
     const value = await storage.getItem<OverlayPermissionStatus | null>(STORAGE_KEY, null);
-    return value || "unknown";
+    if (value === "enabled" || value === "disabled") return value;
+    return "supported";
   } catch {
-    return "unknown";
+    return "supported";
   }
 }
 

@@ -131,6 +131,84 @@ EXPECTED_OUTCOME_STATUSES = {"active", "paused", "completed", "abandoned"}
 MAX_EXPECTED_OUTCOMES_PER_GOAL = 7
 
 
+# ---------- Outcome Type Registry ----------
+# Metadata-driven definition of Expected Outcome types. Each type declares which
+# fields appear on a Check-in linked to an Expected Outcome of that type, what
+# units are supported, and how progress is calculated. Adding a new type is a
+# data change here, not a schema change to Check-ins or Expected Outcomes.
+OUTCOME_TYPE_REGISTRY: dict = {
+    "generic": {
+        "label": "Generic",
+        "description": "Free-form outcome with manual progress.",
+        "checkin_fields": [
+            {"key": "note", "label": "Note", "type": "textarea", "required": False},
+        ],
+        "units": [],
+        "progress": "manual",
+    },
+    "weight": {
+        "label": "Weight",
+        "description": "Body weight or any single measurable value.",
+        "checkin_fields": [
+            {"key": "value", "label": "Value", "type": "number", "required": True},
+            {"key": "unit", "label": "Unit", "type": "select", "options": ["kg", "lb"], "required": True},
+        ],
+        "units": ["kg", "lb"],
+        "progress": "value_vs_target",
+    },
+    "study": {
+        "label": "Study",
+        "description": "Time spent learning a topic.",
+        "checkin_fields": [
+            {"key": "duration_minutes", "label": "Duration (minutes)", "type": "number", "required": True},
+            {"key": "topic", "label": "Topic", "type": "text", "required": False},
+        ],
+        "units": ["minutes", "hours"],
+        "progress": "sum",
+    },
+    "revenue": {
+        "label": "Revenue",
+        "description": "Money earned or received.",
+        "checkin_fields": [
+            {"key": "amount", "label": "Amount", "type": "number", "required": True},
+            {"key": "currency", "label": "Currency", "type": "select", "options": ["USD", "INR", "EUR", "GBP"], "required": True},
+        ],
+        "units": ["USD", "INR", "EUR", "GBP"],
+        "progress": "sum",
+    },
+    "project_milestone": {
+        "label": "Project Milestone",
+        "description": "Status update on a milestone.",
+        "checkin_fields": [
+            {"key": "status_update", "label": "Status Update", "type": "textarea", "required": True},
+            {"key": "blocker", "label": "Blocker", "type": "text", "required": False},
+        ],
+        "units": [],
+        "progress": "manual",
+    },
+    "count": {
+        "label": "Count",
+        "description": "Counted occurrences (reps, sessions, tasks).",
+        "checkin_fields": [
+            {"key": "count", "label": "Count", "type": "number", "required": True},
+        ],
+        "units": [],
+        "progress": "sum",
+    },
+}
+VALID_OUTCOME_TYPES = set(OUTCOME_TYPE_REGISTRY.keys())
+
+
+# ---------- Task assignment ----------
+TASK_ASSIGNMENT_TYPES = {"self", "external"}
+# Kept extensible on purpose: adding e.g. "hymn_user" later requires no schema change,
+# only registry / validation update.
+
+
+# ---------- Check-in source ----------
+CHECKIN_SOURCES = {"manual", "share", "whatsapp", "email", "statement", "system"}
+
+
 class ExpectedOutcomeCreate(BaseModel):
     goal_id: str
     title: str = Field(min_length=1, max_length=200)
@@ -140,6 +218,7 @@ class ExpectedOutcomeCreate(BaseModel):
     deadline: str = ""
     status: str = "active"
     notes: str = ""
+    outcome_type: str = "generic"
 
 
 class ExpectedOutcomeUpdate(BaseModel):
@@ -150,6 +229,7 @@ class ExpectedOutcomeUpdate(BaseModel):
     deadline: Optional[str] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+    outcome_type: Optional[str] = None
 
 
 class ExpectedOutcomeResponse(BaseModel):
@@ -162,6 +242,7 @@ class ExpectedOutcomeResponse(BaseModel):
     deadline: str
     status: str
     notes: str
+    outcome_type: str
     created_at: str
     updated_at: str
 
@@ -215,6 +296,9 @@ class TaskCreate(BaseModel):
     origin: str = "standalone"
     expected_outcome_id: Optional[str] = None
     project_id: Optional[str] = None
+    assigned_to_type: str = "self"
+    assigned_to_name: str = ""
+    assigned_to_phone: str = ""
 
 
 class TaskUpdate(BaseModel):
@@ -223,6 +307,9 @@ class TaskUpdate(BaseModel):
     priority: Optional[str] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+    assigned_to_type: Optional[str] = None
+    assigned_to_name: Optional[str] = None
+    assigned_to_phone: Optional[str] = None
 
 
 class TaskResponse(BaseModel):
@@ -235,6 +322,9 @@ class TaskResponse(BaseModel):
     origin: str
     expected_outcome_id: Optional[str] = None
     project_id: Optional[str] = None
+    assigned_to_type: str
+    assigned_to_name: str
+    assigned_to_phone: str
     created_at: str
     updated_at: str
 
@@ -248,6 +338,9 @@ class FollowUpTask(BaseModel):
     due_date: str = ""
     priority: str = "medium"
     notes: str = ""
+    assigned_to_type: str = "self"
+    assigned_to_name: str = ""
+    assigned_to_phone: str = ""
 
 
 class CheckInCreate(BaseModel):
@@ -256,14 +349,13 @@ class CheckInCreate(BaseModel):
     date: str  # YYYY-MM-DD
     time: str  # HH:MM
     notes: str = ""
-    attachment: str = ""  # placeholder (data URL or reference)
-    # Goal check-in: linked via expected_outcome_id (which encodes the goal)
+    attachment: str = ""
     expected_outcome_id: Optional[str] = None
-    # Project check-in
     project_id: Optional[str] = None
-    task_id: Optional[str] = None  # optional task within project
-    # Optional follow-up task
+    task_id: Optional[str] = None
     follow_up_task: Optional[FollowUpTask] = None
+    source: str = "manual"
+    data: dict = Field(default_factory=dict)  # type-specific dynamic fields
 
 
 class CheckInUpdate(BaseModel):
@@ -272,6 +364,7 @@ class CheckInUpdate(BaseModel):
     time: Optional[str] = None
     notes: Optional[str] = None
     attachment: Optional[str] = None
+    data: Optional[dict] = None
 
 
 class CheckInResponse(BaseModel):
@@ -287,6 +380,9 @@ class CheckInResponse(BaseModel):
     project_id: Optional[str] = None
     task_id: Optional[str] = None
     follow_up_task_id: Optional[str] = None
+    source: str
+    outcome_type: Optional[str] = None
+    data: dict
     created_at: str
     updated_at: str
 
@@ -392,6 +488,7 @@ def expected_outcome_to_response(eo: dict) -> ExpectedOutcomeResponse:
         deadline=eo.get("deadline", "") or "",
         status=eo.get("status", "active"),
         notes=eo.get("notes", "") or "",
+        outcome_type=eo.get("outcome_type", "generic"),
         created_at=eo.get("created_at", ""),
         updated_at=eo.get("updated_at", ""),
     )
@@ -422,6 +519,9 @@ def task_to_response(t: dict) -> TaskResponse:
         origin=t.get("origin", "standalone"),
         expected_outcome_id=t.get("expected_outcome_id"),
         project_id=t.get("project_id"),
+        assigned_to_type=t.get("assigned_to_type", "self"),
+        assigned_to_name=t.get("assigned_to_name", "") or "",
+        assigned_to_phone=t.get("assigned_to_phone", "") or "",
         created_at=t.get("created_at", ""),
         updated_at=t.get("updated_at", ""),
     )
@@ -441,6 +541,9 @@ def checkin_to_response(c: dict) -> CheckInResponse:
         project_id=c.get("project_id"),
         task_id=c.get("task_id"),
         follow_up_task_id=c.get("follow_up_task_id"),
+        source=c.get("source", "manual"),
+        outcome_type=c.get("outcome_type"),
+        data=c.get("data") or {},
         created_at=c.get("created_at", ""),
         updated_at=c.get("updated_at", ""),
     )
@@ -767,6 +870,8 @@ async def list_expected_outcomes(goal_id: str, current_user: dict = Depends(get_
 async def create_expected_outcome(body: ExpectedOutcomeCreate, current_user: dict = Depends(get_current_user)):
     if body.status not in EXPECTED_OUTCOME_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(EXPECTED_OUTCOME_STATUSES)}")
+    if body.outcome_type not in VALID_OUTCOME_TYPES:
+        raise HTTPException(status_code=400, detail=f"Outcome type must be one of {sorted(VALID_OUTCOME_TYPES)}")
     g = await db.goals.find_one({"id": body.goal_id, "user_id": current_user["id"]})
     if not g:
         raise HTTPException(status_code=400, detail="Invalid goal")
@@ -785,6 +890,7 @@ async def create_expected_outcome(body: ExpectedOutcomeCreate, current_user: dic
         "deadline": (body.deadline or "").strip(),
         "status": body.status,
         "notes": (body.notes or "").strip(),
+        "outcome_type": body.outcome_type,
         "created_at": now,
         "updated_at": now,
     }
@@ -809,6 +915,8 @@ async def update_expected_outcome(eo_id: str, body: ExpectedOutcomeUpdate, curre
     updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
     if "status" in updates and updates["status"] not in EXPECTED_OUTCOME_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(EXPECTED_OUTCOME_STATUSES)}")
+    if "outcome_type" in updates and updates["outcome_type"] not in VALID_OUTCOME_TYPES:
+        raise HTTPException(status_code=400, detail=f"Outcome type must be one of {sorted(VALID_OUTCOME_TYPES)}")
     for k in ("title", "target_value", "current_value", "unit", "deadline", "notes"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
@@ -923,6 +1031,10 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(TASK_STATUSES)}")
     if body.priority not in TASK_PRIORITIES:
         raise HTTPException(status_code=400, detail=f"Priority must be one of {sorted(TASK_PRIORITIES)}")
+    if body.assigned_to_type not in TASK_ASSIGNMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"assigned_to_type must be one of {sorted(TASK_ASSIGNMENT_TYPES)}")
+    if body.assigned_to_type == "external" and not (body.assigned_to_name or body.assigned_to_phone):
+        raise HTTPException(status_code=400, detail="External assignment requires assigned_to_name or assigned_to_phone")
     await _validate_task_origin(current_user["id"], body.origin, body.expected_outcome_id, body.project_id)
     now = datetime.now(timezone.utc).isoformat()
     doc = {
@@ -936,6 +1048,9 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         "origin": body.origin,
         "expected_outcome_id": body.expected_outcome_id if body.origin == "expected_outcome" else None,
         "project_id": body.project_id if body.origin == "project" else None,
+        "assigned_to_type": body.assigned_to_type,
+        "assigned_to_name": (body.assigned_to_name or "").strip() if body.assigned_to_type == "external" else "",
+        "assigned_to_phone": (body.assigned_to_phone or "").strip() if body.assigned_to_type == "external" else "",
         "created_at": now,
         "updated_at": now,
     }
@@ -962,7 +1077,13 @@ async def update_task(task_id: str, body: TaskUpdate, current_user: dict = Depen
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(TASK_STATUSES)}")
     if "priority" in updates and updates["priority"] not in TASK_PRIORITIES:
         raise HTTPException(status_code=400, detail=f"Priority must be one of {sorted(TASK_PRIORITIES)}")
-    for k in ("title", "due_date", "notes"):
+    if "assigned_to_type" in updates and updates["assigned_to_type"] not in TASK_ASSIGNMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"assigned_to_type must be one of {sorted(TASK_ASSIGNMENT_TYPES)}")
+    if updates.get("assigned_to_type") == "self":
+        # Clear external contact when switching back to self.
+        updates["assigned_to_name"] = ""
+        updates["assigned_to_phone"] = ""
+    for k in ("title", "due_date", "notes", "assigned_to_name", "assigned_to_phone"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -983,6 +1104,8 @@ async def delete_task(task_id: str, current_user: dict = Depends(get_current_use
 async def _create_follow_up_task(user_id: str, ft: FollowUpTask, checkin_type: str, eo_id: Optional[str], project_id: Optional[str]) -> str:
     if ft.priority not in TASK_PRIORITIES:
         raise HTTPException(status_code=400, detail=f"Follow-up priority must be one of {sorted(TASK_PRIORITIES)}")
+    if ft.assigned_to_type not in TASK_ASSIGNMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"Follow-up assigned_to_type must be one of {sorted(TASK_ASSIGNMENT_TYPES)}")
     if checkin_type == "goal" and eo_id:
         origin = "expected_outcome"
     elif checkin_type == "project" and project_id:
@@ -1002,6 +1125,9 @@ async def _create_follow_up_task(user_id: str, ft: FollowUpTask, checkin_type: s
         "origin": origin,
         "expected_outcome_id": eo_id if origin == "expected_outcome" else None,
         "project_id": project_id if origin == "project" else None,
+        "assigned_to_type": ft.assigned_to_type,
+        "assigned_to_name": (ft.assigned_to_name or "").strip() if ft.assigned_to_type == "external" else "",
+        "assigned_to_phone": (ft.assigned_to_phone or "").strip() if ft.assigned_to_type == "external" else "",
         "created_at": now,
         "updated_at": now,
     })
@@ -1020,10 +1146,13 @@ async def list_checkins(current_user: dict = Depends(get_current_user)):
 async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_current_user)):
     if body.type not in CHECKIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Type must be one of {sorted(CHECKIN_TYPES)}")
+    if body.source not in CHECKIN_SOURCES:
+        raise HTTPException(status_code=400, detail=f"Source must be one of {sorted(CHECKIN_SOURCES)}")
     goal_id: Optional[str] = None
     expected_outcome_id: Optional[str] = None
     project_id: Optional[str] = None
     task_id: Optional[str] = None
+    outcome_type: Optional[str] = None
 
     if body.type == "goal":
         if not body.expected_outcome_id:
@@ -1032,7 +1161,17 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         if not eo:
             raise HTTPException(status_code=400, detail="Invalid expected outcome")
         expected_outcome_id = eo["id"]
-        goal_id = eo["goal_id"]  # goal linkage always via EO
+        goal_id = eo["goal_id"]
+        outcome_type = eo.get("outcome_type", "generic")
+        # Contextual validation: required fields for this outcome type must be present.
+        schema = OUTCOME_TYPE_REGISTRY.get(outcome_type, OUTCOME_TYPE_REGISTRY["generic"])
+        payload_data = body.data or {}
+        missing = [
+            f["key"] for f in schema.get("checkin_fields", [])
+            if f.get("required") and (payload_data.get(f["key"]) in (None, "", []))
+        ]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Missing required fields for outcome type '{outcome_type}': {missing}")
     elif body.type == "project":
         if not body.project_id:
             raise HTTPException(status_code=400, detail="Project check-in requires project_id")
@@ -1068,6 +1207,9 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         "project_id": project_id,
         "task_id": task_id,
         "follow_up_task_id": follow_up_task_id,
+        "source": body.source,
+        "outcome_type": outcome_type,
+        "data": body.data or {},
         "created_at": now,
         "updated_at": now,
     }
@@ -1105,6 +1247,13 @@ async def delete_checkin(checkin_id: str, current_user: dict = Depends(get_curre
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Check-in not found")
     return {"detail": "Check-in deleted"}
+
+
+# ---------- Outcome Type Registry Endpoint ----------
+@api_router.get("/outcome-types")
+async def get_outcome_types():
+    """Returns the metadata-driven Expected Outcome type registry."""
+    return {"types": OUTCOME_TYPE_REGISTRY}
 
 
 # ---------- App wiring ----------

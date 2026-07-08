@@ -147,4 +147,10 @@ export const api = {
     request<{ id: string }>(`/checkins/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteCheckin: (id: string) =>
     request<{ detail: string }>(`/checkins/${id}`, { method: "DELETE", auth: true }),
+
+  getOutcomeTypes: () =>
+    request<{ types: Record<string, { label: string; description: string; checkin_fields: { key: string; label: string; type: string; required?: boolean; options?: string[] }[]; units: string[]; progress: string }> }>(
+      "/outcome-types",
+      { auth: true },
+    ),
 };

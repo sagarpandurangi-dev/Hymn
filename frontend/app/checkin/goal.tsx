@@ -13,7 +13,8 @@ const nowDate = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d
 const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 
 type Goal = { id: string; title: string };
-type EO = { id: string; goal_id: string; title: string };
+type EO = { id: string; goal_id: string; title: string; outcome_type: string };
+type FieldDef = { key: string; label: string; type: string; required?: boolean; options?: string[] };
 
 export default function GoalCheckinScreen() {
   const router = useRouter();
@@ -21,6 +22,8 @@ export default function GoalCheckinScreen() {
   const [eos, setEos] = useState<EO[]>([]);
   const [goalId, setGoalId] = useState<string>("");
   const [eoId, setEoId] = useState<string>("");
+  const [registry, setRegistry] = useState<Record<string, { label: string; checkin_fields: FieldDef[] }>>({});
+  const [dynamicData, setDynamicData] = useState<Record<string, any>>({});
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(nowDate());
   const [time, setTime] = useState(nowTime());
@@ -34,45 +37,52 @@ export default function GoalCheckinScreen() {
   useEffect(() => {
     (async () => {
       try {
-        const gs = await api.listGoals();
+        const [gs, reg] = await Promise.all([api.listGoals(), api.getOutcomeTypes()]);
         setGoals(gs.map((g) => ({ id: g.id, title: g.title })));
+        setRegistry(reg.types as any);
         if (gs.length > 0) setGoalId(gs[0].id);
       } catch { /* ignore */ }
     })();
   }, []);
 
   useEffect(() => {
-    if (!goalId) return;
+    if (!goalId) { setEos([]); return; }
     (async () => {
       try {
         const list = await api.listExpectedOutcomes(goalId);
-        setEos(list.map((x) => ({ id: x.id, goal_id: x.goal_id, title: x.title })));
+        setEos(list.map((x) => ({ id: x.id, goal_id: x.goal_id, title: x.title, outcome_type: (x as any).outcome_type || "generic" })));
         setEoId(list[0]?.id || "");
-      } catch {
-        setEos([]); setEoId("");
-      }
+      } catch { setEos([]); setEoId(""); }
     })();
   }, [goalId]);
+
+  useEffect(() => { setDynamicData({}); }, [eoId]);
+
+  const selectedEO = eos.find((e) => e.id === eoId);
+  const outcomeType = selectedEO?.outcome_type || "generic";
+  const fields: FieldDef[] = registry[outcomeType]?.checkin_fields || [];
 
   const onSave = async () => {
     setError(null);
     if (!eoId) { setError("Add an expected outcome to this goal first."); return; }
     if (!title.trim()) { setError("Title is required."); return; }
+    const missing = fields.filter((f) => f.required && (dynamicData[f.key] === undefined || dynamicData[f.key] === "" || dynamicData[f.key] === null)).map((f) => f.label);
+    if (missing.length > 0) { setError(`Missing required fields: ${missing.join(", ")}`); return; }
     setBusy(true);
     try {
       const payload: any = {
         type: "goal", title: title.trim(), date, time, notes: notes.trim(),
-        attachment, expected_outcome_id: eoId,
+        attachment, expected_outcome_id: eoId, source: "manual", data: dynamicData,
       };
-      if (addFollowUp && followUpTitle.trim()) {
-        payload.follow_up_task = { title: followUpTitle.trim() };
-      }
+      if (addFollowUp && followUpTitle.trim()) payload.follow_up_task = { title: followUpTitle.trim() };
       await api.createCheckin(payload);
       router.back();
     } catch (e: any) {
       setError(e?.message || "Could not save");
     } finally { setBusy(false); }
   };
+
+  const setField = (k: string, v: any) => setDynamicData((prev) => ({ ...prev, [k]: v }));
 
   return (
     <SafeAreaView style={s.safe} edges={["top", "bottom"]}>
@@ -111,8 +121,54 @@ export default function GoalCheckinScreen() {
             </ScrollView>
           )}
 
+          {selectedEO ? (
+            <Text testID="goal-checkin-outcome-type-hint" style={{ marginTop: spacing.sm, fontSize: 11, color: colors.onSurfaceTertiary, letterSpacing: 1 }}>
+              TYPE · {outcomeType.replace("_", " ").toUpperCase()}
+            </Text>
+          ) : null}
+
           <Text style={s.label}>Title</Text>
           <TextInput style={s.titleInput} value={title} onChangeText={setTitle} placeholder="What did you do?" placeholderTextColor={colors.onSurfaceTertiary} testID="goal-checkin-title-input" />
+
+          {/* Dynamic contextual fields for the selected Outcome Type */}
+          {fields.map((f) => (
+            <View key={f.key} testID={`dyn-field-${f.key}`}>
+              <Text style={s.label}>{f.label}{f.required ? " *" : ""}</Text>
+              {f.type === "select" && f.options ? (
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
+                  {f.options.map((opt) => {
+                    const sel = dynamicData[f.key] === opt;
+                    return (
+                      <Pressable key={opt} onPress={() => setField(f.key, opt)} style={[s.chip, sel && s.chipSelected]} testID={`dyn-field-${f.key}-opt-${opt}`}>
+                        <Text style={[s.chipText, sel && s.chipTextSelected]}>{opt}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              ) : f.type === "textarea" ? (
+                <TextInput
+                  style={s.notes}
+                  value={dynamicData[f.key] || ""}
+                  onChangeText={(v) => setField(f.key, v)}
+                  multiline
+                  textAlignVertical="top"
+                  placeholder={f.label}
+                  placeholderTextColor={colors.onSurfaceTertiary}
+                  testID={`dyn-field-${f.key}-input`}
+                />
+              ) : (
+                <TextInput
+                  style={s.input}
+                  value={dynamicData[f.key] !== undefined ? String(dynamicData[f.key]) : ""}
+                  onChangeText={(v) => setField(f.key, f.type === "number" ? v.replace(/[^0-9.\-]/g, "") : v)}
+                  keyboardType={f.type === "number" ? "numeric" : "default"}
+                  placeholder={f.label}
+                  placeholderTextColor={colors.onSurfaceTertiary}
+                  testID={`dyn-field-${f.key}-input`}
+                />
+              )}
+            </View>
+          ))}
 
           <View style={{ flexDirection: "row", gap: spacing.md }}>
             <View style={{ flex: 1 }}>

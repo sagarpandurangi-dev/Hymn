@@ -19,6 +19,9 @@ export default function EditTaskScreen() {
         setInitial({
           title: t.title, due_date: t.due_date, priority: t.priority, status: t.status, notes: t.notes,
           origin: t.origin, expected_outcome_id: t.expected_outcome_id, project_id: t.project_id,
+          assigned_to_type: (t as any).assigned_to_type || "self",
+          assigned_to_name: (t as any).assigned_to_name || "",
+          assigned_to_phone: (t as any).assigned_to_phone || "",
         });
       } finally { setLoading(false); }
     })();

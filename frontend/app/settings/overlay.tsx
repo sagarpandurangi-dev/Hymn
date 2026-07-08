@@ -4,11 +4,36 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
-import { getOverlayPermissionStatus, isOverlayCapable, requestOverlayPermission, type OverlayPermissionStatus } from "@/src/lib/overlayPermission";
+import {
+  getOverlayPermissionStatus,
+  isOverlayCapable,
+  requestOverlayPermission,
+  setOverlayPermissionStatus,
+  type OverlayPermissionStatus,
+} from "@/src/lib/overlayPermission";
+
+function statusLabel(s: OverlayPermissionStatus): string {
+  switch (s) {
+    case "unsupported": return "Not supported on this platform";
+    case "supported":   return "Supported — permission not requested yet";
+    case "enabled":     return "Enabled";
+    case "disabled":    return "Disabled";
+    case "not_yet_supported": return "Not yet supported (native module pending)";
+    default: return "Unknown";
+  }
+}
+
+function statusColor(s: OverlayPermissionStatus): string {
+  if (s === "enabled") return colors.success;
+  if (s === "disabled") return colors.error;
+  if (s === "supported") return colors.warning;
+  return colors.onSurfaceTertiary;
+}
 
 export default function OverlaySettingsScreen() {
   const router = useRouter();
   const [status, setStatus] = useState<OverlayPermissionStatus>("unknown");
+  const capable = isOverlayCapable();
 
   const refresh = useCallback(async () => {
     setStatus(await getOverlayPermissionStatus());
@@ -16,12 +41,20 @@ export default function OverlaySettingsScreen() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const onRequest = async () => {
+  const onPrepare = async () => {
+    // Placeholder — real native flow lands with the overlay bubble ship.
     const next = await requestOverlayPermission();
     setStatus(next);
   };
 
-  const capable = isOverlayCapable();
+  const onMarkEnabled = async () => {
+    await setOverlayPermissionStatus("enabled");
+    await refresh();
+  };
+  const onMarkDisabled = async () => {
+    await setOverlayPermissionStatus("disabled");
+    await refresh();
+  };
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]} testID="overlay-settings-screen">
@@ -35,26 +68,40 @@ export default function OverlaySettingsScreen() {
 
       <View style={styles.body}>
         <Text style={styles.p}>
-          In a future update, Hymn can launch a Quick Check-in from anywhere on Android,
-          even when the full app is not open. This requires the &quot;Display over other apps&quot; permission.
+          Hymn is preparing an Android &quot;Display over other apps&quot; overlay so you
+          can launch a Quick Check-in from anywhere, without opening the full app.
         </Text>
 
         <View style={styles.statusBox} testID="overlay-status-box">
           <Text style={styles.label}>PLATFORM</Text>
-          <Text style={styles.value}>{capable ? "Android — supported" : "Not supported on this platform"}</Text>
+          <Text style={styles.value}>{capable ? "Android" : "Not Android"}</Text>
+
           <Text style={[styles.label, { marginTop: spacing.md }]}>STATUS</Text>
-          <Text style={styles.value}>{status.replace(/_/g, " ")}</Text>
+          <View style={styles.statusRow}>
+            <View style={[styles.dot, { backgroundColor: statusColor(status) }]} />
+            <Text style={styles.value} testID="overlay-status-value">{statusLabel(status)}</Text>
+          </View>
         </View>
 
         {capable && (
-          <Pressable style={styles.cta} onPress={onRequest} testID="overlay-request-button">
-            <Text style={styles.ctaText}>Prepare permission</Text>
-          </Pressable>
+          <>
+            <Pressable style={styles.cta} onPress={onPrepare} testID="overlay-request-button">
+              <Text style={styles.ctaText}>Prepare permission</Text>
+            </Pressable>
+            <View style={styles.debugRow}>
+              <Pressable style={styles.debugBtn} onPress={onMarkEnabled} testID="overlay-mark-enabled">
+                <Text style={styles.debugText}>Mark enabled</Text>
+              </Pressable>
+              <Pressable style={styles.debugBtn} onPress={onMarkDisabled} testID="overlay-mark-disabled">
+                <Text style={styles.debugText}>Mark disabled</Text>
+              </Pressable>
+            </View>
+          </>
         )}
 
         <Text style={styles.note}>
-          The overlay UI itself will ship in a later release. This screen only prepares
-          the permission flow so it is ready when the overlay feature lands.
+          The overlay bubble itself will ship in a future release. This page keeps the
+          permission flow persistent so it is ready when that lands.
         </Text>
       </View>
     </SafeAreaView>
@@ -69,8 +116,13 @@ const styles = StyleSheet.create({
   p: { fontSize: 14, color: colors.onSurfaceSecondary, lineHeight: 22 },
   statusBox: { backgroundColor: colors.surfaceSecondary, borderRadius: radius.md, padding: spacing.lg },
   label: { fontSize: 10, color: colors.onSurfaceTertiary, letterSpacing: 1.5 },
-  value: { fontSize: 14, color: colors.onSurface, marginTop: 4, textTransform: "capitalize" },
+  value: { fontSize: 14, color: colors.onSurface, marginTop: 4 },
+  statusRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 4 },
+  dot: { width: 8, height: 8, borderRadius: 4 },
   cta: { alignSelf: "flex-start", backgroundColor: colors.onSurface, paddingHorizontal: spacing.xl, paddingVertical: spacing.md, borderRadius: radius.pill },
   ctaText: { color: colors.onSurfaceInverse, fontWeight: "600" },
+  debugRow: { flexDirection: "row", gap: spacing.sm },
+  debugBtn: { backgroundColor: colors.surfaceSecondary, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderRadius: radius.pill },
+  debugText: { color: colors.onSurfaceSecondary, fontSize: 13 },
   note: { fontSize: 12, color: colors.onSurfaceTertiary, fontStyle: "italic" },
 });

@@ -1,0 +1,47 @@
+{
+  "summary": "Phase 2 core-model pivot verified end-to-end. BACKEND (23/23 NEW pytest tests PASSED in test_phase2_core.py + 49/51 regression tests PASSED — the 2 failures were transient ConnectTimeouts, not real bugs): (a) GET /api/outcome-types returns a 'types' object containing generic/weight/study/revenue/project_milestone/count, each with label/description/checkin_fields/units/progress; (b) POST /api/expected-outcomes with outcome_type='weight' persists (verified via GET), 'invalid_type' → 400, PUT switching to 'study' persists; (c) POST /api/checkins for a weight EO with data={value:78,unit:'kg'} → 201 and echoes outcome_type='weight'; missing 'value' → 400 mentioning 'value'; study EO missing duration_minutes → 400; generic EO with data={} → 201; (d) source defaults to 'manual' on stored doc, explicit 'whatsapp' persists, 'foo' → 400; life check-ins return outcome_type=null; (e) POST /api/tasks default returns assigned_to_type='self' with empty name/phone; external with name='Alex' → 201; external with neither name nor phone → 400; invalid type → 400; PUT switching back to 'self' clears name/phone; (f) follow_up_task with assigned_to_type='external' + assigned_to_name='Bob' creates task with those fields (verified via GET /api/tasks/{id}); (g) backward-compat: legacy docs missing new fields still deserialize via defaults (assigned_to_type→self, outcome_type→generic, source→manual, data→{}). FRONTEND (mobile 390x844, real login test@hymn.app / TestPass123!): Phase 1 sanity — tabs Today/Timeline/Finance/Me all render, floating + opens checkin-chooser-modal with chooser-goal/chooser-project/chooser-life. EO form on TEST_UI_Goal_K: all 6 type chips visible (add-eo-type-chip-generic/weight/study/revenue/project_milestone/count), selected 'weight' and saved successfully. Dynamic goal check-in: chose the new weight EO → goal-checkin-outcome-type-hint reads 'TYPE · WEIGHT', dyn-field-value-input rendered, dyn-field-unit-opt-kg and dyn-field-unit-opt-lb chips rendered. Saving with blank value surfaced a 'Value required' error; filling value=78 + kg + title saved and the check-in appears on Today's Recent Check-ins as TEST_p2_UI_wci_*. Task assignment: on /tasks → + the form shows add-task-assign-chip-self (default active) and add-task-assign-chip-external; switching to External reveals add-task-assign-name-input & add-task-assign-phone-input; saving with External + blank contact surfaced an error; filling name='Alex' saved. On task detail, task-detail-assignee reads 'Assigned to Alex'. Edit task, switched Assigned To back to Self, saved → detail now reads 'Assigned to you'. Overlay page: /settings/overlay renders overlay-settings-screen, overlay-status-value reads 'Not supported on this platform', overlay-back present; Android-only mark buttons correctly hidden on web. All acceptance criteria met.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "shadow-style-props", "issue": "Pre-existing web-only warning: '\"shadow*\" style props are deprecated. Use \"boxShadow\".' Not blocking. Reference: /app/frontend/app/(tabs)/_layout.tsx"},
+      {"component": "pointerEvents-prop", "issue": "Pre-existing web-only warning: 'props.pointerEvents is deprecated. Use style.pointerEvents'. Not blocking."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase2_core.py",
+    "/app/test_reports/pytest/phase2_core_results.xml"
+  ],
+  "action_items": [
+    "(Optional cosmetic) Migrate any remaining 'shadow*' style props and 'pointerEvents' prop usage to their newer forms to silence React Native Web console warnings — not blocking product functionality."
+  ],
+  "critical_code_review_comments": [
+    "server.py OUTCOME_TYPE_REGISTRY is truly metadata-driven — checkin validation reads schema['checkin_fields'] and enforces required=True at runtime, so adding a new type is a pure data change (no hardcoded engine).",
+    "check-in POST derives outcome_type from the referenced EO (never trusts client), so contextual validation cannot be bypassed by lying about type.",
+    "TaskUpdate correctly clears assigned_to_name/phone when switching back to 'self' (server-side) — matches the acceptance criteria and prevents stale contact data.",
+    "External assignment validation requires at least one of name OR phone — matches the spec ('name and phone' both being blank = error). Both name and phone independently satisfy the check.",
+    "CHECKIN_SOURCES = {manual, share, whatsapp, email, statement, system} — set-based validation returning a stable sorted list in the error message. Good pattern for the frontend to key off.",
+    "checkin_to_response uses c.get('source', 'manual'), c.get('outcome_type') and c.get('data') or {} — backward-compat with pre-Phase2 documents that don't yet have these keys.",
+    "task_to_response uses t.get('assigned_to_type', 'self') and defaults name/phone to '' — same backward-compat pattern.",
+    "expected_outcome_to_response defaults outcome_type to 'generic' — legacy EOs continue to work as generic without a data migration.",
+    "Frontend EO add page correctly persists the selected type chip and edit re-reads it (verified visually by save→reopen — the chip stays selected as 'Weight'.",
+    "Goal check-in dynamic form is generated from the EO's outcome_type registry entry, not a static form — verified by seeing WEIGHT hint + Value+Unit fields only after selecting a weight EO."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase2_core.py (NEW — 23 tests)"
+  ],
+  "success_rate": {
+    "backend": "23/23 new phase-2 tests (100%); 49/51 regression tests (2 transient network timeouts, not real failures)",
+    "frontend": "13/13 acceptance criteria executed (100%)"
+  },
+  "seed_data_creation": "Ephemeral TEST_p2_<hex>@hymn.app signup users via /api/auth/signup for backend tests. UI test artifacts on test@hymn.app: TEST_p2_UI_weight_<ts> (weight EO), TEST_p2_UI_wci_<ts> (weight check-in), TEST_p2_UI_task_<ts> (task with External→Self toggle). Kept in DB so main agent can visually re-verify.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "New testIDs verified this iteration: add-eo-type-chip-{generic|weight|study|revenue|project_milestone|count}, goal-checkin-outcome-type-hint, dyn-field-value-input, dyn-field-unit-opt-kg/-lb, dyn-field-duration_minutes-input, dyn-field-topic-input, add-task-assign-chip-self/-external, add-task-assign-name-input, add-task-assign-phone-input, edit-task-assign-chip-self/-external, edit-task-save-button, task-detail-assignee, task-detail-edit-button, overlay-status-value, overlay-back, overlay-settings-screen. Env var to run pytest: EXPO_PUBLIC_BACKEND_URL=https://personal-os-app-8.preview.emergentagent.com. Test file: /app/backend/tests/test_phase2_core.py.",
+  "rca_of_issue": "No product bugs. All Phase-2 core-model changes (outcome_type registry, dynamic check-in fields, source field, task assignment, follow-up assignment, backward-compat defaults) work as specified end-to-end. Only pre-existing React Native Web console warnings remain (shadow* props, pointerEvents prop) — cosmetic."
+}

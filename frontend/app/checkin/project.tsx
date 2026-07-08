@@ -58,7 +58,7 @@ export default function ProjectCheckinScreen() {
     if (!title.trim()) { setError("Title is required."); return; }
     setBusy(true);
     try {
-      const payload: any = { type: "project", title: title.trim(), date, time, notes: notes.trim(), attachment, project_id: projectId };
+      const payload: any = { type: "project", title: title.trim(), date, time, notes: notes.trim(), attachment, project_id: projectId, source: "manual" };
       if (taskId) payload.task_id = taskId;
       if (addFollowUp && followUpTitle.trim()) payload.follow_up_task = { title: followUpTitle.trim() };
       await api.createCheckin(payload);
