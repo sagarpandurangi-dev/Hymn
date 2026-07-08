@@ -1,0 +1,40 @@
+{
+  "summary": "Hymn core-model pivot tested end-to-end. BACKEND (pytest, 34/34 NEW tests PASSED in test_projects_eo_tasks_checkins.py): /api/events GET returns 404 (endpoint removed). Projects CRUD + invalid-status 400 + per-user isolation. Expected Outcomes: create requires valid goal (400 otherwise), invalid status 400, list scoped to goal owner (cross-user 404), PUT/DELETE, and 8th EO on same goal blocked with 400 containing 'at most 7'. Goal stats: GET /api/goals/{id} exposes expected_outcomes_total/expected_outcomes_completed/completion_pct — 0/0/0.0 initially, 2/0 after two EOs, 2/1/50.0 after one flipped to completed. Deleting a goal cascades: its EOs are removed. Tasks: standalone works, origin=expected_outcome requires valid EO (missing→400, bad→400) and valid EO→201, origin=project requires valid project (missing→400, bad→400) and valid project→201, invalid status/priority/origin→400, todo→done and todo→deferred persist, cross-user isolation. Check-ins: type=life standalone works, invalid type→400, type=goal requires expected_outcome_id (missing→400, bad→400) and returns goal_id derived from the EO, type=project requires project_id (missing→400, bad→400), task_id must belong to same project (cross-project task→400), list/get/put/delete per-user isolation. Follow-up task: goal check-in creates task with origin=expected_outcome & expected_outcome_id linked; project check-in→origin=project & project_id linked; life→origin=standalone. Persistence via list endpoints confirmed. FRONTEND (mobile 390x844, real login test@hymn.app / TestPass123!): Today card shows 'Recent Check-ins' (card-recent-checkins), NOT 'Today's Events'. Floating + (tab-add-event-button) opens checkin-chooser-modal with chooser-goal/chooser-project/chooser-life. Life flow: chooser-life → /checkin/life → title + save (life-checkin-save-button) → Timeline shows LIFE row. Project flow: Me → Projects → projects-add-button created TEST_UI_Proj_1 (visible on list); + → chooser-project → chip select + title + follow-up switch + follow-up title + save → Timeline shows PROJECT row; the follow-up task appears in Me → Tasks. Goal flow: created goal in Knowledge domain, opened detail (0/0 · 0%), goal-detail-add-eo → add-eo-title-input → save; detail updates to 0/1 · 0% (EXPECTED OUTCOMES section lists TEST_UI_EO_1); + → chooser-goal → goal-checkin-goal-chip + goal-checkin-eo-chip + title + save → Timeline shows GOAL row TEST_UI_GoalCi_1. Overlay screen: /settings/overlay renders overlay-settings-screen with PLATFORM 'Not Supported On This Platform' and STATUS 'Unsupported'; overlay-prepare-button correctly hidden on web. All flows working end-to-end. Only minor observation: pre-existing test_google_auth.py contains 3 tests hitting removed /events routes and will fail — main agent should either delete or update those specific tests (auth core still passes; the failures are only for legacy event assertions).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "N/A (test file)", "issue": "test_google_auth.py has 3 legacy tests (test_events_with_jwt, test_create_event_with_session_token, test_list_events_with_session_token) that hit removed /api/events routes and now fail. Auth-portion tests in the same file still pass."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "shadow-style-props", "issue": "Console warning: '\"shadow*\" style props are deprecated. Use \"boxShadow\".' Pre-existing web-only styling warning (React Native Web). Not blocking. Reference: /app/frontend/app/(tabs)/_layout.tsx"}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_projects_eo_tasks_checkins.py",
+    "/app/test_reports/pytest/projects_eo_tasks_checkins_results.xml"
+  ],
+  "action_items": [
+    "Delete or update the 3 legacy event tests in /app/backend/tests/test_google_auth.py (test_events_with_jwt, test_create_event_with_session_token, test_list_events_with_session_token) — /api/events was removed intentionally as part of this pivot."
+  ],
+  "critical_code_review_comments": [
+    "server.py: check-in POST derives goal_id from the referenced EO (never accepts a raw goal_id) — matches the architectural rule 'check-ins never link directly to a goal'. Verified via test_goal_checkin_valid_returns_goal_id.",
+    "MAX_EXPECTED_OUTCOMES_PER_GOAL enforced with count_documents before insert — race-safe enough for single-user CRUD; message includes the number 7 so the frontend hint is stable.",
+    "delete_goal cascades to expected_outcomes only. Follow-up tasks and standalone tasks tied to an EO are NOT cleaned up when the goal is deleted; consider whether tasks with origin=expected_outcome referencing a deleted EO should be re-tagged/deleted (future concern, not a blocker for MVP).",
+    "_create_follow_up_task correctly derives origin from checkin_type + linked ids (goal+eo→expected_outcome, project+project_id→project, else standalone).",
+    "Cross-user isolation is uniform: every find/update/delete is scoped by {id, user_id}, collapsing 'not yours' and 'not found' into 404. Verified for projects, EOs, tasks, check-ins.",
+    "Frontend: overlay screen guards the 'Prepare permission' button with a Platform.OS check — the button is not rendered on web (confirmed).",
+    "Frontend Today card renders 'Recent Check-ins' via card-recent-checkins and links to Timeline — legacy 'Today's Events' string is gone."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "34/34 new tests (100%)", "frontend": "18/18 acceptance steps executed (100%)"},
+  "seed_data_creation": "Ephemeral TEST_core_a_<hex>@hymn.app / TEST_core_b_<hex>@hymn.app users via /api/auth/signup. UI test artifacts on test@hymn.app: TEST_UI_Proj_1 (project), TEST_UI_Goal_K (goal) with TEST_UI_EO_1 (EO), TEST_UI_Life_1 / TEST_UI_ProjCi_1 / TEST_UI_GoalCi_1 (check-ins), TEST_UI_FT / TEST_UI_Task_STD (tasks). Left in DB intentionally so main agent can visually re-verify.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Verified testIDs: tab-add-event-button, checkin-chooser-modal, chooser-goal/chooser-project/chooser-life, card-recent-checkins, life-checkin-title-input/life-checkin-save-button, project-checkin-project-chip-<id>/project-checkin-title-input/project-checkin-followup-switch/project-checkin-followup-title-input/project-checkin-save-button, goal-checkin-goal-chip-<id>/goal-checkin-eo-chip-<id>/goal-checkin-title-input/goal-checkin-save-button, projects-add-button/add-project-title-input/add-project-save-button, tasks-add-button/add-task-title-input/add-task-save-button, goal-detail-add-eo/add-eo-title-input/add-eo-save-button, overlay-settings-screen. Env var to run pytest: EXPO_PUBLIC_BACKEND_URL=https://personal-os-app-8.preview.emergentagent.com. Login screen uses sign-in-email-input/sign-in-password-input/sign-in-submit-button (NOT login-*).",
+  "rca_of_issue": "No product bugs. Only pre-existing legacy event tests in test_google_auth.py need clean-up (they were left behind when /api/events was removed)."
+}

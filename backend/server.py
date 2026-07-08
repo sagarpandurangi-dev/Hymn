@@ -73,33 +73,6 @@ class TokenResponse(BaseModel):
     user: UserResponse
 
 
-class EventCreate(BaseModel):
-    type: str = Field(min_length=1)
-    title: str = Field(min_length=1)
-    date: str  # YYYY-MM-DD
-    time: str  # HH:MM
-    notes: Optional[str] = ""
-
-
-class EventUpdate(BaseModel):
-    type: Optional[str] = None
-    title: Optional[str] = None
-    date: Optional[str] = None
-    time: Optional[str] = None
-    notes: Optional[str] = None
-
-
-class EventResponse(BaseModel):
-    id: str
-    type: str
-    title: str
-    date: str
-    time: str
-    notes: str
-    created_at: str
-    updated_at: str
-
-
 class DomainCreate(BaseModel):
     name: str = Field(min_length=1, max_length=60)
 
@@ -146,6 +119,174 @@ class GoalResponse(BaseModel):
     deadline: str
     status: str
     notes: str
+    created_at: str
+    updated_at: str
+    expected_outcomes_total: int = 0
+    expected_outcomes_completed: int = 0
+    completion_pct: float = 0.0
+
+
+# ---------- Expected Outcome ----------
+EXPECTED_OUTCOME_STATUSES = {"active", "paused", "completed", "abandoned"}
+MAX_EXPECTED_OUTCOMES_PER_GOAL = 7
+
+
+class ExpectedOutcomeCreate(BaseModel):
+    goal_id: str
+    title: str = Field(min_length=1, max_length=200)
+    target_value: str = ""
+    current_value: str = ""
+    unit: str = ""
+    deadline: str = ""
+    status: str = "active"
+    notes: str = ""
+
+
+class ExpectedOutcomeUpdate(BaseModel):
+    title: Optional[str] = None
+    target_value: Optional[str] = None
+    current_value: Optional[str] = None
+    unit: Optional[str] = None
+    deadline: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ExpectedOutcomeResponse(BaseModel):
+    id: str
+    goal_id: str
+    title: str
+    target_value: str
+    current_value: str
+    unit: str
+    deadline: str
+    status: str
+    notes: str
+    created_at: str
+    updated_at: str
+
+
+# ---------- Project ----------
+PROJECT_STATUSES = {"active", "paused", "completed", "abandoned"}
+
+
+class ProjectCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    status: str = "active"
+    start_date: str = ""
+    target_end_date: str = ""
+    notes: str = ""
+
+
+class ProjectUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    start_date: Optional[str] = None
+    target_end_date: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class ProjectResponse(BaseModel):
+    id: str
+    title: str
+    description: str
+    status: str
+    start_date: str
+    target_end_date: str
+    notes: str
+    created_at: str
+    updated_at: str
+
+
+# ---------- Task ----------
+TASK_STATUSES = {"todo", "done", "deferred"}
+TASK_PRIORITIES = {"low", "medium", "high"}
+TASK_ORIGINS = {"expected_outcome", "project", "standalone"}
+
+
+class TaskCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    due_date: str = ""
+    priority: str = "medium"
+    status: str = "todo"
+    notes: str = ""
+    origin: str = "standalone"
+    expected_outcome_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+class TaskUpdate(BaseModel):
+    title: Optional[str] = None
+    due_date: Optional[str] = None
+    priority: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class TaskResponse(BaseModel):
+    id: str
+    title: str
+    due_date: str
+    priority: str
+    status: str
+    notes: str
+    origin: str
+    expected_outcome_id: Optional[str] = None
+    project_id: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+# ---------- Check-in ----------
+CHECKIN_TYPES = {"goal", "project", "life"}
+
+
+class FollowUpTask(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    due_date: str = ""
+    priority: str = "medium"
+    notes: str = ""
+
+
+class CheckInCreate(BaseModel):
+    type: str  # goal | project | life
+    title: str = Field(min_length=1, max_length=200)
+    date: str  # YYYY-MM-DD
+    time: str  # HH:MM
+    notes: str = ""
+    attachment: str = ""  # placeholder (data URL or reference)
+    # Goal check-in: linked via expected_outcome_id (which encodes the goal)
+    expected_outcome_id: Optional[str] = None
+    # Project check-in
+    project_id: Optional[str] = None
+    task_id: Optional[str] = None  # optional task within project
+    # Optional follow-up task
+    follow_up_task: Optional[FollowUpTask] = None
+
+
+class CheckInUpdate(BaseModel):
+    title: Optional[str] = None
+    date: Optional[str] = None
+    time: Optional[str] = None
+    notes: Optional[str] = None
+    attachment: Optional[str] = None
+
+
+class CheckInResponse(BaseModel):
+    id: str
+    type: str
+    title: str
+    date: str
+    time: str
+    notes: str
+    attachment: str
+    expected_outcome_id: Optional[str] = None
+    goal_id: Optional[str] = None
+    project_id: Optional[str] = None
+    task_id: Optional[str] = None
+    follow_up_task_id: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -201,19 +342,6 @@ def user_to_response(u: dict) -> UserResponse:
     return UserResponse(id=u["id"], email=u["email"])
 
 
-def event_to_response(e: dict) -> EventResponse:
-    return EventResponse(
-        id=e["id"],
-        type=e.get("type", ""),
-        title=e.get("title", ""),
-        date=e.get("date", ""),
-        time=e.get("time", ""),
-        notes=e.get("notes", "") or "",
-        created_at=e.get("created_at", ""),
-        updated_at=e.get("updated_at", ""),
-    )
-
-
 def domain_to_response(d: dict) -> DomainResponse:
     return DomainResponse(
         id=d["id"],
@@ -223,7 +351,11 @@ def domain_to_response(d: dict) -> DomainResponse:
     )
 
 
-def goal_to_response(g: dict, domain_name: str) -> GoalResponse:
+def goal_to_response(g: dict, domain_name: str, stats: Optional[dict] = None) -> GoalResponse:
+    st = stats or {"total": 0, "completed": 0}
+    total = int(st.get("total", 0))
+    completed = int(st.get("completed", 0))
+    pct = round((completed / total) * 100, 1) if total > 0 else 0.0
     return GoalResponse(
         id=g["id"],
         title=g.get("title", ""),
@@ -235,6 +367,82 @@ def goal_to_response(g: dict, domain_name: str) -> GoalResponse:
         notes=g.get("notes", "") or "",
         created_at=g.get("created_at", ""),
         updated_at=g.get("updated_at", ""),
+        expected_outcomes_total=total,
+        expected_outcomes_completed=completed,
+        completion_pct=pct,
+    )
+
+
+async def compute_goal_stats(user_id: str, goal_id: str) -> dict:
+    total = await db.expected_outcomes.count_documents({"user_id": user_id, "goal_id": goal_id})
+    completed = await db.expected_outcomes.count_documents({
+        "user_id": user_id, "goal_id": goal_id, "status": "completed",
+    })
+    return {"total": total, "completed": completed}
+
+
+def expected_outcome_to_response(eo: dict) -> ExpectedOutcomeResponse:
+    return ExpectedOutcomeResponse(
+        id=eo["id"],
+        goal_id=eo.get("goal_id", ""),
+        title=eo.get("title", ""),
+        target_value=eo.get("target_value", "") or "",
+        current_value=eo.get("current_value", "") or "",
+        unit=eo.get("unit", "") or "",
+        deadline=eo.get("deadline", "") or "",
+        status=eo.get("status", "active"),
+        notes=eo.get("notes", "") or "",
+        created_at=eo.get("created_at", ""),
+        updated_at=eo.get("updated_at", ""),
+    )
+
+
+def project_to_response(p: dict) -> ProjectResponse:
+    return ProjectResponse(
+        id=p["id"],
+        title=p.get("title", ""),
+        description=p.get("description", "") or "",
+        status=p.get("status", "active"),
+        start_date=p.get("start_date", "") or "",
+        target_end_date=p.get("target_end_date", "") or "",
+        notes=p.get("notes", "") or "",
+        created_at=p.get("created_at", ""),
+        updated_at=p.get("updated_at", ""),
+    )
+
+
+def task_to_response(t: dict) -> TaskResponse:
+    return TaskResponse(
+        id=t["id"],
+        title=t.get("title", ""),
+        due_date=t.get("due_date", "") or "",
+        priority=t.get("priority", "medium"),
+        status=t.get("status", "todo"),
+        notes=t.get("notes", "") or "",
+        origin=t.get("origin", "standalone"),
+        expected_outcome_id=t.get("expected_outcome_id"),
+        project_id=t.get("project_id"),
+        created_at=t.get("created_at", ""),
+        updated_at=t.get("updated_at", ""),
+    )
+
+
+def checkin_to_response(c: dict) -> CheckInResponse:
+    return CheckInResponse(
+        id=c["id"],
+        type=c.get("type", "life"),
+        title=c.get("title", ""),
+        date=c.get("date", ""),
+        time=c.get("time", ""),
+        notes=c.get("notes", "") or "",
+        attachment=c.get("attachment", "") or "",
+        expected_outcome_id=c.get("expected_outcome_id"),
+        goal_id=c.get("goal_id"),
+        project_id=c.get("project_id"),
+        task_id=c.get("task_id"),
+        follow_up_task_id=c.get("follow_up_task_id"),
+        created_at=c.get("created_at", ""),
+        updated_at=c.get("updated_at", ""),
     )
 
 
@@ -392,69 +600,6 @@ async def google_session(body: GoogleSessionRequest):
     return TokenResponse(access_token=verified_token, user=UserResponse(id=user_id, email=email))
 
 
-# ---------- Event Routes ----------
-@api_router.get("/events", response_model=List[EventResponse])
-async def list_events(current_user: dict = Depends(get_current_user)):
-    cursor = db.events.find({"user_id": current_user["id"]}, {"_id": 0})
-    docs = await cursor.to_list(length=1000)
-    docs.sort(key=lambda e: (e.get("date", ""), e.get("time", "")), reverse=True)
-    return [event_to_response(d) for d in docs]
-
-
-@api_router.post("/events", response_model=EventResponse, status_code=201)
-async def create_event(body: EventCreate, current_user: dict = Depends(get_current_user)):
-    now = datetime.now(timezone.utc).isoformat()
-    event_id = str(uuid.uuid4())
-    doc = {
-        "id": event_id,
-        "user_id": current_user["id"],
-        "type": body.type.strip(),
-        "title": body.title.strip(),
-        "date": body.date,
-        "time": body.time,
-        "notes": (body.notes or "").strip(),
-        "created_at": now,
-        "updated_at": now,
-    }
-    await db.events.insert_one(doc)
-    doc.pop("_id", None)
-    return event_to_response(doc)
-
-
-@api_router.get("/events/{event_id}", response_model=EventResponse)
-async def get_event(event_id: str, current_user: dict = Depends(get_current_user)):
-    doc = await db.events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Event not found")
-    return event_to_response(doc)
-
-
-@api_router.put("/events/{event_id}", response_model=EventResponse)
-async def update_event(event_id: str, body: EventUpdate, current_user: dict = Depends(get_current_user)):
-    doc = await db.events.find_one({"id": event_id, "user_id": current_user["id"]})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Event not found")
-    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
-    if "title" in updates:
-        updates["title"] = updates["title"].strip()
-    if "type" in updates:
-        updates["type"] = updates["type"].strip()
-    if "notes" in updates:
-        updates["notes"] = updates["notes"].strip()
-    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.events.update_one({"id": event_id, "user_id": current_user["id"]}, {"$set": updates})
-    updated = await db.events.find_one({"id": event_id}, {"_id": 0})
-    return event_to_response(updated)
-
-
-@api_router.delete("/events/{event_id}", status_code=200)
-async def delete_event(event_id: str, current_user: dict = Depends(get_current_user)):
-    result = await db.events.delete_one({"id": event_id, "user_id": current_user["id"]})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Event not found")
-    return {"detail": "Event deleted"}
-
-
 # ---------- Domain Routes ----------
 @api_router.get("/domains", response_model=List[DomainResponse])
 async def list_domains(current_user: dict = Depends(get_current_user)):
@@ -528,11 +673,14 @@ async def _resolve_domain_name(user_id: str, domain_id: str) -> str:
 async def list_goals(current_user: dict = Depends(get_current_user)):
     cursor = db.goals.find({"user_id": current_user["id"]}, {"_id": 0})
     goals = await cursor.to_list(length=1000)
-    # Prefetch domain names for the user.
     dcursor = db.domains.find({"user_id": current_user["id"]}, {"_id": 0, "id": 1, "name": 1})
     domain_map = {d["id"]: d["name"] for d in await dcursor.to_list(length=1000)}
     goals.sort(key=lambda g: g.get("created_at", ""), reverse=True)
-    return [goal_to_response(g, domain_map.get(g.get("domain_id", ""), "")) for g in goals]
+    result = []
+    for g in goals:
+        stats = await compute_goal_stats(current_user["id"], g["id"])
+        result.append(goal_to_response(g, domain_map.get(g.get("domain_id", ""), ""), stats))
+    return result
 
 
 @api_router.post("/goals", response_model=GoalResponse, status_code=201)
@@ -557,7 +705,7 @@ async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current
     }
     await db.goals.insert_one(doc)
     doc.pop("_id", None)
-    return goal_to_response(doc, domain.get("name", ""))
+    return goal_to_response(doc, domain.get("name", ""), {"total": 0, "completed": 0})
 
 
 @api_router.get("/goals/{goal_id}", response_model=GoalResponse)
@@ -566,7 +714,8 @@ async def get_goal(goal_id: str, current_user: dict = Depends(get_current_user))
     if not g:
         raise HTTPException(status_code=404, detail="Goal not found")
     name = await _resolve_domain_name(current_user["id"], g.get("domain_id", ""))
-    return goal_to_response(g, name)
+    stats = await compute_goal_stats(current_user["id"], goal_id)
+    return goal_to_response(g, name, stats)
 
 
 @api_router.put("/goals/{goal_id}", response_model=GoalResponse)
@@ -588,7 +737,8 @@ async def update_goal(goal_id: str, body: GoalUpdate, current_user: dict = Depen
     await db.goals.update_one({"id": goal_id, "user_id": current_user["id"]}, {"$set": updates})
     updated = await db.goals.find_one({"id": goal_id}, {"_id": 0})
     name = await _resolve_domain_name(current_user["id"], updated.get("domain_id", ""))
-    return goal_to_response(updated, name)
+    stats = await compute_goal_stats(current_user["id"], goal_id)
+    return goal_to_response(updated, name, stats)
 
 
 @api_router.delete("/goals/{goal_id}", status_code=200)
@@ -596,7 +746,365 @@ async def delete_goal(goal_id: str, current_user: dict = Depends(get_current_use
     result = await db.goals.delete_one({"id": goal_id, "user_id": current_user["id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Goal not found")
+    # Cascade cleanup — expected outcomes belong to the goal.
+    await db.expected_outcomes.delete_many({"user_id": current_user["id"], "goal_id": goal_id})
     return {"detail": "Goal deleted"}
+
+
+# ---------- Expected Outcome Routes ----------
+@api_router.get("/goals/{goal_id}/expected-outcomes", response_model=List[ExpectedOutcomeResponse])
+async def list_expected_outcomes(goal_id: str, current_user: dict = Depends(get_current_user)):
+    g = await db.goals.find_one({"id": goal_id, "user_id": current_user["id"]})
+    if not g:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    cursor = db.expected_outcomes.find({"user_id": current_user["id"], "goal_id": goal_id}, {"_id": 0})
+    docs = await cursor.to_list(length=100)
+    docs.sort(key=lambda x: x.get("created_at", ""))
+    return [expected_outcome_to_response(d) for d in docs]
+
+
+@api_router.post("/expected-outcomes", response_model=ExpectedOutcomeResponse, status_code=201)
+async def create_expected_outcome(body: ExpectedOutcomeCreate, current_user: dict = Depends(get_current_user)):
+    if body.status not in EXPECTED_OUTCOME_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(EXPECTED_OUTCOME_STATUSES)}")
+    g = await db.goals.find_one({"id": body.goal_id, "user_id": current_user["id"]})
+    if not g:
+        raise HTTPException(status_code=400, detail="Invalid goal")
+    existing = await db.expected_outcomes.count_documents({"user_id": current_user["id"], "goal_id": body.goal_id})
+    if existing >= MAX_EXPECTED_OUTCOMES_PER_GOAL:
+        raise HTTPException(status_code=400, detail=f"A goal can have at most {MAX_EXPECTED_OUTCOMES_PER_GOAL} expected outcomes")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "goal_id": body.goal_id,
+        "title": body.title.strip(),
+        "target_value": (body.target_value or "").strip(),
+        "current_value": (body.current_value or "").strip(),
+        "unit": (body.unit or "").strip(),
+        "deadline": (body.deadline or "").strip(),
+        "status": body.status,
+        "notes": (body.notes or "").strip(),
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.expected_outcomes.insert_one(doc)
+    doc.pop("_id", None)
+    return expected_outcome_to_response(doc)
+
+
+@api_router.get("/expected-outcomes/{eo_id}", response_model=ExpectedOutcomeResponse)
+async def get_expected_outcome(eo_id: str, current_user: dict = Depends(get_current_user)):
+    eo = await db.expected_outcomes.find_one({"id": eo_id, "user_id": current_user["id"]}, {"_id": 0})
+    if not eo:
+        raise HTTPException(status_code=404, detail="Expected outcome not found")
+    return expected_outcome_to_response(eo)
+
+
+@api_router.put("/expected-outcomes/{eo_id}", response_model=ExpectedOutcomeResponse)
+async def update_expected_outcome(eo_id: str, body: ExpectedOutcomeUpdate, current_user: dict = Depends(get_current_user)):
+    eo = await db.expected_outcomes.find_one({"id": eo_id, "user_id": current_user["id"]})
+    if not eo:
+        raise HTTPException(status_code=404, detail="Expected outcome not found")
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if "status" in updates and updates["status"] not in EXPECTED_OUTCOME_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(EXPECTED_OUTCOME_STATUSES)}")
+    for k in ("title", "target_value", "current_value", "unit", "deadline", "notes"):
+        if k in updates and isinstance(updates[k], str):
+            updates[k] = updates[k].strip()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.expected_outcomes.update_one({"id": eo_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.expected_outcomes.find_one({"id": eo_id}, {"_id": 0})
+    return expected_outcome_to_response(updated)
+
+
+@api_router.delete("/expected-outcomes/{eo_id}", status_code=200)
+async def delete_expected_outcome(eo_id: str, current_user: dict = Depends(get_current_user)):
+    result = await db.expected_outcomes.delete_one({"id": eo_id, "user_id": current_user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Expected outcome not found")
+    return {"detail": "Expected outcome deleted"}
+
+
+# ---------- Project Routes ----------
+@api_router.get("/projects", response_model=List[ProjectResponse])
+async def list_projects(current_user: dict = Depends(get_current_user)):
+    cursor = db.projects.find({"user_id": current_user["id"]}, {"_id": 0})
+    docs = await cursor.to_list(length=1000)
+    docs.sort(key=lambda p: p.get("created_at", ""), reverse=True)
+    return [project_to_response(d) for d in docs]
+
+
+@api_router.post("/projects", response_model=ProjectResponse, status_code=201)
+async def create_project(body: ProjectCreate, current_user: dict = Depends(get_current_user)):
+    if body.status not in PROJECT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(PROJECT_STATUSES)}")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "title": body.title.strip(),
+        "description": (body.description or "").strip(),
+        "status": body.status,
+        "start_date": (body.start_date or "").strip(),
+        "target_end_date": (body.target_end_date or "").strip(),
+        "notes": (body.notes or "").strip(),
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.projects.insert_one(doc)
+    doc.pop("_id", None)
+    return project_to_response(doc)
+
+
+@api_router.get("/projects/{project_id}", response_model=ProjectResponse)
+async def get_project(project_id: str, current_user: dict = Depends(get_current_user)):
+    doc = await db.projects.find_one({"id": project_id, "user_id": current_user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project_to_response(doc)
+
+
+@api_router.put("/projects/{project_id}", response_model=ProjectResponse)
+async def update_project(project_id: str, body: ProjectUpdate, current_user: dict = Depends(get_current_user)):
+    p = await db.projects.find_one({"id": project_id, "user_id": current_user["id"]})
+    if not p:
+        raise HTTPException(status_code=404, detail="Project not found")
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if "status" in updates and updates["status"] not in PROJECT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(PROJECT_STATUSES)}")
+    for k in ("title", "description", "start_date", "target_end_date", "notes"):
+        if k in updates and isinstance(updates[k], str):
+            updates[k] = updates[k].strip()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.projects.update_one({"id": project_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.projects.find_one({"id": project_id}, {"_id": 0})
+    return project_to_response(updated)
+
+
+@api_router.delete("/projects/{project_id}", status_code=200)
+async def delete_project(project_id: str, current_user: dict = Depends(get_current_user)):
+    result = await db.projects.delete_one({"id": project_id, "user_id": current_user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"detail": "Project deleted"}
+
+
+# ---------- Task Routes ----------
+async def _validate_task_origin(user_id: str, origin: str, eo_id: Optional[str], project_id: Optional[str]):
+    if origin not in TASK_ORIGINS:
+        raise HTTPException(status_code=400, detail=f"Origin must be one of {sorted(TASK_ORIGINS)}")
+    if origin == "expected_outcome":
+        if not eo_id:
+            raise HTTPException(status_code=400, detail="expected_outcome_id required")
+        eo = await db.expected_outcomes.find_one({"id": eo_id, "user_id": user_id})
+        if not eo:
+            raise HTTPException(status_code=400, detail="Invalid expected outcome")
+    elif origin == "project":
+        if not project_id:
+            raise HTTPException(status_code=400, detail="project_id required")
+        p = await db.projects.find_one({"id": project_id, "user_id": user_id})
+        if not p:
+            raise HTTPException(status_code=400, detail="Invalid project")
+
+
+@api_router.get("/tasks", response_model=List[TaskResponse])
+async def list_tasks(current_user: dict = Depends(get_current_user)):
+    q: dict = {"user_id": current_user["id"]}
+    cursor = db.tasks.find(q, {"_id": 0})
+    docs = await cursor.to_list(length=1000)
+    docs.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+    return [task_to_response(d) for d in docs]
+
+
+@api_router.post("/tasks", response_model=TaskResponse, status_code=201)
+async def create_task(body: TaskCreate, current_user: dict = Depends(get_current_user)):
+    if body.status not in TASK_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(TASK_STATUSES)}")
+    if body.priority not in TASK_PRIORITIES:
+        raise HTTPException(status_code=400, detail=f"Priority must be one of {sorted(TASK_PRIORITIES)}")
+    await _validate_task_origin(current_user["id"], body.origin, body.expected_outcome_id, body.project_id)
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "title": body.title.strip(),
+        "due_date": (body.due_date or "").strip(),
+        "priority": body.priority,
+        "status": body.status,
+        "notes": (body.notes or "").strip(),
+        "origin": body.origin,
+        "expected_outcome_id": body.expected_outcome_id if body.origin == "expected_outcome" else None,
+        "project_id": body.project_id if body.origin == "project" else None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.tasks.insert_one(doc)
+    doc.pop("_id", None)
+    return task_to_response(doc)
+
+
+@api_router.get("/tasks/{task_id}", response_model=TaskResponse)
+async def get_task(task_id: str, current_user: dict = Depends(get_current_user)):
+    doc = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task_to_response(doc)
+
+
+@api_router.put("/tasks/{task_id}", response_model=TaskResponse)
+async def update_task(task_id: str, body: TaskUpdate, current_user: dict = Depends(get_current_user)):
+    t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if "status" in updates and updates["status"] not in TASK_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(TASK_STATUSES)}")
+    if "priority" in updates and updates["priority"] not in TASK_PRIORITIES:
+        raise HTTPException(status_code=400, detail=f"Priority must be one of {sorted(TASK_PRIORITIES)}")
+    for k in ("title", "due_date", "notes"):
+        if k in updates and isinstance(updates[k], str):
+            updates[k] = updates[k].strip()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.tasks.update_one({"id": task_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    return task_to_response(updated)
+
+
+@api_router.delete("/tasks/{task_id}", status_code=200)
+async def delete_task(task_id: str, current_user: dict = Depends(get_current_user)):
+    result = await db.tasks.delete_one({"id": task_id, "user_id": current_user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"detail": "Task deleted"}
+
+
+# ---------- Check-in Routes ----------
+async def _create_follow_up_task(user_id: str, ft: FollowUpTask, checkin_type: str, eo_id: Optional[str], project_id: Optional[str]) -> str:
+    if ft.priority not in TASK_PRIORITIES:
+        raise HTTPException(status_code=400, detail=f"Follow-up priority must be one of {sorted(TASK_PRIORITIES)}")
+    if checkin_type == "goal" and eo_id:
+        origin = "expected_outcome"
+    elif checkin_type == "project" and project_id:
+        origin = "project"
+    else:
+        origin = "standalone"
+    now = datetime.now(timezone.utc).isoformat()
+    task_id = str(uuid.uuid4())
+    await db.tasks.insert_one({
+        "id": task_id,
+        "user_id": user_id,
+        "title": ft.title.strip(),
+        "due_date": (ft.due_date or "").strip(),
+        "priority": ft.priority,
+        "status": "todo",
+        "notes": (ft.notes or "").strip(),
+        "origin": origin,
+        "expected_outcome_id": eo_id if origin == "expected_outcome" else None,
+        "project_id": project_id if origin == "project" else None,
+        "created_at": now,
+        "updated_at": now,
+    })
+    return task_id
+
+
+@api_router.get("/checkins", response_model=List[CheckInResponse])
+async def list_checkins(current_user: dict = Depends(get_current_user)):
+    cursor = db.checkins.find({"user_id": current_user["id"]}, {"_id": 0})
+    docs = await cursor.to_list(length=1000)
+    docs.sort(key=lambda c: (c.get("date", ""), c.get("time", "")), reverse=True)
+    return [checkin_to_response(d) for d in docs]
+
+
+@api_router.post("/checkins", response_model=CheckInResponse, status_code=201)
+async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_current_user)):
+    if body.type not in CHECKIN_TYPES:
+        raise HTTPException(status_code=400, detail=f"Type must be one of {sorted(CHECKIN_TYPES)}")
+    goal_id: Optional[str] = None
+    expected_outcome_id: Optional[str] = None
+    project_id: Optional[str] = None
+    task_id: Optional[str] = None
+
+    if body.type == "goal":
+        if not body.expected_outcome_id:
+            raise HTTPException(status_code=400, detail="Goal check-in requires expected_outcome_id")
+        eo = await db.expected_outcomes.find_one({"id": body.expected_outcome_id, "user_id": current_user["id"]})
+        if not eo:
+            raise HTTPException(status_code=400, detail="Invalid expected outcome")
+        expected_outcome_id = eo["id"]
+        goal_id = eo["goal_id"]  # goal linkage always via EO
+    elif body.type == "project":
+        if not body.project_id:
+            raise HTTPException(status_code=400, detail="Project check-in requires project_id")
+        p = await db.projects.find_one({"id": body.project_id, "user_id": current_user["id"]})
+        if not p:
+            raise HTTPException(status_code=400, detail="Invalid project")
+        project_id = p["id"]
+        if body.task_id:
+            t = await db.tasks.find_one({"id": body.task_id, "user_id": current_user["id"], "project_id": project_id})
+            if not t:
+                raise HTTPException(status_code=400, detail="Invalid task for this project")
+            task_id = t["id"]
+    # life: no linkage
+
+    follow_up_task_id: Optional[str] = None
+    if body.follow_up_task:
+        follow_up_task_id = await _create_follow_up_task(
+            current_user["id"], body.follow_up_task, body.type, expected_outcome_id, project_id,
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "type": body.type,
+        "title": body.title.strip(),
+        "date": body.date,
+        "time": body.time,
+        "notes": (body.notes or "").strip(),
+        "attachment": (body.attachment or "").strip(),
+        "expected_outcome_id": expected_outcome_id,
+        "goal_id": goal_id,
+        "project_id": project_id,
+        "task_id": task_id,
+        "follow_up_task_id": follow_up_task_id,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.checkins.insert_one(doc)
+    doc.pop("_id", None)
+    return checkin_to_response(doc)
+
+
+@api_router.get("/checkins/{checkin_id}", response_model=CheckInResponse)
+async def get_checkin(checkin_id: str, current_user: dict = Depends(get_current_user)):
+    doc = await db.checkins.find_one({"id": checkin_id, "user_id": current_user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Check-in not found")
+    return checkin_to_response(doc)
+
+
+@api_router.put("/checkins/{checkin_id}", response_model=CheckInResponse)
+async def update_checkin(checkin_id: str, body: CheckInUpdate, current_user: dict = Depends(get_current_user)):
+    c = await db.checkins.find_one({"id": checkin_id, "user_id": current_user["id"]})
+    if not c:
+        raise HTTPException(status_code=404, detail="Check-in not found")
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    for k in ("title", "date", "time", "notes", "attachment"):
+        if k in updates and isinstance(updates[k], str):
+            updates[k] = updates[k].strip()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.checkins.update_one({"id": checkin_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.checkins.find_one({"id": checkin_id}, {"_id": 0})
+    return checkin_to_response(updated)
+
+
+@api_router.delete("/checkins/{checkin_id}", status_code=200)
+async def delete_checkin(checkin_id: str, current_user: dict = Depends(get_current_user)):
+    result = await db.checkins.delete_one({"id": checkin_id, "user_id": current_user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Check-in not found")
+    return {"detail": "Check-in deleted"}
 
 
 # ---------- App wiring ----------

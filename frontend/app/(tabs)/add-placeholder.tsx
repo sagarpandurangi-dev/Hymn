@@ -2,11 +2,9 @@ import { useRouter } from "expo-router";
 import { useEffect } from "react";
 import { View } from "react-native";
 
-// Never actually rendered; the tab bar item is hidden and + button opens the modal.
+// Placeholder for the reserved center-tab slot; the actual + button lives in the layout overlay.
 export default function AddPlaceholder() {
   const router = useRouter();
-  useEffect(() => {
-    router.replace("/event/add");
-  }, [router]);
+  useEffect(() => { router.replace("/(tabs)/today"); }, [router]);
   return <View />;
 }

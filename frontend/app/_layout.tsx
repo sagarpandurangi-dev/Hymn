@@ -46,9 +46,11 @@ export default function RootLayout() {
           <Stack.Screen name="index" />
           <Stack.Screen name="(auth)" />
           <Stack.Screen name="(tabs)" />
-          <Stack.Screen name="event/add" options={{ presentation: "modal" }} />
-          <Stack.Screen name="event/[id]" />
-          <Stack.Screen name="event/edit/[id]" />
+          <Stack.Screen name="checkin/goal" options={{ presentation: "modal" }} />
+          <Stack.Screen name="checkin/project" options={{ presentation: "modal" }} />
+          <Stack.Screen name="checkin/life" options={{ presentation: "modal" }} />
+          <Stack.Screen name="checkin/[id]" />
+          <Stack.Screen name="checkin/edit/[id]" />
           <Stack.Screen name="domains/index" />
           <Stack.Screen name="domains/add" options={{ presentation: "modal" }} />
           <Stack.Screen name="domains/edit/[id]" options={{ presentation: "modal" }} />
@@ -56,6 +58,17 @@ export default function RootLayout() {
           <Stack.Screen name="goals/add" options={{ presentation: "modal" }} />
           <Stack.Screen name="goals/[id]" />
           <Stack.Screen name="goals/edit/[id]" />
+          <Stack.Screen name="projects/index" />
+          <Stack.Screen name="projects/add" options={{ presentation: "modal" }} />
+          <Stack.Screen name="projects/[id]" />
+          <Stack.Screen name="projects/edit/[id]" />
+          <Stack.Screen name="tasks/index" />
+          <Stack.Screen name="tasks/add" options={{ presentation: "modal" }} />
+          <Stack.Screen name="tasks/[id]" />
+          <Stack.Screen name="tasks/edit/[id]" />
+          <Stack.Screen name="expected-outcomes/add" options={{ presentation: "modal" }} />
+          <Stack.Screen name="expected-outcomes/edit/[id]" options={{ presentation: "modal" }} />
+          <Stack.Screen name="settings/overlay" />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>

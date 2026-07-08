@@ -44,7 +44,7 @@ export default function TimelineScreen() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const items = await api.listEvents();
+      const items = await api.listCheckins();
       setEvents(items);
     } catch (e: any) {
       setError(e?.message || "Failed to load timeline");
@@ -83,8 +83,8 @@ export default function TimelineScreen() {
           <Ionicons name="book-outline" size={40} color={colors.onSurfaceTertiary} />
           <Text style={styles.emptyTitle}>Your timeline is waiting.</Text>
           <Text style={styles.emptyText}>Record what happened today.</Text>
-          <Pressable onPress={() => router.push("/event/add")} style={styles.emptyCta} testID="timeline-empty-add-button">
-            <Text style={styles.emptyCtaText}>Add event</Text>
+          <Pressable onPress={() => router.push("/checkin/life")} style={styles.emptyCta} testID="timeline-empty-add-button">
+            <Text style={styles.emptyCtaText}>Add check-in</Text>
           </Pressable>
         </View>
       ) : (
@@ -100,7 +100,7 @@ export default function TimelineScreen() {
                   <Pressable
                     key={e.id}
                     style={styles.row}
-                    onPress={() => router.push(`/event/${e.id}`)}
+                    onPress={() => router.push(`/checkin/${e.id}`)}
                     testID={`timeline-event-${e.id}`}
                   >
                     <View style={styles.rowTime}>

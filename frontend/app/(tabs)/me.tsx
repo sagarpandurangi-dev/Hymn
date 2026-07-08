@@ -57,6 +57,42 @@ export default function MeScreen() {
           </View>
           <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
         </Pressable>
+
+        <Pressable
+          style={styles.row}
+          onPress={() => router.push("/projects")}
+          testID="me-open-projects"
+        >
+          <View style={styles.rowLeft}>
+            <Ionicons name="briefcase-outline" size={20} color={colors.onSurface} />
+            <Text style={styles.rowText}>Projects</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+        </Pressable>
+
+        <Pressable
+          style={styles.row}
+          onPress={() => router.push("/tasks")}
+          testID="me-open-tasks"
+        >
+          <View style={styles.rowLeft}>
+            <Ionicons name="list-outline" size={20} color={colors.onSurface} />
+            <Text style={styles.rowText}>Tasks</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+        </Pressable>
+
+        <Pressable
+          style={styles.row}
+          onPress={() => router.push("/settings/overlay")}
+          testID="me-open-overlay"
+        >
+          <View style={styles.rowLeft}>
+            <Ionicons name="layers-outline" size={20} color={colors.onSurface} />
+            <Text style={styles.rowText}>Quick Check-in overlay</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+        </Pressable>
       </View>
 
       <View style={styles.section}>

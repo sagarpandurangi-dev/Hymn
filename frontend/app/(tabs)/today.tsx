@@ -62,7 +62,7 @@ export default function TodayScreen() {
 
   const load = useCallback(async () => {
     try {
-      const all = await api.listEvents();
+      const all = await api.listCheckins();
       const t = todayISO();
       setEvents(all.filter((e) => e.date === t));
     } catch {
@@ -103,10 +103,10 @@ export default function TodayScreen() {
             onPress={() => router.push("/tasks")}
           />
           <Card
-            testID="card-todays-events"
-            title="Today's Events"
-            icon="calendar-outline"
-            empty="No events today."
+            testID="card-recent-checkins"
+            title="Recent Check-ins"
+            icon="pulse-outline"
+            empty="No check-ins today."
             onPress={() => router.push("/(tabs)/timeline")}
           >
             {events.length > 0 ? (
@@ -120,7 +120,7 @@ export default function TodayScreen() {
                 {events.length > 3 && <Text style={styles.eventMore}>+{events.length - 3} more</Text>}
               </View>
             ) : (
-              <Text style={styles.cardEmpty}>No events today.</Text>
+              <Text style={styles.cardEmpty}>No check-ins today.</Text>
             )}
           </Card>
           <Card

@@ -33,6 +33,11 @@ export const fonts = {
 };
 
 export const GOAL_STATUSES = ["active", "paused", "completed", "abandoned"] as const;
+export const EO_STATUSES = ["active", "paused", "completed", "abandoned"] as const;
+export const PROJECT_STATUSES = ["active", "paused", "completed", "abandoned"] as const;
+export const TASK_STATUSES = ["todo", "done", "deferred"] as const;
+export const TASK_PRIORITIES = ["low", "medium", "high"] as const;
+export const CHECKIN_TYPES = ["goal", "project", "life"] as const;
 export type GoalStatus = (typeof GOAL_STATUSES)[number];
 
 export const EVENT_TYPES = [
