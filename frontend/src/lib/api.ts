@@ -83,4 +83,29 @@ export const api = {
 
   deleteEvent: (id: string) =>
     request<{ detail: string }>(`/events/${id}`, { method: "DELETE", auth: true }),
+
+  listDomains: () =>
+    request<{ id: string; name: string; is_default: boolean; created_at: string }[]>("/domains", { auth: true }),
+  createDomain: (name: string) =>
+    request<{ id: string; name: string; is_default: boolean }>("/domains", { method: "POST", body: { name }, auth: true }),
+  updateDomain: (id: string, name: string) =>
+    request<{ id: string; name: string }>(`/domains/${id}`, { method: "PUT", body: { name }, auth: true }),
+  deleteDomain: (id: string) =>
+    request<{ detail: string }>(`/domains/${id}`, { method: "DELETE", auth: true }),
+
+  listGoals: () =>
+    request<
+      { id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; created_at: string; updated_at: string }[]
+    >("/goals", { auth: true }),
+  createGoal: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string }) =>
+    request<{ id: string }>("/goals", { method: "POST", body: payload, auth: true }),
+  getGoal: (id: string) =>
+    request<{ id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; created_at: string; updated_at: string }>(
+      `/goals/${id}`,
+      { auth: true },
+    ),
+  updateGoal: (id: string, payload: { title?: string; domain_id?: string; target_outcome?: string; deadline?: string; status?: string; notes?: string }) =>
+    request<{ id: string }>(`/goals/${id}`, { method: "PUT", body: payload, auth: true }),
+  deleteGoal: (id: string) =>
+    request<{ detail: string }>(`/goals/${id}`, { method: "DELETE", auth: true }),
 };

@@ -100,6 +100,56 @@ class EventResponse(BaseModel):
     updated_at: str
 
 
+class DomainCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+
+class DomainUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+
+
+class DomainResponse(BaseModel):
+    id: str
+    name: str
+    is_default: bool
+    created_at: str
+
+
+GOAL_STATUSES = {"active", "paused", "completed", "abandoned"}
+DEFAULT_DOMAIN_NAMES = ["Knowledge", "Health", "Money", "Soul"]
+
+
+class GoalCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    domain_id: str
+    target_outcome: str = ""
+    deadline: str = ""  # YYYY-MM-DD (optional)
+    status: str = "active"
+    notes: str = ""
+
+
+class GoalUpdate(BaseModel):
+    title: Optional[str] = None
+    domain_id: Optional[str] = None
+    target_outcome: Optional[str] = None
+    deadline: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class GoalResponse(BaseModel):
+    id: str
+    title: str
+    domain_id: str
+    domain_name: str
+    target_outcome: str
+    deadline: str
+    status: str
+    notes: str
+    created_at: str
+    updated_at: str
+
+
 # ---------- Helpers ----------
 def hash_password(p: str) -> str:
     return pwd_context.hash(p)
@@ -162,6 +212,43 @@ def event_to_response(e: dict) -> EventResponse:
         created_at=e.get("created_at", ""),
         updated_at=e.get("updated_at", ""),
     )
+
+
+def domain_to_response(d: dict) -> DomainResponse:
+    return DomainResponse(
+        id=d["id"],
+        name=d.get("name", ""),
+        is_default=bool(d.get("is_default", False)),
+        created_at=d.get("created_at", ""),
+    )
+
+
+def goal_to_response(g: dict, domain_name: str) -> GoalResponse:
+    return GoalResponse(
+        id=g["id"],
+        title=g.get("title", ""),
+        domain_id=g.get("domain_id", ""),
+        domain_name=domain_name,
+        target_outcome=g.get("target_outcome", "") or "",
+        deadline=g.get("deadline", "") or "",
+        status=g.get("status", "active"),
+        notes=g.get("notes", "") or "",
+        created_at=g.get("created_at", ""),
+        updated_at=g.get("updated_at", ""),
+    )
+
+
+async def ensure_default_domains(user_id: str) -> None:
+    existing = await db.domains.count_documents({"user_id": user_id})
+    if existing > 0:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    docs = [
+        {"id": str(uuid.uuid4()), "user_id": user_id, "name": name, "is_default": True, "created_at": now}
+        for name in DEFAULT_DOMAIN_NAMES
+    ]
+    if docs:
+        await db.domains.insert_many(docs)
 
 
 # ---------- Auth Routes ----------
@@ -366,6 +453,150 @@ async def delete_event(event_id: str, current_user: dict = Depends(get_current_u
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Event not found")
     return {"detail": "Event deleted"}
+
+
+# ---------- Domain Routes ----------
+@api_router.get("/domains", response_model=List[DomainResponse])
+async def list_domains(current_user: dict = Depends(get_current_user)):
+    await ensure_default_domains(current_user["id"])
+    cursor = db.domains.find({"user_id": current_user["id"]}, {"_id": 0})
+    docs = await cursor.to_list(length=1000)
+    docs.sort(key=lambda d: (not d.get("is_default", False), d.get("name", "").lower()))
+    return [domain_to_response(d) for d in docs]
+
+
+@api_router.post("/domains", response_model=DomainResponse, status_code=201)
+async def create_domain(body: DomainCreate, current_user: dict = Depends(get_current_user)):
+    await ensure_default_domains(current_user["id"])
+    name = body.name.strip()
+    existing = await db.domains.find_one({"user_id": current_user["id"], "name": {"$regex": f"^{name}$", "$options": "i"}})
+    if existing:
+        raise HTTPException(status_code=400, detail="A domain with this name already exists")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "name": name,
+        "is_default": False,
+        "created_at": now,
+    }
+    await db.domains.insert_one(doc)
+    doc.pop("_id", None)
+    return domain_to_response(doc)
+
+
+@api_router.put("/domains/{domain_id}", response_model=DomainResponse)
+async def update_domain(domain_id: str, body: DomainUpdate, current_user: dict = Depends(get_current_user)):
+    doc = await db.domains.find_one({"id": domain_id, "user_id": current_user["id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    name = body.name.strip()
+    dup = await db.domains.find_one({
+        "user_id": current_user["id"],
+        "name": {"$regex": f"^{name}$", "$options": "i"},
+        "id": {"$ne": domain_id},
+    })
+    if dup:
+        raise HTTPException(status_code=400, detail="A domain with this name already exists")
+    await db.domains.update_one(
+        {"id": domain_id, "user_id": current_user["id"]},
+        {"$set": {"name": name}},
+    )
+    updated = await db.domains.find_one({"id": domain_id}, {"_id": 0})
+    return domain_to_response(updated)
+
+
+@api_router.delete("/domains/{domain_id}", status_code=200)
+async def delete_domain(domain_id: str, current_user: dict = Depends(get_current_user)):
+    doc = await db.domains.find_one({"id": domain_id, "user_id": current_user["id"]})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Domain not found")
+    linked = await db.goals.count_documents({"user_id": current_user["id"], "domain_id": domain_id})
+    if linked > 0:
+        raise HTTPException(status_code=400, detail=f"Cannot delete: {linked} goal(s) linked to this domain")
+    await db.domains.delete_one({"id": domain_id, "user_id": current_user["id"]})
+    return {"detail": "Domain deleted"}
+
+
+# ---------- Goal Routes ----------
+async def _resolve_domain_name(user_id: str, domain_id: str) -> str:
+    d = await db.domains.find_one({"id": domain_id, "user_id": user_id}, {"_id": 0, "name": 1})
+    return d.get("name", "") if d else ""
+
+
+@api_router.get("/goals", response_model=List[GoalResponse])
+async def list_goals(current_user: dict = Depends(get_current_user)):
+    cursor = db.goals.find({"user_id": current_user["id"]}, {"_id": 0})
+    goals = await cursor.to_list(length=1000)
+    # Prefetch domain names for the user.
+    dcursor = db.domains.find({"user_id": current_user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    domain_map = {d["id"]: d["name"] for d in await dcursor.to_list(length=1000)}
+    goals.sort(key=lambda g: g.get("created_at", ""), reverse=True)
+    return [goal_to_response(g, domain_map.get(g.get("domain_id", ""), "")) for g in goals]
+
+
+@api_router.post("/goals", response_model=GoalResponse, status_code=201)
+async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current_user)):
+    if body.status not in GOAL_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
+    domain = await db.domains.find_one({"id": body.domain_id, "user_id": current_user["id"]})
+    if not domain:
+        raise HTTPException(status_code=400, detail="Invalid domain")
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "title": body.title.strip(),
+        "domain_id": body.domain_id,
+        "target_outcome": (body.target_outcome or "").strip(),
+        "deadline": (body.deadline or "").strip(),
+        "status": body.status,
+        "notes": (body.notes or "").strip(),
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.goals.insert_one(doc)
+    doc.pop("_id", None)
+    return goal_to_response(doc, domain.get("name", ""))
+
+
+@api_router.get("/goals/{goal_id}", response_model=GoalResponse)
+async def get_goal(goal_id: str, current_user: dict = Depends(get_current_user)):
+    g = await db.goals.find_one({"id": goal_id, "user_id": current_user["id"]}, {"_id": 0})
+    if not g:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    name = await _resolve_domain_name(current_user["id"], g.get("domain_id", ""))
+    return goal_to_response(g, name)
+
+
+@api_router.put("/goals/{goal_id}", response_model=GoalResponse)
+async def update_goal(goal_id: str, body: GoalUpdate, current_user: dict = Depends(get_current_user)):
+    g = await db.goals.find_one({"id": goal_id, "user_id": current_user["id"]})
+    if not g:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if "status" in updates and updates["status"] not in GOAL_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
+    if "domain_id" in updates:
+        d = await db.domains.find_one({"id": updates["domain_id"], "user_id": current_user["id"]})
+        if not d:
+            raise HTTPException(status_code=400, detail="Invalid domain")
+    for k in ("title", "target_outcome", "deadline", "notes"):
+        if k in updates and isinstance(updates[k], str):
+            updates[k] = updates[k].strip()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.goals.update_one({"id": goal_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.goals.find_one({"id": goal_id}, {"_id": 0})
+    name = await _resolve_domain_name(current_user["id"], updated.get("domain_id", ""))
+    return goal_to_response(updated, name)
+
+
+@api_router.delete("/goals/{goal_id}", status_code=200)
+async def delete_goal(goal_id: str, current_user: dict = Depends(get_current_user)):
+    result = await db.goals.delete_one({"id": goal_id, "user_id": current_user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    return {"detail": "Goal deleted"}
 
 
 # ---------- App wiring ----------

@@ -32,6 +32,9 @@ export const fonts = {
   body: "System",
 };
 
+export const GOAL_STATUSES = ["active", "paused", "completed", "abandoned"] as const;
+export type GoalStatus = (typeof GOAL_STATUSES)[number];
+
 export const EVENT_TYPES = [
   "Note",
   "Task",

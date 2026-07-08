@@ -2,10 +2,12 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-nati
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useState } from "react";
+import { useRouter } from "expo-router";
 import { useAuth } from "@/src/lib/AuthContext";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
 export default function MeScreen() {
+  const router = useRouter();
   const { user, signOut } = useAuth();
   const [busy, setBusy] = useState(false);
 
@@ -29,6 +31,32 @@ export default function MeScreen() {
           <Ionicons name="person" size={32} color={colors.onBrandPrimary} />
         </View>
         <Text style={styles.email} testID="me-email">{user?.email || ""}</Text>
+      </View>
+
+      <View style={styles.section}>
+        <Pressable
+          style={styles.row}
+          onPress={() => router.push("/domains")}
+          testID="me-open-domains"
+        >
+          <View style={styles.rowLeft}>
+            <Ionicons name="grid-outline" size={20} color={colors.onSurface} />
+            <Text style={styles.rowText}>Domains</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+        </Pressable>
+
+        <Pressable
+          style={styles.row}
+          onPress={() => router.push("/goals")}
+          testID="me-open-goals"
+        >
+          <View style={styles.rowLeft}>
+            <Ionicons name="flag-outline" size={20} color={colors.onSurface} />
+            <Text style={styles.rowText}>Goals</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+        </Pressable>
       </View>
 
       <View style={styles.section}>
@@ -58,7 +86,14 @@ const styles = StyleSheet.create({
     alignItems: "center", justifyContent: "center",
   },
   email: { fontSize: 16, color: colors.onSurface, fontWeight: "500" },
-  section: { paddingHorizontal: spacing.xl, marginTop: spacing.xl },
+  section: { paddingHorizontal: spacing.xl, marginTop: spacing.lg, gap: spacing.sm },
+  row: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    backgroundColor: colors.surfaceSecondary, borderRadius: radius.md,
+    paddingVertical: spacing.lg, paddingHorizontal: spacing.lg,
+  },
+  rowLeft: { flexDirection: "row", alignItems: "center", gap: spacing.md },
+  rowText: { fontSize: 15, color: colors.onSurface, fontWeight: "500" },
   logoutButton: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: spacing.sm,
     backgroundColor: colors.surfaceSecondary, paddingVertical: spacing.lg, borderRadius: radius.md,

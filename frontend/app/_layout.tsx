@@ -49,6 +49,13 @@ export default function RootLayout() {
           <Stack.Screen name="event/add" options={{ presentation: "modal" }} />
           <Stack.Screen name="event/[id]" />
           <Stack.Screen name="event/edit/[id]" />
+          <Stack.Screen name="domains/index" />
+          <Stack.Screen name="domains/add" options={{ presentation: "modal" }} />
+          <Stack.Screen name="domains/edit/[id]" options={{ presentation: "modal" }} />
+          <Stack.Screen name="goals/index" />
+          <Stack.Screen name="goals/add" options={{ presentation: "modal" }} />
+          <Stack.Screen name="goals/[id]" />
+          <Stack.Screen name="goals/edit/[id]" />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>
