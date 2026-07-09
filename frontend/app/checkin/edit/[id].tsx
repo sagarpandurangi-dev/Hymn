@@ -5,6 +5,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { colors, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
+import DateTimeField from "@/src/components/DateTimeField";
 
 export default function EditCheckinScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -57,11 +58,11 @@ export default function EditCheckinScreen() {
           <View style={{ flexDirection: "row", gap: spacing.md }}>
             <View style={{ flex: 1 }}>
               <Text style={s.label}>Date</Text>
-              <TextInput style={s.input} value={date} onChangeText={setDate} testID="edit-checkin-date-input" />
+              <DateTimeField mode="date" value={date} onChange={setDate} testID="edit-checkin-date-input" />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={s.label}>Time</Text>
-              <TextInput style={s.input} value={time} onChangeText={setTime} testID="edit-checkin-time-input" />
+              <DateTimeField mode="time" value={time} onChange={setTime} testID="edit-checkin-time-input" />
             </View>
           </View>
           <Text style={s.label}>Notes</Text>

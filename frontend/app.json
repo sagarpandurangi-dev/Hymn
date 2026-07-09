@@ -19,7 +19,9 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.emergent.personalosapp.o8lopm",
-      "permissions": ["android.permission.SYSTEM_ALERT_WINDOW"]
+      "permissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -36,7 +38,8 @@
           "resizeMode": "contain",
           "backgroundColor": "#000000"
         }
-      ]
+      ],
+      "@react-native-community/datetimepicker"
     ],
     "experiments": {
       "typedRoutes": true

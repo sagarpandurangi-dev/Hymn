@@ -5,6 +5,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { colors, EO_STATUSES, OUTCOME_TYPES, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
+import DateTimeField from "@/src/components/DateTimeField";
 
 type Props = {
   initial?: any;
@@ -81,7 +82,7 @@ function EOForm({ initial, headerTitle, submitLabel, testIDPrefix, onSubmit }: P
           </View>
 
           <Text style={s.label}>Deadline</Text>
-          <TextInput style={s.input} value={deadline} onChangeText={setDeadline} placeholder="YYYY-MM-DD (optional)" placeholderTextColor={colors.onSurfaceTertiary} testID={`${testIDPrefix}-deadline-input`} />
+          <DateTimeField mode="date" value={deadline} onChange={setDeadline} placeholder="Choose date (optional)" clearable testID={`${testIDPrefix}-deadline-input`} />
 
           <Text style={s.label}>Status</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>

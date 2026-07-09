@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing, GOAL_STATUSES } from "@/src/lib/theme";
+import DateTimeField from "@/src/components/DateTimeField";
 
 type Domain = { id: string; name: string };
 
@@ -111,12 +112,12 @@ export function GoalForm({ initial, onSubmit, headerTitle, submitLabel, testIDPr
           />
 
           <Text style={styles.label}>Deadline</Text>
-          <TextInput
-            style={styles.input}
+          <DateTimeField
+            mode="date"
             value={deadline}
-            onChangeText={setDeadline}
-            placeholder="YYYY-MM-DD (optional)"
-            placeholderTextColor={colors.onSurfaceTertiary}
+            onChange={setDeadline}
+            placeholder="Choose date (optional)"
+            clearable
             testID={`${testIDPrefix}-deadline-input`}
           />
 

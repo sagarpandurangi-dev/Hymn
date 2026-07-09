@@ -5,6 +5,7 @@ import { useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { colors, PROJECT_STATUSES, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
+import DateTimeField from "@/src/components/DateTimeField";
 
 type Props = {
   initial?: { title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string } | null;
@@ -65,11 +66,11 @@ export function ProjectForm({ initial, headerTitle, submitLabel, testIDPrefix, o
           <View style={{ flexDirection: "row", gap: spacing.md }}>
             <View style={{ flex: 1 }}>
               <Text style={s.label}>Start Date</Text>
-              <TextInput style={s.input} value={startDate} onChangeText={setStartDate} placeholder="YYYY-MM-DD" placeholderTextColor={colors.onSurfaceTertiary} testID={`${testIDPrefix}-start-input`} />
+              <DateTimeField mode="date" value={startDate} onChange={setStartDate} placeholder="Choose date" clearable testID={`${testIDPrefix}-start-input`} />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={s.label}>Target End</Text>
-              <TextInput style={s.input} value={targetEnd} onChangeText={setTargetEnd} placeholder="YYYY-MM-DD" placeholderTextColor={colors.onSurfaceTertiary} testID={`${testIDPrefix}-end-input`} />
+              <DateTimeField mode="date" value={targetEnd} onChange={setTargetEnd} placeholder="Choose date" clearable testID={`${testIDPrefix}-end-input`} />
             </View>
           </View>
 

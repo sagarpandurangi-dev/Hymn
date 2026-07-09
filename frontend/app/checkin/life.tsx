@@ -7,6 +7,7 @@ import { useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { colors, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
+import DateTimeField from "@/src/components/DateTimeField";
 
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
 const nowDate = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
@@ -52,11 +53,11 @@ export default function LifeCheckinScreen() {
           <View style={{ flexDirection: "row", gap: spacing.md }}>
             <View style={{ flex: 1 }}>
               <Text style={s.label}>Date</Text>
-              <TextInput style={s.input} value={date} onChangeText={setDate} testID="life-checkin-date-input" />
+              <DateTimeField mode="date" value={date} onChange={setDate} testID="life-checkin-date-input" />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={s.label}>Time</Text>
-              <TextInput style={s.input} value={time} onChangeText={setTime} testID="life-checkin-time-input" />
+              <DateTimeField mode="time" value={time} onChange={setTime} testID="life-checkin-time-input" />
             </View>
           </View>
 

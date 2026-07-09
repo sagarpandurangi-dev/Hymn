@@ -5,6 +5,7 @@ import { useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { colors, spacing, TASK_PRIORITIES, TASK_STATUSES, TASK_ASSIGNMENT_TYPES } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
+import DateTimeField from "@/src/components/DateTimeField";
 
 type Project = { id: string; title: string };
 type Goal = { id: string; title: string };
@@ -162,7 +163,7 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
           )}
 
           <Text style={s.label}>Due Date</Text>
-          <TextInput style={s.input} value={dueDate} onChangeText={setDueDate} placeholder="YYYY-MM-DD (optional)" placeholderTextColor={colors.onSurfaceTertiary} testID={`${testIDPrefix}-due-input`} />
+          <DateTimeField mode="date" value={dueDate} onChange={setDueDate} placeholder="Choose date (optional)" clearable testID={`${testIDPrefix}-due-input`} />
 
           <Text style={s.label}>Priority</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
