@@ -1288,7 +1288,8 @@ def learning_journey_to_response(j: dict) -> LearningJourneyResponse:
     )
 
 
-# ---------- Outcome Type Registry Endpoint ----------@api_router.get("/outcome-types")
+# ---------- Outcome Type Registry Endpoint ----------
+@api_router.get("/outcome-types")
 async def get_outcome_types():
     """Returns the metadata-driven Expected Outcome type registry."""
     return {"types": OUTCOME_TYPE_REGISTRY}
