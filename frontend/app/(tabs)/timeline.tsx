@@ -5,6 +5,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
+import HeaderAvatar from "@/src/components/HeaderAvatar";
 
 type EventItem = {
   id: string;
@@ -67,6 +68,7 @@ export default function TimelineScreen() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <View style={styles.header}>
         <Text style={styles.title}>Timeline</Text>
+        <HeaderAvatar />
       </View>
 
       {loading ? (
@@ -128,7 +130,7 @@ export default function TimelineScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.surface },
-  header: { paddingHorizontal: spacing.xl, paddingTop: spacing.md, paddingBottom: spacing.md },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: spacing.xl, paddingTop: spacing.md, paddingBottom: spacing.md },
   title: { fontFamily: fonts.displayBold, fontSize: 32, color: colors.onSurface, fontWeight: "700" },
   scroll: { paddingBottom: spacing.xxxl * 2 },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },

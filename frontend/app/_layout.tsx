@@ -69,6 +69,10 @@ export default function RootLayout() {
           <Stack.Screen name="expected-outcomes/add" options={{ presentation: "modal" }} />
           <Stack.Screen name="expected-outcomes/edit/[id]" options={{ presentation: "modal" }} />
           <Stack.Screen name="settings/overlay" />
+          <Stack.Screen name="me" />
+          <Stack.Screen name="learn/add" options={{ presentation: "modal" }} />
+          <Stack.Screen name="learn/[id]" />
+          <Stack.Screen name="learn/edit/[id]" options={{ presentation: "modal" }} />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>

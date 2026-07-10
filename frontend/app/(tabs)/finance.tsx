@@ -2,10 +2,15 @@ import { StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { colors, fonts, spacing } from "@/src/lib/theme";
+import HeaderAvatar from "@/src/components/HeaderAvatar";
 
 export default function FinanceScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]} testID="finance-screen">
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>Finance</Text>
+        <HeaderAvatar />
+      </View>
       <View style={styles.wrap}>
         <Ionicons name="wallet-outline" size={44} color={colors.onSurfaceTertiary} />
         <Text style={styles.title}>Finance</Text>
@@ -17,6 +22,11 @@ export default function FinanceScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.surface },
+  header: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    paddingHorizontal: spacing.xl, paddingTop: spacing.md, paddingBottom: spacing.md,
+  },
+  headerTitle: { fontFamily: fonts.displayBold, fontSize: 32, color: colors.onSurface, fontWeight: "700" },
   wrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: spacing.xl, gap: spacing.md },
   title: { fontFamily: fonts.displayBold, fontSize: 28, color: colors.onSurface, fontWeight: "700", marginTop: spacing.md },
   text: { fontSize: 14, color: colors.onSurfaceSecondary, textAlign: "center" },

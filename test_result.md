@@ -101,3 +101,80 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  Build the first version of the Learn module (Learning Journeys) and wire it end-to-end.
+  Add Learn to the bottom nav bar, move "Me" out to a header avatar (top right of every tab),
+  keep the existing Goals/Projects/Tasks/Check-ins/Domains modules untouched, and use the
+  native DateTimeField for the target completion date.
+
+backend:
+  - task: "Learning Journeys CRUD (/api/learning-journeys)"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Endpoints: GET/POST /api/learning-journeys, GET/PUT/DELETE /api/learning-journeys/{id}.
+          Auth: JWT/session bearer via get_current_user. Model has title, description,
+          target_completion_date (YYYY-MM-DD), status (active|archived), created_at, updated_at.
+          Needs end-to-end backend testing including 401 without token, 404 for missing/other-user
+          journey, status validation (must be active|archived), and user isolation.
+
+frontend:
+  - task: "Learn tab, list, add, detail, edit screens (native DateTimeField)"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/(tabs)/learn.tsx, frontend/app/learn/*.tsx, frontend/src/components/HeaderAvatar.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Replaced the "Me" tab with a "Learn" tab in (tabs)/_layout.tsx. Moved Me to /me and
+          exposed it via a HeaderAvatar rendered on Today, Timeline, Finance, and Learn tab
+          headers. Learn list uses cards (LEARNING tag + status pill + description + target
+          date meta). Add/Edit forms use DateTimeField for target_completion_date. Detail
+          screen supports Edit and Delete with ConfirmModal.
+          Manual web smoke test passed (created "Master Rust programming" journey with
+          target Dec 31, 2026 and detail rendered correctly).
+
+metadata:
+  created_by: "main_agent"
+  version: "1.0"
+  test_sequence: 7
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Learning Journeys CRUD (/api/learning-journeys)"
+    - "Learn tab, list, add, detail, edit screens (native DateTimeField)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+  - agent: "main"
+    message: |
+      Please test the new Learn module end-to-end.
+      Backend: /api/learning-journeys CRUD, ensure auth required, status validation
+      (active|archived), 404 handling, and user isolation (two users cannot see each
+      other's journeys). Existing endpoints (goals, projects, tasks, checkins, domains,
+      expected-outcomes, outcome-types, auth) must remain unbroken.
+      Frontend: The Me tab has been replaced by a Learn tab; Me is now reachable through
+      a small circular header avatar (testID header-avatar) present on Today, Timeline,
+      Finance, and Learn. Verify tab-learn navigates to the Learn list, empty state has
+      "Start a journey" CTA (learn-empty-add-button), add form (add-learn-title-input,
+      add-learn-description-input, add-learn-target-date-input, add-learn-save-button)
+      creates a journey, list shows it, detail renders (learn-detail-title,
+      learn-detail-description, learn-detail-target-date), edit and delete both work,
+      and the header avatar opens /me (which still has domains/goals/projects/tasks/
+      overlay + logout).
+      Credentials: /app/memory/test_credentials.md (test@hymn.app / TestPass123!).

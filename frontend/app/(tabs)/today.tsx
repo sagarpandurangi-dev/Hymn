@@ -5,6 +5,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
+import HeaderAvatar from "@/src/components/HeaderAvatar";
 
 type EventItem = {
   id: string;
@@ -84,8 +85,13 @@ export default function TodayScreen() {
         contentContainerStyle={styles.scroll}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.brandPrimary} />}
       >
-        <Text style={styles.hello} testID="today-date-header">{formatDateHeader()}</Text>
-        <Text style={styles.subhead}>Today.</Text>
+        <View style={styles.headerRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.hello} testID="today-date-header">{formatDateHeader()}</Text>
+            <Text style={styles.subhead}>Today.</Text>
+          </View>
+          <HeaderAvatar />
+        </View>
 
         <View style={styles.stack}>
           <Card
@@ -141,6 +147,7 @@ const styles = StyleSheet.create({
   scroll: { paddingHorizontal: spacing.xl, paddingTop: spacing.lg, paddingBottom: spacing.xxxl * 2 },
   hello: { fontSize: 14, color: colors.onSurfaceSecondary, letterSpacing: 0.5 },
   subhead: { fontFamily: fonts.displayBold, fontSize: 36, color: colors.onSurface, fontWeight: "700", marginTop: spacing.xs, marginBottom: spacing.xl },
+  headerRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: spacing.md },
   stack: { gap: spacing.lg },
   card: {
     backgroundColor: colors.surfaceSecondary,

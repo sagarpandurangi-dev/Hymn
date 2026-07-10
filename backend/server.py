@@ -1249,11 +1249,109 @@ async def delete_checkin(checkin_id: str, current_user: dict = Depends(get_curre
     return {"detail": "Check-in deleted"}
 
 
-# ---------- Outcome Type Registry Endpoint ----------
-@api_router.get("/outcome-types")
+# ---------- Learning Journey ----------
+LEARNING_JOURNEY_STATUSES = {"active", "archived"}
+
+
+class LearningJourneyCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    description: str = ""
+    target_completion_date: str = ""  # YYYY-MM-DD (optional)
+
+
+class LearningJourneyUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    target_completion_date: Optional[str] = None
+    status: Optional[str] = None
+
+
+class LearningJourneyResponse(BaseModel):
+    id: str
+    title: str
+    description: str
+    target_completion_date: str
+    status: str
+    created_at: str
+    updated_at: str
+
+
+def learning_journey_to_response(j: dict) -> LearningJourneyResponse:
+    return LearningJourneyResponse(
+        id=j["id"],
+        title=j.get("title", ""),
+        description=j.get("description", "") or "",
+        target_completion_date=j.get("target_completion_date", "") or "",
+        status=j.get("status", "active"),
+        created_at=j.get("created_at", ""),
+        updated_at=j.get("updated_at", ""),
+    )
+
+
+# ---------- Outcome Type Registry Endpoint ----------@api_router.get("/outcome-types")
 async def get_outcome_types():
     """Returns the metadata-driven Expected Outcome type registry."""
     return {"types": OUTCOME_TYPE_REGISTRY}
+
+
+# ---------- Learning Journey Routes ----------
+@api_router.get("/learning-journeys", response_model=List[LearningJourneyResponse])
+async def list_learning_journeys(current_user: dict = Depends(get_current_user)):
+    cursor = db.learning_journeys.find({"user_id": current_user["id"]}, {"_id": 0})
+    docs = await cursor.to_list(length=1000)
+    docs.sort(key=lambda j: j.get("created_at", ""), reverse=True)
+    return [learning_journey_to_response(d) for d in docs]
+
+
+@api_router.post("/learning-journeys", response_model=LearningJourneyResponse, status_code=201)
+async def create_learning_journey(body: LearningJourneyCreate, current_user: dict = Depends(get_current_user)):
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "title": body.title.strip(),
+        "description": (body.description or "").strip(),
+        "target_completion_date": (body.target_completion_date or "").strip(),
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.learning_journeys.insert_one(doc)
+    doc.pop("_id", None)
+    return learning_journey_to_response(doc)
+
+
+@api_router.get("/learning-journeys/{journey_id}", response_model=LearningJourneyResponse)
+async def get_learning_journey(journey_id: str, current_user: dict = Depends(get_current_user)):
+    doc = await db.learning_journeys.find_one({"id": journey_id, "user_id": current_user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Learning journey not found")
+    return learning_journey_to_response(doc)
+
+
+@api_router.put("/learning-journeys/{journey_id}", response_model=LearningJourneyResponse)
+async def update_learning_journey(journey_id: str, body: LearningJourneyUpdate, current_user: dict = Depends(get_current_user)):
+    j = await db.learning_journeys.find_one({"id": journey_id, "user_id": current_user["id"]})
+    if not j:
+        raise HTTPException(status_code=404, detail="Learning journey not found")
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if "status" in updates and updates["status"] not in LEARNING_JOURNEY_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(LEARNING_JOURNEY_STATUSES)}")
+    for k in ("title", "description", "target_completion_date"):
+        if k in updates and isinstance(updates[k], str):
+            updates[k] = updates[k].strip()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.learning_journeys.update_one({"id": journey_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.learning_journeys.find_one({"id": journey_id}, {"_id": 0})
+    return learning_journey_to_response(updated)
+
+
+@api_router.delete("/learning-journeys/{journey_id}", status_code=200)
+async def delete_learning_journey(journey_id: str, current_user: dict = Depends(get_current_user)):
+    result = await db.learning_journeys.delete_one({"id": journey_id, "user_id": current_user["id"]})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Learning journey not found")
+    return {"detail": "Learning journey deleted"}
 
 
 # ---------- App wiring ----------

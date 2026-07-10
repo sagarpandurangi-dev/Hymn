@@ -1,0 +1,47 @@
+{
+  "summary": "Learn module end-to-end tested. Backend: 18/19 pytest tests PASS (94.7%). Frontend: All 10 requested flows PASS. One backend regression found: /api/outcome-types returns 404 due to decorator being commented out on server.py:1291 ('# ---------- Outcome Type Registry Endpoint ----------@api_router.get(\"/outcome-types\")' — the @api_router.get is glued to the trailing comment). All Learning Journey CRUD, unauthorized checks, user isolation, and frontend flows (login, tab structure, header-avatar, Me screen, create/list/detail/edit/delete of journeys, Goals regression) verified working.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/outcome-types",
+        "issue": "Returns 404 Not Found. Root cause: /app/backend/server.py line 1291 has `# ---------- Outcome Type Registry Endpoint ----------@api_router.get(\"/outcome-types\")` — the route decorator is on the same line as a Python comment, so `@api_router.get(...)` is treated as part of the comment and never applied. The `async def get_outcome_types(): ...` function ends up undecorated, so the route is never registered. Fix: put the decorator on its own new line (i.e., break `----------` and `@api_router.get(...)` onto separate lines).",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {
+        "component": "shadow* style props (RN Web warning)",
+        "issue": "Console warning at runtime: '\"shadow*\" style props are deprecated. Use \"boxShadow\".' Non-blocking on web, but worth migrating shadow* to boxShadow (or platform-guarded) for future React Native Web compatibility. Grep for shadowColor/shadowOpacity/shadowRadius/shadowOffset in styles (e.g., /app/frontend/app/(tabs)/_layout.tsx centerButton styles)."
+      }
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_learning_journeys.py",
+    "/app/test_reports/pytest/learning_journeys_results.xml"
+  ],
+  "action_items": [
+    "Fix /app/backend/server.py line 1291: move `@api_router.get(\"/outcome-types\")` onto its own new line. Currently the decorator is glued to a trailing comment, causing /api/outcome-types to 404. Verify by curling GET /api/outcome-types with a bearer token — expect 200 with {\"types\": {...}}.",
+    "(Minor) Replace deprecated `shadow*` style props with `boxShadow` on web or platform-guard them to silence the React Native Web deprecation warning."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1291 – decorator placed on the same line as a section comment ('...----------@api_router.get(\"/outcome-types\")'). Comment eats the decorator; endpoint silently missing. Always keep decorators on their own line."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_learning_journeys.py (new pytest suite for Learn module + regression checks)"
+  ],
+  "success_rate": {
+    "backend": "94.7% (18/19 pytest cases pass; only /api/outcome-types fails)",
+    "frontend": "100% (10/10 requested UI flows pass)"
+  },
+  "seed_data_creation": "Created transient users via /api/auth/signup (test_lj_<uuid>@example.com) and TEST_-prefixed Learning Journeys during pytest; each test class deletes its own records. Primary account (test@hymn.app) had one residual journey from a prior run visible in Learn list — cosmetic only.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend tests live in /app/backend/tests/test_learning_journeys.py — run with `pytest backend/tests/test_learning_journeys.py -v`. Once server.py:1291 is fixed, TestRegression::test_endpoint_ok[/outcome-types] should also pass, taking backend to 19/19. Frontend testIDs for Learn: learn-add-button, learn-empty-add-button, learn-row-{id}, learn-detail-title/edit-button/delete-button, learn-delete-modal + learn-delete-modal-confirm/cancel, add-learn-*-input, edit-learn-*-input. Header avatar testID is 'header-avatar' on Today/Timeline/Finance/Learn.",
+  "rca_of_issue": "/api/outcome-types 404 RCA: server.py:1291 reads '# ---------- Outcome Type Registry Endpoint ----------@api_router.get(\"/outcome-types\")'. The `#` starts a Python comment that runs to end-of-line, swallowing `@api_router.get(\"/outcome-types\")`. The following `async def get_outcome_types()` therefore has no route decorator. Reproduction: `curl -H 'Authorization: Bearer <token>' <base>/api/outcome-types` returns `{\"detail\":\"Not Found\"}` with 404. Mitigation: split the line so the decorator sits on its own line, e.g., insert a newline before `@api_router.get`."
+}

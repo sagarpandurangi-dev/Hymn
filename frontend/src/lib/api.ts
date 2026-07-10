@@ -153,4 +153,26 @@ export const api = {
       "/outcome-types",
       { auth: true },
     ),
+
+  listLearningJourneys: () =>
+    request<
+      { id: string; title: string; description: string; target_completion_date: string; status: string; created_at: string; updated_at: string }[]
+    >("/learning-journeys", { auth: true }),
+  createLearningJourney: (payload: { title: string; description?: string; target_completion_date?: string }) =>
+    request<{ id: string; title: string; description: string; target_completion_date: string; status: string }>(
+      "/learning-journeys",
+      { method: "POST", body: payload, auth: true },
+    ),
+  getLearningJourney: (id: string) =>
+    request<{ id: string; title: string; description: string; target_completion_date: string; status: string; created_at: string; updated_at: string }>(
+      `/learning-journeys/${id}`,
+      { auth: true },
+    ),
+  updateLearningJourney: (id: string, payload: { title?: string; description?: string; target_completion_date?: string; status?: string }) =>
+    request<{ id: string; title: string; description: string; target_completion_date: string; status: string }>(
+      `/learning-journeys/${id}`,
+      { method: "PUT", body: payload, auth: true },
+    ),
+  deleteLearningJourney: (id: string) =>
+    request<{ detail: string }>(`/learning-journeys/${id}`, { method: "DELETE", auth: true }),
 };
