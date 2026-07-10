@@ -73,16 +73,16 @@ export const api = {
 
   listGoals: () =>
     request<
-      { id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; created_at: string; updated_at: string }[]
+      { id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence: string; created_at: string; updated_at: string }[]
     >("/goals", { auth: true }),
-  createGoal: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string }) =>
+  createGoal: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence?: string }) =>
     request<{ id: string }>("/goals", { method: "POST", body: payload, auth: true }),
   getGoal: (id: string) =>
-    request<{ id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; created_at: string; updated_at: string }>(
+    request<{ id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence: string; created_at: string; updated_at: string; expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number }>(
       `/goals/${id}`,
       { auth: true },
     ),
-  updateGoal: (id: string, payload: { title?: string; domain_id?: string; target_outcome?: string; deadline?: string; status?: string; notes?: string }) =>
+  updateGoal: (id: string, payload: { title?: string; domain_id?: string; target_outcome?: string; deadline?: string; status?: string; notes?: string; checkin_cadence?: string }) =>
     request<{ id: string }>(`/goals/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteGoal: (id: string) =>
     request<{ detail: string }>(`/goals/${id}`, { method: "DELETE", auth: true }),
@@ -119,10 +119,12 @@ export const api = {
   deleteProject: (id: string) =>
     request<{ detail: string }>(`/projects/${id}`, { method: "DELETE", auth: true }),
 
-  listTasks: () =>
-    request<
+  listTasks: (params?: { goalId?: string }) => {
+    const qs = params?.goalId ? `?goal_id=${encodeURIComponent(params.goalId)}` : "";
+    return request<
       { id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null }[]
-    >("/tasks", { auth: true }),
+    >(`/tasks${qs}`, { auth: true });
+  },
   createTask: (payload: { title: string; due_date?: string; priority?: string; status?: string; notes?: string; origin: string; expected_outcome_id?: string | null; project_id?: string | null }) =>
     request<{ id: string }>("/tasks", { method: "POST", body: payload, auth: true }),
   getTask: (id: string) =>
@@ -135,10 +137,12 @@ export const api = {
   deleteTask: (id: string) =>
     request<{ detail: string }>(`/tasks/${id}`, { method: "DELETE", auth: true }),
 
-  listCheckins: () =>
-    request<
+  listCheckins: (params?: { goalId?: string }) => {
+    const qs = params?.goalId ? `?goal_id=${encodeURIComponent(params.goalId)}` : "";
+    return request<
       { id: string; type: string; title: string; date: string; time: string; notes: string; attachment: string; expected_outcome_id: string | null; goal_id: string | null; project_id: string | null; task_id: string | null; follow_up_task_id: string | null }[]
-    >("/checkins", { auth: true }),
+    >(`/checkins${qs}`, { auth: true });
+  },
   createCheckin: (payload: any) =>
     request<{ id: string }>("/checkins", { method: "POST", body: payload, auth: true }),
   getCheckin: (id: string) =>
@@ -156,23 +160,19 @@ export const api = {
 
   listLearningJourneys: () =>
     request<
-      { id: string; title: string; description: string; target_completion_date: string; status: string; created_at: string; updated_at: string }[]
-    >("/learning-journeys", { auth: true }),
-  createLearningJourney: (payload: { title: string; description?: string; target_completion_date?: string }) =>
-    request<{ id: string; title: string; description: string; target_completion_date: string; status: string }>(
-      "/learning-journeys",
+      { id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence: string; created_at: string; updated_at: string; expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number }[]
+    >("/knowledge/journeys", { auth: true }),
+
+  createLearningJourney: (payload: {
+    title: string;
+    why: string;
+    target_completion_date: string;
+    first_outcome: { title: string; target_value?: string; unit?: string; outcome_type?: string };
+    first_task: { title: string; due_date?: string; priority?: string };
+    checkin_cadence: "daily" | "weekly" | "monthly" | "manual";
+  }) =>
+    request<{ id: string; title: string; domain_id: string; domain_name: string; deadline: string; status: string; notes: string; checkin_cadence: string }>(
+      "/knowledge/journeys",
       { method: "POST", body: payload, auth: true },
     ),
-  getLearningJourney: (id: string) =>
-    request<{ id: string; title: string; description: string; target_completion_date: string; status: string; created_at: string; updated_at: string }>(
-      `/learning-journeys/${id}`,
-      { auth: true },
-    ),
-  updateLearningJourney: (id: string, payload: { title?: string; description?: string; target_completion_date?: string; status?: string }) =>
-    request<{ id: string; title: string; description: string; target_completion_date: string; status: string }>(
-      `/learning-journeys/${id}`,
-      { method: "PUT", body: payload, auth: true },
-    ),
-  deleteLearningJourney: (id: string) =>
-    request<{ detail: string }>(`/learning-journeys/${id}`, { method: "DELETE", auth: true }),
 };

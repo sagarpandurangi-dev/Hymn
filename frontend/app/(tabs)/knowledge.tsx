@@ -10,16 +10,20 @@ import HeaderAvatar from "@/src/components/HeaderAvatar";
 type Journey = {
   id: string;
   title: string;
-  description: string;
-  target_completion_date: string;
+  notes: string;
+  deadline: string;
   status: string;
-  created_at: string;
-  updated_at: string;
+  checkin_cadence: string;
+  expected_outcomes_total: number;
+  expected_outcomes_completed: number;
+  completion_pct: number;
 };
 
 const STATUS_COLORS: Record<string, string> = {
   active: colors.brandPrimary,
-  archived: colors.onSurfaceTertiary,
+  paused: colors.warning,
+  completed: colors.success,
+  abandoned: colors.onSurfaceTertiary,
 };
 
 function formatDate(iso: string): string {
@@ -32,7 +36,12 @@ function formatDate(iso: string): string {
   }
 }
 
-export default function LearnScreen() {
+function cadenceLabel(c: string): string {
+  if (!c) return "";
+  return c.charAt(0).toUpperCase() + c.slice(1);
+}
+
+export default function KnowledgeScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -43,7 +52,7 @@ export default function LearnScreen() {
     setError(null);
     try {
       const items = await api.listLearningJourneys();
-      setJourneys(items);
+      setJourneys(items as Journey[]);
     } catch (e: any) {
       setError(e?.message || "Could not load learning journeys");
     } finally {
@@ -60,16 +69,16 @@ export default function LearnScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]} testID="learn-screen">
+    <SafeAreaView style={styles.safe} edges={["top"]} testID="knowledge-screen">
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <Text style={styles.title}>Learn</Text>
-          <Text style={styles.subtitle}>Learning journeys</Text>
+          <Text style={styles.title}>Knowledge</Text>
+          <Text style={styles.subtitle}>Your learning journeys</Text>
         </View>
         <View style={styles.headerActions}>
           <Pressable
-            onPress={() => router.push("/learn/add")}
-            testID="learn-add-button"
+            onPress={() => router.push("/knowledge/new")}
+            testID="knowledge-add-button"
             hitSlop={12}
             style={styles.addBtn}
           >
@@ -84,7 +93,7 @@ export default function LearnScreen() {
       ) : error ? (
         <View style={styles.center}>
           <Text style={styles.errorText}>{error}</Text>
-          <Pressable onPress={load} style={styles.retry} testID="learn-retry">
+          <Pressable onPress={load} style={styles.retry} testID="knowledge-retry">
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
@@ -93,7 +102,7 @@ export default function LearnScreen() {
           <Ionicons name="school-outline" size={44} color={colors.onSurfaceTertiary} />
           <Text style={styles.emptyTitle}>No journeys yet.</Text>
           <Text style={styles.emptyText}>What do you want to learn?</Text>
-          <Pressable onPress={() => router.push("/learn/add")} style={styles.emptyCta} testID="learn-empty-add-button">
+          <Pressable onPress={() => router.push("/knowledge/new")} style={styles.emptyCta} testID="knowledge-empty-add-button">
             <Text style={styles.emptyCtaText}>Start a journey</Text>
           </Pressable>
         </View>
@@ -105,25 +114,39 @@ export default function LearnScreen() {
           {journeys.map((j) => (
             <Pressable
               key={j.id}
-              onPress={() => router.push(`/learn/${j.id}`)}
+              onPress={() => router.push(`/goals/${j.id}`)}
               style={styles.card}
-              testID={`learn-row-${j.id}`}
+              testID={`journey-row-${j.id}`}
             >
               <View style={styles.cardTop}>
-                <Text style={styles.tag}>LEARNING</Text>
+                <Text style={styles.tag}>LEARNING JOURNEY</Text>
                 <View style={styles.statusPill}>
                   <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[j.status] || colors.brandPrimary }]} />
                   <Text style={styles.statusText}>{j.status}</Text>
                 </View>
               </View>
               <Text style={styles.cardTitle} numberOfLines={2}>{j.title}</Text>
-              {j.description ? <Text style={styles.cardDesc} numberOfLines={2}>{j.description}</Text> : null}
-              {j.target_completion_date ? (
-                <View style={styles.metaRow}>
-                  <Ionicons name="calendar-outline" size={13} color={colors.onSurfaceTertiary} />
-                  <Text style={styles.meta}>by {formatDate(j.target_completion_date)}</Text>
-                </View>
-              ) : null}
+              {j.notes ? <Text style={styles.cardDesc} numberOfLines={2}>{j.notes}</Text> : null}
+              <View style={styles.progressBarTrack}>
+                <View style={[styles.progressBarFill, { width: `${Math.min(j.completion_pct, 100)}%` }]} />
+              </View>
+              <View style={styles.metaRow}>
+                <Text style={styles.metaText}>{j.expected_outcomes_completed}/{j.expected_outcomes_total} outcomes</Text>
+                {j.checkin_cadence ? (
+                  <>
+                    <Text style={styles.metaDot}>·</Text>
+                    <Ionicons name="repeat-outline" size={12} color={colors.onSurfaceSecondary} />
+                    <Text style={styles.metaText}>{cadenceLabel(j.checkin_cadence)}</Text>
+                  </>
+                ) : null}
+                {j.deadline ? (
+                  <>
+                    <Text style={styles.metaDot}>·</Text>
+                    <Ionicons name="calendar-outline" size={12} color={colors.onSurfaceSecondary} />
+                    <Text style={styles.metaText}>by {formatDate(j.deadline)}</Text>
+                  </>
+                ) : null}
+              </View>
             </Pressable>
           ))}
         </ScrollView>
@@ -164,6 +187,9 @@ const styles = StyleSheet.create({
   statusText: { fontSize: 11, color: colors.onSurfaceSecondary, textTransform: "capitalize" },
   cardTitle: { fontFamily: fonts.displayBold, fontSize: 18, color: colors.onSurface, fontWeight: "600", lineHeight: 24 },
   cardDesc: { fontSize: 13, color: colors.onSurfaceSecondary, marginTop: spacing.xs, lineHeight: 18 },
-  metaRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: spacing.sm },
-  meta: { fontSize: 12, color: colors.onSurfaceSecondary },
+  progressBarTrack: { height: 4, backgroundColor: colors.surfaceTertiary, borderRadius: 2, marginTop: spacing.md, overflow: "hidden" },
+  progressBarFill: { height: 4, backgroundColor: colors.brandPrimary },
+  metaRow: { flexDirection: "row", alignItems: "center", gap: 4, marginTop: spacing.sm, flexWrap: "wrap" },
+  metaDot: { color: colors.onSurfaceTertiary, marginHorizontal: 2 },
+  metaText: { fontSize: 12, color: colors.onSurfaceSecondary },
 });

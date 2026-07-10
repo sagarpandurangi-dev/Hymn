@@ -41,6 +41,8 @@ export const CHECKIN_TYPES = ["goal", "project", "life"] as const;
 export const CHECKIN_SOURCES = ["manual", "share", "whatsapp", "email", "statement", "system"] as const;
 export const TASK_ASSIGNMENT_TYPES = ["self", "external"] as const;
 export const OUTCOME_TYPES = ["generic", "weight", "study", "revenue", "project_milestone", "count"] as const;
+export const CHECKIN_CADENCES = ["daily", "weekly", "monthly", "manual"] as const;
+export type CheckinCadence = (typeof CHECKIN_CADENCES)[number];
 export type GoalStatus = (typeof GOAL_STATUSES)[number];
 
 export const EVENT_TYPES = [

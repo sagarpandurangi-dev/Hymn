@@ -116,12 +116,12 @@ export default function TabsLayout() {
           }}
         />
         <Tabs.Screen
-          name="learn"
+          name="knowledge"
           options={{
             tabBarButton: (props) => (
-              <Pressable {...(props as any)} testID="tab-learn" style={styles.tabItem}>
+              <Pressable {...(props as any)} testID="tab-knowledge" style={styles.tabItem}>
                 <TabIcon name="school-outline" focused={!!props.accessibilityState?.selected} />
-                <TabLabel label="Learn" focused={!!props.accessibilityState?.selected} />
+                <TabLabel label="Knowledge" focused={!!props.accessibilityState?.selected} />
               </Pressable>
             ),
           }}

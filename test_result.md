@@ -103,13 +103,22 @@
 #====================================================================================================
 
 user_problem_statement: |
-  Build the first version of the Learn module (Learning Journeys) and wire it end-to-end.
-  Add Learn to the bottom nav bar, move "Me" out to a header avatar (top right of every tab),
-  keep the existing Goals/Projects/Tasks/Check-ins/Domains modules untouched, and use the
-  native DateTimeField for the target completion date.
+  Architectural correction: ONE learning workflow. Delete the parallel Learn/LearningJourney
+  workflow and unify with Knowledge domain + Goal/Expected Outcome/Task/Check-in engine.
+  - Learn tab → Knowledge tab (Knowledge is the domain, a Learning Journey IS a Goal in that
+    domain — no separate CRUD, no separate collection, no parallel engine).
+  - Replace the flat Learning Journey creation screen with a guided 6-step wizard:
+      1) title  2) why  3) target completion date  4) first Expected Outcome (required)
+      5) first Task (required)  6) check-in cadence (daily|weekly|monthly|manual, persisted).
+    Cadence is persisted only. No reminders, no recurring tasks, no AI, no roadmap.
+  - Goal (Learning Journey) detail SHALL render in this exact order:
+      Learning Journey → Expected Outcomes → Tasks → Check-ins.
+  - The old /api/learning-journeys endpoints and `learning_journeys` collection have been
+    fully removed. The new atomic wizard endpoint is POST /api/knowledge/journeys.
+  - Outside the Knowledge domain, Goal behaviour is unchanged.
 
 backend:
-  - task: "Learning Journeys CRUD (/api/learning-journeys)"
+  - task: "Removed /api/learning-journeys endpoints"
     implemented: true
     working: "NA"
     file: "backend/server.py"
@@ -120,17 +129,14 @@ backend:
       - working: "NA"
         agent: "main"
         comment: |
-          Endpoints: GET/POST /api/learning-journeys, GET/PUT/DELETE /api/learning-journeys/{id}.
-          Auth: JWT/session bearer via get_current_user. Model has title, description,
-          target_completion_date (YYYY-MM-DD), status (active|archived), created_at, updated_at.
-          Needs end-to-end backend testing including 401 without token, 404 for missing/other-user
-          journey, status validation (must be active|archived), and user isolation.
+          All /api/learning-journeys/* routes and LearningJourney models were removed.
+          Any request to /api/learning-journeys (GET/POST/PUT/DELETE) or its /{id} form
+          must now return 404 (or 405). No other endpoint should reference this path.
 
-frontend:
-  - task: "Learn tab, list, add, detail, edit screens (native DateTimeField)"
+  - task: "Atomic Knowledge wizard endpoint (POST /api/knowledge/journeys)"
     implemented: true
     working: "NA"
-    file: "frontend/app/(tabs)/learn.tsx, frontend/app/learn/*.tsx, frontend/src/components/HeaderAvatar.tsx"
+    file: "backend/server.py"
     stuck_count: 0
     priority: "high"
     needs_retesting: true
@@ -138,24 +144,131 @@ frontend:
       - working: "NA"
         agent: "main"
         comment: |
-          Replaced the "Me" tab with a "Learn" tab in (tabs)/_layout.tsx. Moved Me to /me and
-          exposed it via a HeaderAvatar rendered on Today, Timeline, Finance, and Learn tab
-          headers. Learn list uses cards (LEARNING tag + status pill + description + target
-          date meta). Add/Edit forms use DateTimeField for target_completion_date. Detail
-          screen supports Edit and Delete with ConfirmModal.
-          Manual web smoke test passed (created "Master Rust programming" journey with
-          target Dec 31, 2026 and detail rendered correctly).
+          POST /api/knowledge/journeys creates Goal + first Expected Outcome + first Task
+          atomically in the Knowledge domain. On any partial failure the Goal and EO are
+          rolled back. Required body: {title, why, target_completion_date, first_outcome:
+          {title, target_value?, unit?, outcome_type?}, first_task: {title, due_date?,
+          priority?}, checkin_cadence in {daily|weekly|monthly|manual}}.
+          Validation: cadence must be one of the four; invalid outcome_type or priority
+          must 400; missing why/title/first_outcome.title/first_task.title must 400/422.
+
+  - task: "GET /api/knowledge/journeys (Knowledge-scoped Goal list)"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Returns Goals whose domain is "Knowledge" for the current user. Auto-seeds the
+          Knowledge domain if missing (idempotent). Same shape as GoalResponse including
+          checkin_cadence and expected_outcomes_total/completed/completion_pct.
+
+  - task: "checkin_cadence field on Goal + idempotent default-domain seeding"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Goal model now has optional checkin_cadence ("" | daily | weekly | monthly | manual).
+          Create/Update validate the value. ensure_default_domains now adds only missing
+          default domains (Knowledge/Health/Money/Soul) so existing users get Knowledge
+          without a manual migration.
+
+  - task: "Optional goal_id filter on /api/tasks and /api/checkins"
+    implemented: true
+    working: "NA"
+    file: "backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          GET /api/tasks?goal_id=<id> returns only tasks whose expected_outcome belongs
+          to that goal. GET /api/checkins?goal_id=<id> returns only check-ins for that
+          goal. Both are backward-compatible when the query param is omitted.
+
+frontend:
+  - task: "Knowledge tab replaces Learn tab; wizard is the only entry"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/(tabs)/knowledge.tsx, frontend/app/(tabs)/_layout.tsx, frontend/app/_layout.tsx, frontend/app/knowledge/new.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Tab bar exposes tab-knowledge (school icon, label "Knowledge"). tab-learn has
+          been REMOVED. The old /learn/* screens have been deleted. The + button on the
+          Knowledge home routes to /knowledge/new (the guided wizard). Tapping a
+          Learning Journey card routes to /goals/{id} — same unified detail as any goal.
+
+  - task: "6-step Learning Journey creation wizard"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/knowledge/new.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Steps enforced in strict order: 1) title (wizard-title-input),
+          2) why (wizard-why-input), 3) target date (wizard-target-date-input),
+          4) first outcome (wizard-outcome-title-input required + optional target/unit),
+          5) first task (wizard-task-title-input required + optional due date),
+          6) cadence (wizard-cadence-{daily|weekly|monthly|manual}). The Continue
+          button (wizard-next-button) is disabled until each step is valid, ensuring
+          the user cannot leave the wizard without a first EO and first Task. Cancel
+          shows a confirm modal only if the form is dirty. Finish (wizard-finish-button)
+          calls POST /api/knowledge/journeys atomically and redirects to /goals/{id}.
+
+  - task: "Unified Goal detail shows Journey → Expected Outcomes → Tasks → Check-ins"
+    implemented: true
+    working: "NA"
+    file: "frontend/app/goals/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+      - working: "NA"
+        agent: "main"
+        comment: |
+          Goal detail now always renders sections in the required order. For Knowledge
+          goals the header tag reads "LEARNING JOURNEY" and the notes block is titled
+          "WHY THIS MATTERS"; cadence appears as a chip. Tasks section lists all tasks
+          linked via expected outcomes belonging to this goal. Check-ins section lists
+          check-ins scoped by goal_id.
 
 metadata:
   created_by: "main_agent"
-  version: "1.0"
-  test_sequence: 7
+  version: "1.1"
+  test_sequence: 8
   run_ui: false
 
 test_plan:
   current_focus:
-    - "Learning Journeys CRUD (/api/learning-journeys)"
-    - "Learn tab, list, add, detail, edit screens (native DateTimeField)"
+    - "Removed /api/learning-journeys endpoints"
+    - "Atomic Knowledge wizard endpoint (POST /api/knowledge/journeys)"
+    - "GET /api/knowledge/journeys (Knowledge-scoped Goal list)"
+    - "checkin_cadence field on Goal + idempotent default-domain seeding"
+    - "Optional goal_id filter on /api/tasks and /api/checkins"
+    - "Knowledge tab replaces Learn tab; wizard is the only entry"
+    - "6-step Learning Journey creation wizard"
+    - "Unified Goal detail shows Journey → Expected Outcomes → Tasks → Check-ins"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -163,18 +276,44 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      Please test the new Learn module end-to-end.
-      Backend: /api/learning-journeys CRUD, ensure auth required, status validation
-      (active|archived), 404 handling, and user isolation (two users cannot see each
-      other's journeys). Existing endpoints (goals, projects, tasks, checkins, domains,
-      expected-outcomes, outcome-types, auth) must remain unbroken.
-      Frontend: The Me tab has been replaced by a Learn tab; Me is now reachable through
-      a small circular header avatar (testID header-avatar) present on Today, Timeline,
-      Finance, and Learn. Verify tab-learn navigates to the Learn list, empty state has
-      "Start a journey" CTA (learn-empty-add-button), add form (add-learn-title-input,
-      add-learn-description-input, add-learn-target-date-input, add-learn-save-button)
-      creates a journey, list shows it, detail renders (learn-detail-title,
-      learn-detail-description, learn-detail-target-date), edit and delete both work,
-      and the header avatar opens /me (which still has domains/goals/projects/tasks/
-      overlay + logout).
+      This is an architectural refactor, not a new feature. Please verify:
+
+      BACKEND:
+      1. /api/learning-journeys/* is fully gone (any verb → 404). No response should
+         include LearningJourney model fields.
+      2. POST /api/knowledge/journeys with a full valid body creates a Goal, one
+         Expected Outcome and one Task in one shot; the returned goal has domain_name
+         "Knowledge" and checkin_cadence set. Subsequent
+         GET /api/goals/{id}, GET /api/goals/{id}/expected-outcomes,
+         GET /api/tasks?goal_id={id} must reflect the created rows.
+      3. Rejection cases (400/422): missing why, missing title, missing first_outcome.title,
+         missing first_task.title, missing cadence, invalid cadence, invalid outcome_type,
+         invalid task priority. NO Goal, EO or Task should be persisted on any rejection.
+      4. GET /api/knowledge/journeys returns only Knowledge-domain goals with
+         checkin_cadence and completion stats.
+      5. Existing endpoints (goals CRUD, expected-outcomes CRUD, tasks CRUD, checkins CRUD,
+         domains CRUD, outcome-types, auth) still work. In particular, POST /api/goals
+         still accepts an omitted checkin_cadence (defaults to ""), and updateGoal accepts
+         a checkin_cadence patch. Invalid cadence on either → 400.
+      6. GET /api/tasks?goal_id=<id> and /api/checkins?goal_id=<id> filter correctly.
+      7. Existing user (test@hymn.app / TestPass123!) — verify the Knowledge domain now
+         exists in their /api/domains (idempotent seeding).
+
+      FRONTEND (http://localhost:3000):
+      1. Bottom nav has tab-knowledge; tab-learn does NOT exist.
+      2. Knowledge home lists Learning Journeys with LEARNING JOURNEY tag and progress
+         meta. Tap card → routes to /goals/{id} (unified detail).
+      3. Tapping + on Knowledge OR the empty-state CTA opens knowledge-wizard.
+      4. Wizard cannot advance past step 4 without first outcome title, cannot advance
+         past step 5 without first task title, cannot finish without a cadence choice.
+      5. Cancel prompts a confirm modal only when the form is dirty; discarding does not
+         create anything on the backend (verify GET /api/knowledge/journeys unchanged).
+      6. Finishing the wizard opens Goal detail with sections in order: header (Learning
+         Journey tag, chips), Progress, Why This Matters, Expected Outcomes, Tasks,
+         Check-ins. All three sections are present even if empty.
+      7. Non-Knowledge goals still show the classic domain name (e.g. HEALTH) as the tag,
+         and the notes block reads "NOTES", not "WHY THIS MATTERS".
+
       Credentials: /app/memory/test_credentials.md (test@hymn.app / TestPass123!).
+      Report path: /app/test_reports/iteration_8.json.
+

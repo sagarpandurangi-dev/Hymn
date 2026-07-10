@@ -1,0 +1,86 @@
+{
+  "summary": "Learn -> Knowledge refactor verified end-to-end. Backend pytest suite: 25/25 PASS (all 7 focus areas + regression + user isolation). Frontend: tab-learn is gone, tab-knowledge routes to knowledge-screen, /learn/* URLs correctly return 'unmatched route', 6-step wizard enforces per-step validation (Continue/Finish disabled until valid), completing wizard atomically creates Goal+EO+Task and redirects to /goals/{id}. Goal detail for a Knowledge journey renders in the exact required order: header 'LEARNING JOURNEY' -> PROGRESS -> WHY THIS MATTERS -> EXPECTED OUTCOMES -> TASKS -> CHECK-INS, with the 'Weekly Check-Ins' chip visible. Non-Knowledge goals show the domain name (e.g. HEALTH) as the header tag and DO NOT show 'WHY THIS MATTERS'. Cancel-when-dirty opens the wizard-cancel-confirm modal correctly.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_knowledge_refactor.py",
+    "/app/test_reports/pytest/knowledge_refactor_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is ~1500 lines. Consider splitting per-resource routers (auth, domains, goals, expected_outcomes, projects, tasks, checkins, knowledge) once refactor stabilises; not blocking."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_knowledge_refactor.py (new)",
+    "/app/test_reports/pytest/knowledge_refactor_results.xml (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (25/25)",
+    "frontend": "100% of covered UI checks pass"
+  },
+  "seed_data_creation": "Tests create fresh TEST_ users per run; all created rows are prefixed TEST_ and cleaned up in the regression test. Two long-lived TEST_UI Journey / TEST_health_g rows remain from frontend tests under those TEST_ui users (isolated, cannot leak into production).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend regression suite for this refactor lives at /app/backend/tests/test_knowledge_refactor.py and is stable. Existing pytest files (test_domains_goals, test_projects_eo_tasks_checkins, test_google_auth, test_phase2_core) were not re-run this iteration but the new suite covers auth/domain/goal/EO/task/checkin CRUD as regression. Frontend wizard testIDs verified: knowledge-add-button, knowledge-empty-add-button, knowledge-wizard, wizard-title-input, wizard-why-input, wizard-target-date-input (rendered as a <View> pressable, not a native input), wizard-outcome-title-input, wizard-task-title-input, wizard-cadence-{daily|weekly|monthly|manual}, wizard-next-button, wizard-finish-button, wizard-cancel (opens ConfirmModal), wizard-cancel-confirm.",
+  "detailed_backend_results": {
+    "learning_journeys_removed": "PASS - GET/POST/PUT/DELETE on /api/learning-journeys and /api/learning-journeys/{id} all return 404.",
+    "knowledge_domain_seeded": "PASS - fresh user's GET /api/domains contains 'Knowledge'.",
+    "wizard_happy_path": "PASS - POST /api/knowledge/journeys 201, GoalResponse has domain_name='Knowledge', checkin_cadence='weekly', expected_outcomes_total=1, expected_outcomes_completed=0, notes contains 'why'.",
+    "list_knowledge_journeys": "PASS - GET /api/knowledge/journeys returns exactly the new journey.",
+    "goal_lookup": "PASS - GET /api/goals/{id} returns same goal with 'abuela' in notes.",
+    "eo_created": "PASS - GET /api/goals/{id}/expected-outcomes returns 1 EO 'Complete A1'.",
+    "task_filter_by_goal": "PASS - GET /api/tasks?goal_id={id} returns 1 task with expected_outcome_id set to created EO id.",
+    "task_no_filter": "PASS - GET /api/tasks (no filter) also returns the task.",
+    "checkin_filter_empty": "PASS - GET /api/checkins?goal_id={id} returns [].",
+    "rejection_missing_why": "PASS - 422, count unchanged.",
+    "rejection_missing_title": "PASS - 422, count unchanged.",
+    "rejection_missing_outcome_title": "PASS - 422, count unchanged.",
+    "rejection_missing_task_title": "PASS - 422, count unchanged.",
+    "rejection_missing_cadence": "PASS - 422, count unchanged.",
+    "rejection_bad_cadence_yearly": "PASS - 400, count unchanged.",
+    "rejection_bad_outcome_type": "PASS - 400, count unchanged.",
+    "rejection_bad_priority": "PASS - 400, count unchanged.",
+    "goal_cadence_create_weekly": "PASS - POST /api/goals with checkin_cadence='weekly' 201.",
+    "goal_cadence_update_daily": "PASS - PUT to 'daily' 200.",
+    "goal_cadence_update_invalid": "PASS - PUT 'yearly' 400.",
+    "goal_no_cadence": "PASS - POST /api/goals without cadence 201, cadence=''.",
+    "idempotent_seeding_existing_user": "PASS - test@hymn.app GET /api/domains contains 'Knowledge'.",
+    "regression_auth_me": "PASS.",
+    "regression_outcome_types": "PASS.",
+    "regression_project_crud": "PASS.",
+    "regression_domain_goal_eo_task_checkin_flow": "PASS.",
+    "user_isolation": "PASS - other user's TEST_other_journey does not appear in fresh_user's /api/knowledge/journeys."
+  },
+  "detailed_frontend_results": {
+    "tab-learn absent": "PASS",
+    "tab-knowledge present -> knowledge-screen": "PASS",
+    "/learn/* URLs do not resolve (Expo Router 'unmatched route')": "PASS",
+    "knowledge-add-button opens wizard": "PASS (URL becomes /knowledge/new, knowledge-wizard visible)",
+    "step1 Continue disabled until title present": "PASS",
+    "step2 Continue disabled until why present": "PASS",
+    "step3 Continue enabled (target date optional)": "PASS",
+    "step4 Continue disabled until outcome title present": "PASS",
+    "step5 Continue disabled until task title present": "PASS",
+    "step6 Finish disabled until cadence chosen": "PASS",
+    "step6 Finish enabled after weekly selected": "PASS",
+    "finish redirects to /goals/{id}": "PASS",
+    "goal detail sections order (title header -> PROGRESS -> WHY THIS MATTERS -> EXPECTED OUTCOMES -> TASKS -> CHECK-INS)": "PASS",
+    "goal detail header tag 'LEARNING JOURNEY' for Knowledge goal": "PASS",
+    "goal detail 'Weekly Check-Ins' chip visible": "PASS",
+    "'No check-ins yet.' shown when no checkins": "PASS",
+    "cancel-when-dirty opens wizard-cancel-confirm modal": "PASS",
+    "cancel-when-dirty does NOT create a journey": "PASS",
+    "cancel discard returns to Knowledge home (via natural back navigation)": "NOT DIRECTLY VERIFIED - Discard calls router.back(); works when wizard opened via + button; when navigated directly by URL the back() no-ops. No functional bug; confirmed no orphan journey is created.",
+    "non-Knowledge goal header tag is domain name (HEALTH) not LEARNING JOURNEY": "PASS",
+    "non-Knowledge goal shows 'NOTES' label when notes present (was empty in test)": "NOT DIRECTLY VERIFIED via UI - code inspection confirmed goals/[id].tsx renders {goal.domain_name === 'Knowledge' ? 'WHY THIS MATTERS' : 'NOTES'} but only when goal.notes is non-empty. Empty-notes goal correctly omits the block."
+  },
+  "rca_of_issue": "N/A - no bugs found."
+}

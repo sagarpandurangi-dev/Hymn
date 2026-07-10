@@ -10,6 +10,7 @@ import ConfirmModal from "@/src/components/ConfirmModal";
 type Goal = {
   id: string; title: string; domain_id: string; domain_name: string;
   target_outcome: string; deadline: string; status: string; notes: string;
+  checkin_cadence: string;
   expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number;
 };
 
@@ -18,15 +19,39 @@ type EO = {
   deadline: string; status: string; notes: string;
 };
 
+type Task = {
+  id: string; title: string; due_date: string; priority: string; status: string;
+  expected_outcome_id: string | null;
+};
+
+type Checkin = {
+  id: string; type: string; title: string; date: string; time: string; notes: string;
+};
+
 const STATUS_COLORS: Record<string, string> = {
   active: colors.brandPrimary, paused: colors.warning, completed: colors.success, abandoned: colors.onSurfaceTertiary,
 };
+
+function cadenceLabel(c: string): string {
+  if (!c) return "";
+  return c.charAt(0).toUpperCase() + c.slice(1);
+}
+
+function formatDateShort(iso: string): string {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso + "T00:00:00");
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  } catch { return iso; }
+}
 
 export default function GoalDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [goal, setGoal] = useState<Goal | null>(null);
   const [eos, setEos] = useState<EO[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [checkins, setCheckins] = useState<Checkin[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -41,8 +66,14 @@ export default function GoalDetailScreen() {
     try {
       const g = await api.getGoal(id);
       setGoal(g);
-      const list = await api.listExpectedOutcomes(id);
+      const [list, taskList, checkinList] = await Promise.all([
+        api.listExpectedOutcomes(id),
+        api.listTasks({ goalId: id }),
+        api.listCheckins({ goalId: id }),
+      ]);
       setEos(list);
+      setTasks(taskList as Task[]);
+      setCheckins(checkinList as Checkin[]);
     } catch (e: any) {
       setError(e?.message || "Could not load");
     } finally { setLoading(false); }
@@ -96,8 +127,11 @@ export default function GoalDetailScreen() {
         <View style={styles.center}><Text style={styles.errorText}>{error}</Text></View>
       ) : goal ? (
         <ScrollView contentContainerStyle={styles.scroll}>
+          {/* ── LEARNING JOURNEY (Goal header) ── */}
           <View style={styles.topRow}>
-            <Text style={styles.domain}>{(goal.domain_name || "—").toUpperCase()}</Text>
+            <Text style={styles.domain}>
+              {goal.domain_name === "Knowledge" ? "LEARNING JOURNEY" : (goal.domain_name || "—").toUpperCase()}
+            </Text>
             <View style={styles.statusPill}>
               <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[goal.status] || colors.brandPrimary }]} />
               <Text style={styles.statusText}>{goal.status}</Text>
@@ -105,6 +139,24 @@ export default function GoalDetailScreen() {
           </View>
 
           <Text style={styles.title} testID="goal-detail-title">{goal.title}</Text>
+
+          {/* Journey meta chips: deadline + cadence */}
+          {(goal.deadline || goal.checkin_cadence) ? (
+            <View style={styles.chipRow}>
+              {goal.deadline ? (
+                <View style={styles.chip} testID="goal-detail-deadline-chip">
+                  <Ionicons name="calendar-outline" size={13} color={colors.onSurfaceSecondary} />
+                  <Text style={styles.chipText}>by {formatDateShort(goal.deadline)}</Text>
+                </View>
+              ) : null}
+              {goal.checkin_cadence ? (
+                <View style={styles.chip} testID="goal-detail-cadence-chip">
+                  <Ionicons name="repeat-outline" size={13} color={colors.onSurfaceSecondary} />
+                  <Text style={styles.chipText}>{cadenceLabel(goal.checkin_cadence)} check-ins</Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
 
           {/* Progress summary */}
           <View style={styles.progressBlock} testID="goal-detail-progress">
@@ -119,7 +171,24 @@ export default function GoalDetailScreen() {
             </View>
           </View>
 
-          {/* Expected Outcomes list */}
+          {/* Why / Notes */}
+          {goal.notes ? (
+            <View style={styles.block}>
+              <Text style={styles.blockLabel}>
+                {goal.domain_name === "Knowledge" ? "WHY THIS MATTERS" : "NOTES"}
+              </Text>
+              <Text style={styles.notes} testID="goal-detail-notes">{goal.notes}</Text>
+            </View>
+          ) : null}
+
+          {goal.target_outcome ? (
+            <View style={styles.block}>
+              <Text style={styles.blockLabel}>NARRATIVE TARGET</Text>
+              <Text style={styles.blockBody} testID="goal-detail-target">{goal.target_outcome}</Text>
+            </View>
+          ) : null}
+
+          {/* ── EXPECTED OUTCOMES ── */}
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
               <Text style={styles.blockLabel}>EXPECTED OUTCOMES</Text>
@@ -156,24 +225,82 @@ export default function GoalDetailScreen() {
             )}
           </View>
 
-          {goal.target_outcome ? (
-            <View style={styles.block}>
-              <Text style={styles.blockLabel}>NARRATIVE TARGET</Text>
-              <Text style={styles.blockBody} testID="goal-detail-target">{goal.target_outcome}</Text>
+          {/* ── TASKS ── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.blockLabel}>TASKS</Text>
+              <Pressable
+                onPress={() => router.push(`/tasks/add?goalId=${goal.id}`)}
+                testID="goal-detail-add-task"
+                hitSlop={8}
+              >
+                <Ionicons name="add-circle-outline" size={22} color={colors.brandPrimary} />
+              </Pressable>
             </View>
-          ) : null}
-          {goal.deadline ? (
-            <View style={styles.block}>
-              <Text style={styles.blockLabel}>DEADLINE</Text>
-              <Text style={styles.blockBody} testID="goal-detail-deadline">{goal.deadline}</Text>
+            {tasks.length === 0 ? (
+              <Text style={styles.emptyLine}>No tasks yet.</Text>
+            ) : (
+              tasks.map((t) => (
+                <Pressable
+                  key={t.id}
+                  onPress={() => router.push(`/tasks/${t.id}`)}
+                  style={styles.eoRow}
+                  testID={`task-row-${t.id}`}
+                >
+                  <Ionicons
+                    name={t.status === "done" ? "checkmark-circle" : "ellipse-outline"}
+                    size={18}
+                    color={t.status === "done" ? colors.success : colors.onSurfaceTertiary}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text
+                      style={[styles.eoTitle, t.status === "done" && { textDecorationLine: "line-through", color: colors.onSurfaceTertiary }]}
+                      numberOfLines={1}
+                    >
+                      {t.title}
+                    </Text>
+                    <Text style={styles.eoMeta}>
+                      {t.priority} · {t.status}{t.due_date ? ` · due ${formatDateShort(t.due_date)}` : ""}
+                    </Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={colors.onSurfaceTertiary} />
+                </Pressable>
+              ))
+            )}
+          </View>
+
+          {/* ── CHECK-INS ── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.blockLabel}>CHECK-INS</Text>
+              <Pressable
+                onPress={() => router.push("/checkin/goal")}
+                testID="goal-detail-add-checkin"
+                hitSlop={8}
+              >
+                <Ionicons name="add-circle-outline" size={22} color={colors.brandPrimary} />
+              </Pressable>
             </View>
-          ) : null}
-          {goal.notes ? (
-            <View style={styles.block}>
-              <Text style={styles.blockLabel}>NOTES</Text>
-              <Text style={styles.notes} testID="goal-detail-notes">{goal.notes}</Text>
-            </View>
-          ) : null}
+            {checkins.length === 0 ? (
+              <Text style={styles.emptyLine}>No check-ins yet.</Text>
+            ) : (
+              checkins.slice(0, 20).map((c) => (
+                <Pressable
+                  key={c.id}
+                  onPress={() => router.push(`/checkin/${c.id}`)}
+                  style={styles.eoRow}
+                  testID={`checkin-row-${c.id}`}
+                >
+                  <View style={styles.checkinDot} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.eoTitle} numberOfLines={1}>{c.title || "(untitled)"}</Text>
+                    <Text style={styles.eoMeta}>{formatDateShort(c.date)}{c.time ? ` · ${c.time}` : ""}</Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={colors.onSurfaceTertiary} />
+                </Pressable>
+              ))
+            )}
+          </View>
         </ScrollView>
       ) : null}
 
@@ -211,6 +338,14 @@ const styles = StyleSheet.create({
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   statusText: { fontSize: 12, color: colors.onSurfaceSecondary, textTransform: "capitalize" },
   title: { fontFamily: fonts.displayBold, fontSize: 28, color: colors.onSurface, fontWeight: "700", marginTop: spacing.sm, lineHeight: 36 },
+  chipRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, marginTop: spacing.md },
+  chip: {
+    flexDirection: "row", alignItems: "center", gap: 6,
+    backgroundColor: colors.surfaceSecondary, paddingHorizontal: spacing.md, paddingVertical: 6,
+    borderRadius: radius.pill,
+  },
+  chipText: { fontSize: 12, color: colors.onSurfaceSecondary, textTransform: "capitalize" },
+  checkinDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.brandPrimary },
   progressBlock: { marginTop: spacing.xl, backgroundColor: colors.surfaceSecondary, borderRadius: radius.md, padding: spacing.lg },
   progressText: { marginTop: 6 },
   progressBig: { fontFamily: fonts.displayBold, fontSize: 22, color: colors.onSurface, fontWeight: "700" },

@@ -90,6 +90,8 @@ class DomainResponse(BaseModel):
 
 GOAL_STATUSES = {"active", "paused", "completed", "abandoned"}
 DEFAULT_DOMAIN_NAMES = ["Knowledge", "Health", "Money", "Soul"]
+CHECKIN_CADENCES = {"daily", "weekly", "monthly", "manual"}
+KNOWLEDGE_DOMAIN_NAME = "Knowledge"
 
 
 class GoalCreate(BaseModel):
@@ -99,6 +101,7 @@ class GoalCreate(BaseModel):
     deadline: str = ""  # YYYY-MM-DD (optional)
     status: str = "active"
     notes: str = ""
+    checkin_cadence: str = ""  # "" | daily | weekly | monthly | manual
 
 
 class GoalUpdate(BaseModel):
@@ -108,6 +111,7 @@ class GoalUpdate(BaseModel):
     deadline: Optional[str] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+    checkin_cadence: Optional[str] = None
 
 
 class GoalResponse(BaseModel):
@@ -119,6 +123,7 @@ class GoalResponse(BaseModel):
     deadline: str
     status: str
     notes: str
+    checkin_cadence: str
     created_at: str
     updated_at: str
     expected_outcomes_total: int = 0
@@ -461,6 +466,7 @@ def goal_to_response(g: dict, domain_name: str, stats: Optional[dict] = None) ->
         deadline=g.get("deadline", "") or "",
         status=g.get("status", "active"),
         notes=g.get("notes", "") or "",
+        checkin_cadence=g.get("checkin_cadence", "") or "",
         created_at=g.get("created_at", ""),
         updated_at=g.get("updated_at", ""),
         expected_outcomes_total=total,
@@ -550,16 +556,28 @@ def checkin_to_response(c: dict) -> CheckInResponse:
 
 
 async def ensure_default_domains(user_id: str) -> None:
-    existing = await db.domains.count_documents({"user_id": user_id})
-    if existing > 0:
+    """Idempotently ensure every default domain exists for the user.
+
+    This is safe to call on every login / auth check. Adds only missing defaults
+    so existing users get newly-added default domains (like "Knowledge") without
+    a manual migration, and users who have already customised their domains
+    keep their edits.
+    """
+    existing_names = {
+        d.get("name")
+        for d in await db.domains.find(
+            {"user_id": user_id}, {"_id": 0, "name": 1}
+        ).to_list(length=1000)
+    }
+    missing = [n for n in DEFAULT_DOMAIN_NAMES if n not in existing_names]
+    if not missing:
         return
     now = datetime.now(timezone.utc).isoformat()
     docs = [
         {"id": str(uuid.uuid4()), "user_id": user_id, "name": name, "is_default": True, "created_at": now}
-        for name in DEFAULT_DOMAIN_NAMES
+        for name in missing
     ]
-    if docs:
-        await db.domains.insert_many(docs)
+    await db.domains.insert_many(docs)
 
 
 # ---------- Auth Routes ----------
@@ -790,6 +808,8 @@ async def list_goals(current_user: dict = Depends(get_current_user)):
 async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current_user)):
     if body.status not in GOAL_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
+    if body.checkin_cadence and body.checkin_cadence not in CHECKIN_CADENCES:
+        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)} or empty")
     domain = await db.domains.find_one({"id": body.domain_id, "user_id": current_user["id"]})
     if not domain:
         raise HTTPException(status_code=400, detail="Invalid domain")
@@ -803,6 +823,7 @@ async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current
         "deadline": (body.deadline or "").strip(),
         "status": body.status,
         "notes": (body.notes or "").strip(),
+        "checkin_cadence": (body.checkin_cadence or "").strip(),
         "created_at": now,
         "updated_at": now,
     }
@@ -829,11 +850,13 @@ async def update_goal(goal_id: str, body: GoalUpdate, current_user: dict = Depen
     updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
     if "status" in updates and updates["status"] not in GOAL_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
+    if "checkin_cadence" in updates and updates["checkin_cadence"] and updates["checkin_cadence"] not in CHECKIN_CADENCES:
+        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)} or empty")
     if "domain_id" in updates:
         d = await db.domains.find_one({"id": updates["domain_id"], "user_id": current_user["id"]})
         if not d:
             raise HTTPException(status_code=400, detail="Invalid domain")
-    for k in ("title", "target_outcome", "deadline", "notes"):
+    for k in ("title", "target_outcome", "deadline", "notes", "checkin_cadence"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -1017,8 +1040,22 @@ async def _validate_task_origin(user_id: str, origin: str, eo_id: Optional[str],
 
 
 @api_router.get("/tasks", response_model=List[TaskResponse])
-async def list_tasks(current_user: dict = Depends(get_current_user)):
+async def list_tasks(
+    current_user: dict = Depends(get_current_user),
+    goal_id: Optional[str] = None,
+):
     q: dict = {"user_id": current_user["id"]}
+    if goal_id:
+        # Tasks whose Expected Outcome belongs to this goal.
+        eo_ids = [
+            eo["id"]
+            for eo in await db.expected_outcomes.find(
+                {"user_id": current_user["id"], "goal_id": goal_id}, {"_id": 0, "id": 1}
+            ).to_list(length=1000)
+        ]
+        if not eo_ids:
+            return []
+        q["expected_outcome_id"] = {"$in": eo_ids}
     cursor = db.tasks.find(q, {"_id": 0})
     docs = await cursor.to_list(length=1000)
     docs.sort(key=lambda t: t.get("created_at", ""), reverse=True)
@@ -1135,8 +1172,14 @@ async def _create_follow_up_task(user_id: str, ft: FollowUpTask, checkin_type: s
 
 
 @api_router.get("/checkins", response_model=List[CheckInResponse])
-async def list_checkins(current_user: dict = Depends(get_current_user)):
-    cursor = db.checkins.find({"user_id": current_user["id"]}, {"_id": 0})
+async def list_checkins(
+    current_user: dict = Depends(get_current_user),
+    goal_id: Optional[str] = None,
+):
+    q: dict = {"user_id": current_user["id"]}
+    if goal_id:
+        q["goal_id"] = goal_id
+    cursor = db.checkins.find(q, {"_id": 0})
     docs = await cursor.to_list(length=1000)
     docs.sort(key=lambda c: (c.get("date", ""), c.get("time", "")), reverse=True)
     return [checkin_to_response(d) for d in docs]
@@ -1249,45 +1292,6 @@ async def delete_checkin(checkin_id: str, current_user: dict = Depends(get_curre
     return {"detail": "Check-in deleted"}
 
 
-# ---------- Learning Journey ----------
-LEARNING_JOURNEY_STATUSES = {"active", "archived"}
-
-
-class LearningJourneyCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
-    description: str = ""
-    target_completion_date: str = ""  # YYYY-MM-DD (optional)
-
-
-class LearningJourneyUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    target_completion_date: Optional[str] = None
-    status: Optional[str] = None
-
-
-class LearningJourneyResponse(BaseModel):
-    id: str
-    title: str
-    description: str
-    target_completion_date: str
-    status: str
-    created_at: str
-    updated_at: str
-
-
-def learning_journey_to_response(j: dict) -> LearningJourneyResponse:
-    return LearningJourneyResponse(
-        id=j["id"],
-        title=j.get("title", ""),
-        description=j.get("description", "") or "",
-        target_completion_date=j.get("target_completion_date", "") or "",
-        status=j.get("status", "active"),
-        created_at=j.get("created_at", ""),
-        updated_at=j.get("updated_at", ""),
-    )
-
-
 # ---------- Outcome Type Registry Endpoint ----------
 @api_router.get("/outcome-types")
 async def get_outcome_types():
@@ -1295,64 +1299,168 @@ async def get_outcome_types():
     return {"types": OUTCOME_TYPE_REGISTRY}
 
 
-# ---------- Learning Journey Routes ----------
-@api_router.get("/learning-journeys", response_model=List[LearningJourneyResponse])
-async def list_learning_journeys(current_user: dict = Depends(get_current_user)):
-    cursor = db.learning_journeys.find({"user_id": current_user["id"]}, {"_id": 0})
-    docs = await cursor.to_list(length=1000)
-    docs.sort(key=lambda j: j.get("created_at", ""), reverse=True)
-    return [learning_journey_to_response(d) for d in docs]
+# ---------- Knowledge (Learning Journey) Routes ----------
+# A Learning Journey is a Goal whose domain is "Knowledge". There is no
+# separate CRUD, no separate collection, no parallel execution engine.
+# This wizard endpoint enforces the Knowledge creation contract:
+# Goal + first Expected Outcome + first Task + persisted check-in cadence,
+# created atomically so the user cannot leave the flow with an orphan goal.
+
+class KnowledgeFirstOutcome(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    target_value: str = ""
+    unit: str = ""
+    outcome_type: str = "generic"
 
 
-@api_router.post("/learning-journeys", response_model=LearningJourneyResponse, status_code=201)
-async def create_learning_journey(body: LearningJourneyCreate, current_user: dict = Depends(get_current_user)):
+class KnowledgeFirstTask(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    due_date: str = ""
+    priority: str = "medium"
+
+
+class KnowledgeJourneyCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    why: str = Field(min_length=1, max_length=2000)  # Step 2: why this knowledge matters
+    target_completion_date: str = ""  # Step 3
+    first_outcome: KnowledgeFirstOutcome  # Step 4 (required)
+    first_task: KnowledgeFirstTask  # Step 5 (required)
+    checkin_cadence: str  # Step 6: daily | weekly | monthly | manual
+
+
+async def _get_or_create_knowledge_domain(user_id: str) -> dict:
+    """Return the Knowledge domain for this user, seeding it if missing."""
+    await ensure_default_domains(user_id)
+    d = await db.domains.find_one({"user_id": user_id, "name": KNOWLEDGE_DOMAIN_NAME}, {"_id": 0})
+    if d:
+        return d
+    # Fallback if the user renamed all their defaults away — recreate Knowledge.
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "name": KNOWLEDGE_DOMAIN_NAME,
+        "is_default": True,
+        "created_at": now,
+    }
+    await db.domains.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api_router.get("/knowledge/journeys", response_model=List[GoalResponse])
+async def list_knowledge_journeys(current_user: dict = Depends(get_current_user)):
+    """List every Learning Journey (== Goal in the Knowledge domain)."""
+    domain = await _get_or_create_knowledge_domain(current_user["id"])
+    cursor = db.goals.find(
+        {"user_id": current_user["id"], "domain_id": domain["id"]}, {"_id": 0}
+    )
+    goals = await cursor.to_list(length=1000)
+    goals.sort(key=lambda g: g.get("created_at", ""), reverse=True)
+    result = []
+    for g in goals:
+        stats = await compute_goal_stats(current_user["id"], g["id"])
+        result.append(goal_to_response(g, domain["name"], stats))
+    return result
+
+
+@api_router.post("/knowledge/journeys", response_model=GoalResponse, status_code=201)
+async def create_knowledge_journey(
+    body: KnowledgeJourneyCreate, current_user: dict = Depends(get_current_user)
+):
+    """Atomic wizard creation: Goal + first Expected Outcome + first Task + cadence.
+
+    On any validation failure nothing is persisted. This is the only way to
+    create a Learning Journey. There is no parallel workflow.
+    """
+    # Validate cadence up-front.
+    if body.checkin_cadence not in CHECKIN_CADENCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)}",
+        )
+    outcome_type = body.first_outcome.outcome_type or "generic"
+    if outcome_type not in OUTCOME_TYPE_REGISTRY:
+        raise HTTPException(status_code=400, detail=f"Invalid outcome_type '{outcome_type}'")
+    priority = body.first_task.priority or "medium"
+    if priority not in TASK_PRIORITIES:
+        raise HTTPException(
+            status_code=400, detail=f"Task priority must be one of {sorted(TASK_PRIORITIES)}"
+        )
+
+    domain = await _get_or_create_knowledge_domain(current_user["id"])
+    now = datetime.now(timezone.utc).isoformat()
+
+    # 1. Create the Goal (with the "why" persisted in notes and cadence on the goal).
+    goal_id = str(uuid.uuid4())
+    goal_doc = {
+        "id": goal_id,
         "user_id": current_user["id"],
         "title": body.title.strip(),
-        "description": (body.description or "").strip(),
-        "target_completion_date": (body.target_completion_date or "").strip(),
+        "domain_id": domain["id"],
+        "target_outcome": "",
+        "deadline": (body.target_completion_date or "").strip(),
         "status": "active",
+        "notes": body.why.strip(),
+        "checkin_cadence": body.checkin_cadence,
         "created_at": now,
         "updated_at": now,
     }
-    await db.learning_journeys.insert_one(doc)
-    doc.pop("_id", None)
-    return learning_journey_to_response(doc)
 
+    # 2. Prepare the first Expected Outcome.
+    eo_id = str(uuid.uuid4())
+    eo_doc = {
+        "id": eo_id,
+        "user_id": current_user["id"],
+        "goal_id": goal_id,
+        "title": body.first_outcome.title.strip(),
+        "target_value": (body.first_outcome.target_value or "").strip(),
+        "current_value": "",
+        "unit": (body.first_outcome.unit or "").strip(),
+        "deadline": "",
+        "status": "active",
+        "notes": "",
+        "outcome_type": outcome_type,
+        "created_at": now,
+        "updated_at": now,
+    }
 
-@api_router.get("/learning-journeys/{journey_id}", response_model=LearningJourneyResponse)
-async def get_learning_journey(journey_id: str, current_user: dict = Depends(get_current_user)):
-    doc = await db.learning_journeys.find_one({"id": journey_id, "user_id": current_user["id"]}, {"_id": 0})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Learning journey not found")
-    return learning_journey_to_response(doc)
+    # 3. Prepare the first Task, linked to the Expected Outcome.
+    task_id = str(uuid.uuid4())
+    task_doc = {
+        "id": task_id,
+        "user_id": current_user["id"],
+        "title": body.first_task.title.strip(),
+        "due_date": (body.first_task.due_date or "").strip(),
+        "priority": priority,
+        "status": "todo",
+        "notes": "",
+        "origin": "expected_outcome",
+        "expected_outcome_id": eo_id,
+        "project_id": None,
+        "assigned_to_type": "self",
+        "assigned_to_name": "",
+        "assigned_to_phone": "",
+        "created_at": now,
+        "updated_at": now,
+    }
 
+    # Persist in order. If EO or Task insert fails, roll back the Goal.
+    await db.goals.insert_one(goal_doc)
+    try:
+        await db.expected_outcomes.insert_one(eo_doc)
+    except Exception:
+        await db.goals.delete_one({"id": goal_id})
+        raise
+    try:
+        await db.tasks.insert_one(task_doc)
+    except Exception:
+        await db.expected_outcomes.delete_one({"id": eo_id})
+        await db.goals.delete_one({"id": goal_id})
+        raise
 
-@api_router.put("/learning-journeys/{journey_id}", response_model=LearningJourneyResponse)
-async def update_learning_journey(journey_id: str, body: LearningJourneyUpdate, current_user: dict = Depends(get_current_user)):
-    j = await db.learning_journeys.find_one({"id": journey_id, "user_id": current_user["id"]})
-    if not j:
-        raise HTTPException(status_code=404, detail="Learning journey not found")
-    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
-    if "status" in updates and updates["status"] not in LEARNING_JOURNEY_STATUSES:
-        raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(LEARNING_JOURNEY_STATUSES)}")
-    for k in ("title", "description", "target_completion_date"):
-        if k in updates and isinstance(updates[k], str):
-            updates[k] = updates[k].strip()
-    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.learning_journeys.update_one({"id": journey_id, "user_id": current_user["id"]}, {"$set": updates})
-    updated = await db.learning_journeys.find_one({"id": journey_id}, {"_id": 0})
-    return learning_journey_to_response(updated)
-
-
-@api_router.delete("/learning-journeys/{journey_id}", status_code=200)
-async def delete_learning_journey(journey_id: str, current_user: dict = Depends(get_current_user)):
-    result = await db.learning_journeys.delete_one({"id": journey_id, "user_id": current_user["id"]})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Learning journey not found")
-    return {"detail": "Learning journey deleted"}
+    goal_doc.pop("_id", None)
+    return goal_to_response(goal_doc, domain["name"], {"total": 1, "completed": 0})
 
 
 # ---------- App wiring ----------
