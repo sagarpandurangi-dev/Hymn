@@ -9,6 +9,9 @@ import HeaderAvatar from "@/src/components/HeaderAvatar";
 
 type Journey = {
   id: string;
+  goal_id: string;
+  journey_type: string;
+  has_stages: boolean;
   title: string;
   notes: string;
   deadline: string;
@@ -39,6 +42,19 @@ function formatDate(iso: string): string {
 function cadenceLabel(c: string): string {
   if (!c) return "";
   return c.charAt(0).toUpperCase() + c.slice(1);
+}
+
+const JOURNEY_TYPE_LABEL: Record<string, string> = {
+  professional_qualification: "Qualification",
+  skill: "Skill",
+  course: "Course",
+  subject: "Subject",
+  book: "Book",
+  custom: "Custom",
+};
+
+function journeyTypeLabel(t: string): string {
+  return JOURNEY_TYPE_LABEL[t] || "Learning Journey";
 }
 
 export default function KnowledgeScreen() {
@@ -114,12 +130,14 @@ export default function KnowledgeScreen() {
           {journeys.map((j) => (
             <Pressable
               key={j.id}
-              onPress={() => router.push(`/goals/${j.id}`)}
+              onPress={() => router.push(`/knowledge/${j.id}`)}
               style={styles.card}
               testID={`journey-row-${j.id}`}
             >
               <View style={styles.cardTop}>
-                <Text style={styles.tag}>LEARNING JOURNEY</Text>
+                <Text style={styles.tag}>
+                  {j.journey_type ? journeyTypeLabel(j.journey_type).toUpperCase() : "LEARNING JOURNEY"}
+                </Text>
                 <View style={styles.statusPill}>
                   <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[j.status] || colors.brandPrimary }]} />
                   <Text style={styles.statusText}>{j.status}</Text>

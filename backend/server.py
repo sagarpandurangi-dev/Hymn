@@ -301,6 +301,7 @@ class TaskCreate(BaseModel):
     origin: str = "standalone"
     expected_outcome_id: Optional[str] = None
     project_id: Optional[str] = None
+    component_id: Optional[str] = None  # Optional link to a Knowledge Component
     assigned_to_type: str = "self"
     assigned_to_name: str = ""
     assigned_to_phone: str = ""
@@ -312,6 +313,7 @@ class TaskUpdate(BaseModel):
     priority: Optional[str] = None
     status: Optional[str] = None
     notes: Optional[str] = None
+    component_id: Optional[str] = None
     assigned_to_type: Optional[str] = None
     assigned_to_name: Optional[str] = None
     assigned_to_phone: Optional[str] = None
@@ -327,6 +329,7 @@ class TaskResponse(BaseModel):
     origin: str
     expected_outcome_id: Optional[str] = None
     project_id: Optional[str] = None
+    component_id: Optional[str] = None
     assigned_to_type: str
     assigned_to_name: str
     assigned_to_phone: str
@@ -358,6 +361,7 @@ class CheckInCreate(BaseModel):
     expected_outcome_id: Optional[str] = None
     project_id: Optional[str] = None
     task_id: Optional[str] = None
+    component_id: Optional[str] = None  # Optional link to a Knowledge Component
     follow_up_task: Optional[FollowUpTask] = None
     source: str = "manual"
     data: dict = Field(default_factory=dict)  # type-specific dynamic fields
@@ -369,6 +373,7 @@ class CheckInUpdate(BaseModel):
     time: Optional[str] = None
     notes: Optional[str] = None
     attachment: Optional[str] = None
+    component_id: Optional[str] = None
     data: Optional[dict] = None
 
 
@@ -384,6 +389,7 @@ class CheckInResponse(BaseModel):
     goal_id: Optional[str] = None
     project_id: Optional[str] = None
     task_id: Optional[str] = None
+    component_id: Optional[str] = None
     follow_up_task_id: Optional[str] = None
     source: str
     outcome_type: Optional[str] = None
@@ -525,6 +531,7 @@ def task_to_response(t: dict) -> TaskResponse:
         origin=t.get("origin", "standalone"),
         expected_outcome_id=t.get("expected_outcome_id"),
         project_id=t.get("project_id"),
+        component_id=t.get("component_id"),
         assigned_to_type=t.get("assigned_to_type", "self"),
         assigned_to_name=t.get("assigned_to_name", "") or "",
         assigned_to_phone=t.get("assigned_to_phone", "") or "",
@@ -546,6 +553,7 @@ def checkin_to_response(c: dict) -> CheckInResponse:
         goal_id=c.get("goal_id"),
         project_id=c.get("project_id"),
         task_id=c.get("task_id"),
+        component_id=c.get("component_id"),
         follow_up_task_id=c.get("follow_up_task_id"),
         source=c.get("source", "manual"),
         outcome_type=c.get("outcome_type"),
@@ -1043,8 +1051,11 @@ async def _validate_task_origin(user_id: str, origin: str, eo_id: Optional[str],
 async def list_tasks(
     current_user: dict = Depends(get_current_user),
     goal_id: Optional[str] = None,
+    component_id: Optional[str] = None,
 ):
     q: dict = {"user_id": current_user["id"]}
+    if component_id:
+        q["component_id"] = component_id
     if goal_id:
         # Tasks whose Expected Outcome belongs to this goal.
         eo_ids = [
@@ -1053,9 +1064,18 @@ async def list_tasks(
                 {"user_id": current_user["id"], "goal_id": goal_id}, {"_id": 0, "id": 1}
             ).to_list(length=1000)
         ]
-        if not eo_ids:
+        if not eo_ids and not component_id:
             return []
-        q["expected_outcome_id"] = {"$in": eo_ids}
+        # If both goal_id and component_id are provided, match either.
+        if component_id:
+            q.pop("expected_outcome_id", None)
+            q["$or"] = [
+                {"expected_outcome_id": {"$in": eo_ids}} if eo_ids else {"_impossible": True},
+                {"component_id": component_id},
+            ]
+            q.pop("component_id", None)
+        else:
+            q["expected_outcome_id"] = {"$in": eo_ids}
     cursor = db.tasks.find(q, {"_id": 0})
     docs = await cursor.to_list(length=1000)
     docs.sort(key=lambda t: t.get("created_at", ""), reverse=True)
@@ -1073,6 +1093,13 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
     if body.assigned_to_type == "external" and not (body.assigned_to_name or body.assigned_to_phone):
         raise HTTPException(status_code=400, detail="External assignment requires assigned_to_name or assigned_to_phone")
     await _validate_task_origin(current_user["id"], body.origin, body.expected_outcome_id, body.project_id)
+    # Optional Knowledge Component link.
+    validated_component_id: Optional[str] = None
+    if body.component_id:
+        comp = await db.knowledge_components.find_one({"id": body.component_id, "user_id": current_user["id"]})
+        if not comp:
+            raise HTTPException(status_code=400, detail="Invalid component_id")
+        validated_component_id = comp["id"]
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         "id": str(uuid.uuid4()),
@@ -1085,6 +1112,7 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         "origin": body.origin,
         "expected_outcome_id": body.expected_outcome_id if body.origin == "expected_outcome" else None,
         "project_id": body.project_id if body.origin == "project" else None,
+        "component_id": validated_component_id,
         "assigned_to_type": body.assigned_to_type,
         "assigned_to_name": (body.assigned_to_name or "").strip() if body.assigned_to_type == "external" else "",
         "assigned_to_phone": (body.assigned_to_phone or "").strip() if body.assigned_to_type == "external" else "",
@@ -1175,10 +1203,13 @@ async def _create_follow_up_task(user_id: str, ft: FollowUpTask, checkin_type: s
 async def list_checkins(
     current_user: dict = Depends(get_current_user),
     goal_id: Optional[str] = None,
+    component_id: Optional[str] = None,
 ):
     q: dict = {"user_id": current_user["id"]}
     if goal_id:
         q["goal_id"] = goal_id
+    if component_id:
+        q["component_id"] = component_id
     cursor = db.checkins.find(q, {"_id": 0})
     docs = await cursor.to_list(length=1000)
     docs.sort(key=lambda c: (c.get("date", ""), c.get("time", "")), reverse=True)
@@ -1229,6 +1260,13 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
             task_id = t["id"]
     # life: no linkage
 
+    validated_component_id: Optional[str] = None
+    if body.component_id:
+        comp = await db.knowledge_components.find_one({"id": body.component_id, "user_id": current_user["id"]})
+        if not comp:
+            raise HTTPException(status_code=400, detail="Invalid component_id")
+        validated_component_id = comp["id"]
+
     follow_up_task_id: Optional[str] = None
     if body.follow_up_task:
         follow_up_task_id = await _create_follow_up_task(
@@ -1249,6 +1287,7 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         "goal_id": goal_id,
         "project_id": project_id,
         "task_id": task_id,
+        "component_id": validated_component_id,
         "follow_up_task_id": follow_up_task_id,
         "source": body.source,
         "outcome_type": outcome_type,
@@ -1299,12 +1338,33 @@ async def get_outcome_types():
     return {"types": OUTCOME_TYPE_REGISTRY}
 
 
-# ---------- Knowledge (Learning Journey) Routes ----------
-# A Learning Journey is a Goal whose domain is "Knowledge". There is no
-# separate CRUD, no separate collection, no parallel execution engine.
-# This wizard endpoint enforces the Knowledge creation contract:
-# Goal + first Expected Outcome + first Task + persisted check-in cadence,
-# created atomically so the user cannot leave the flow with an orphan goal.
+# ============================================================================
+# Knowledge Engine — Hierarchical (Journey → Stage → Component → …)
+# ============================================================================
+# The execution engine (Goal → Expected Outcome → Task → Check-in) is untouched
+# and remains domain-agnostic. Knowledge-specific state lives in three separate
+# collections:
+#   * knowledge_journeys   — one row per Learning Journey, points at ONE Goal
+#   * knowledge_stages     — optional level groupings inside a Journey
+#   * knowledge_components — unlimited-depth tree of learning components
+# Tasks and Check-ins may optionally attach to a component via component_id.
+# The Goal, Task and Check-in engines gained only nullable foreign-key fields;
+# their CRUD semantics did not change.
+
+JOURNEY_TYPES = {
+    "professional_qualification",
+    "skill",
+    "course",
+    "subject",
+    "book",
+    "custom",
+}
+COMPONENT_STATUSES = {"not_started", "in_progress", "completed", "paused"}
+
+
+class KnowledgeStageInput(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
 
 class KnowledgeFirstOutcome(BaseModel):
     title: str = Field(min_length=1, max_length=200)
@@ -1320,12 +1380,95 @@ class KnowledgeFirstTask(BaseModel):
 
 
 class KnowledgeJourneyCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
-    why: str = Field(min_length=1, max_length=2000)  # Step 2: why this knowledge matters
-    target_completion_date: str = ""  # Step 3
-    first_outcome: KnowledgeFirstOutcome  # Step 4 (required)
-    first_task: KnowledgeFirstTask  # Step 5 (required)
-    checkin_cadence: str  # Step 6: daily | weekly | monthly | manual
+    # --- Knowledge hierarchy (steps 1-4) ---
+    journey_type: str  # Step 1
+    title: str = Field(min_length=1, max_length=200)  # Step 2
+    has_stages: bool = False  # Step 3
+    stages: List[KnowledgeStageInput] = Field(default_factory=list)  # Step 4 (if has_stages)
+    # --- Execution engine (steps 5-9) ---
+    why: str = Field(min_length=1, max_length=2000)  # Step 5
+    target_completion_date: str = ""  # Step 6
+    first_outcome: KnowledgeFirstOutcome  # Step 7 (required)
+    first_task: KnowledgeFirstTask  # Step 8 (required)
+    checkin_cadence: str  # Step 9: daily | weekly | monthly | manual
+
+
+class KnowledgeJourneyUpdate(BaseModel):
+    journey_type: Optional[str] = None
+    has_stages: Optional[bool] = None
+
+
+class KnowledgeJourneyResponse(BaseModel):
+    id: str
+    goal_id: str
+    journey_type: str
+    has_stages: bool
+    # Denormalised, read-only projections from the linked Goal for convenience —
+    # the Goal remains the source of truth for execution data.
+    title: str
+    notes: str
+    deadline: str
+    status: str
+    checkin_cadence: str
+    domain_id: str
+    domain_name: str
+    expected_outcomes_total: int = 0
+    expected_outcomes_completed: int = 0
+    completion_pct: float = 0.0
+    created_at: str
+    updated_at: str
+
+
+class KnowledgeStageCreate(BaseModel):
+    journey_id: str
+    name: str = Field(min_length=1, max_length=200)
+
+
+class KnowledgeStageUpdate(BaseModel):
+    name: Optional[str] = None
+
+
+class KnowledgeStageResponse(BaseModel):
+    id: str
+    journey_id: str
+    name: str
+    sequence: int
+    created_at: str
+    updated_at: str
+
+
+class KnowledgeComponentCreate(BaseModel):
+    journey_id: str
+    stage_id: Optional[str] = None
+    parent_component_id: Optional[str] = None
+    name: str = Field(min_length=1, max_length=200)
+    type: str = ""  # user-supplied label — never hardcoded
+    status: str = "not_started"
+    progress: int = 0  # 0..100
+    notes: str = ""
+
+
+class KnowledgeComponentUpdate(BaseModel):
+    name: Optional[str] = None
+    type: Optional[str] = None
+    status: Optional[str] = None
+    progress: Optional[int] = None
+    notes: Optional[str] = None
+
+
+class KnowledgeComponentResponse(BaseModel):
+    id: str
+    journey_id: str
+    stage_id: Optional[str]
+    parent_component_id: Optional[str]
+    name: str
+    type: str
+    sequence: int
+    status: str
+    progress: int
+    notes: str
+    created_at: str
+    updated_at: str
 
 
 async def _get_or_create_knowledge_domain(user_id: str) -> dict:
@@ -1334,7 +1477,6 @@ async def _get_or_create_knowledge_domain(user_id: str) -> dict:
     d = await db.domains.find_one({"user_id": user_id, "name": KNOWLEDGE_DOMAIN_NAME}, {"_id": 0})
     if d:
         return d
-    # Fallback if the user renamed all their defaults away — recreate Knowledge.
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         "id": str(uuid.uuid4()),
@@ -1348,119 +1490,487 @@ async def _get_or_create_knowledge_domain(user_id: str) -> dict:
     return doc
 
 
-@api_router.get("/knowledge/journeys", response_model=List[GoalResponse])
-async def list_knowledge_journeys(current_user: dict = Depends(get_current_user)):
-    """List every Learning Journey (== Goal in the Knowledge domain)."""
-    domain = await _get_or_create_knowledge_domain(current_user["id"])
-    cursor = db.goals.find(
-        {"user_id": current_user["id"], "domain_id": domain["id"]}, {"_id": 0}
+async def _backfill_legacy_journeys(user_id: str, knowledge_domain_id: str) -> None:
+    """Legacy compatibility.
+
+    Prior Knowledge Journeys were stored as plain Goals in the Knowledge domain
+    with no `knowledge_journeys` row. On any read call we lazily upsert a
+    default row so those journeys continue to appear. Idempotent.
+    """
+    goal_ids = {
+        g["id"]
+        for g in await db.goals.find(
+            {"user_id": user_id, "domain_id": knowledge_domain_id}, {"_id": 0, "id": 1}
+        ).to_list(length=5000)
+    }
+    if not goal_ids:
+        return
+    existing = {
+        j["goal_id"]
+        for j in await db.knowledge_journeys.find(
+            {"user_id": user_id, "goal_id": {"$in": list(goal_ids)}},
+            {"_id": 0, "goal_id": 1},
+        ).to_list(length=5000)
+    }
+    missing = [gid for gid in goal_ids if gid not in existing]
+    if not missing:
+        return
+    now = datetime.now(timezone.utc).isoformat()
+    docs = [
+        {
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "goal_id": gid,
+            "journey_type": "",
+            "has_stages": False,
+            "created_at": now,
+            "updated_at": now,
+        }
+        for gid in missing
+    ]
+    await db.knowledge_journeys.insert_many(docs)
+
+
+def _journey_to_response(j: dict, goal: dict, domain_name: str, stats: dict) -> KnowledgeJourneyResponse:
+    total = int(stats.get("total", 0))
+    completed = int(stats.get("completed", 0))
+    pct = round((completed / total) * 100, 1) if total > 0 else 0.0
+    return KnowledgeJourneyResponse(
+        id=j["id"],
+        goal_id=j["goal_id"],
+        journey_type=j.get("journey_type", "") or "",
+        has_stages=bool(j.get("has_stages", False)),
+        title=goal.get("title", ""),
+        notes=goal.get("notes", "") or "",
+        deadline=goal.get("deadline", "") or "",
+        status=goal.get("status", "active"),
+        checkin_cadence=goal.get("checkin_cadence", "") or "",
+        domain_id=goal.get("domain_id", ""),
+        domain_name=domain_name,
+        expected_outcomes_total=total,
+        expected_outcomes_completed=completed,
+        completion_pct=pct,
+        created_at=j.get("created_at", ""),
+        updated_at=j.get("updated_at", ""),
     )
-    goals = await cursor.to_list(length=1000)
-    goals.sort(key=lambda g: g.get("created_at", ""), reverse=True)
+
+
+def _stage_to_response(s: dict) -> KnowledgeStageResponse:
+    return KnowledgeStageResponse(
+        id=s["id"],
+        journey_id=s["journey_id"],
+        name=s.get("name", ""),
+        sequence=int(s.get("sequence", 0)),
+        created_at=s.get("created_at", ""),
+        updated_at=s.get("updated_at", ""),
+    )
+
+
+def _component_to_response(c: dict) -> KnowledgeComponentResponse:
+    return KnowledgeComponentResponse(
+        id=c["id"],
+        journey_id=c["journey_id"],
+        stage_id=c.get("stage_id"),
+        parent_component_id=c.get("parent_component_id"),
+        name=c.get("name", ""),
+        type=c.get("type", "") or "",
+        sequence=int(c.get("sequence", 0)),
+        status=c.get("status", "not_started"),
+        progress=int(c.get("progress", 0)),
+        notes=c.get("notes", "") or "",
+        created_at=c.get("created_at", ""),
+        updated_at=c.get("updated_at", ""),
+    )
+
+
+async def _get_own_journey(user_id: str, journey_id: str) -> dict:
+    j = await db.knowledge_journeys.find_one({"id": journey_id, "user_id": user_id}, {"_id": 0})
+    if not j:
+        raise HTTPException(status_code=404, detail="Knowledge journey not found")
+    return j
+
+
+async def _next_sequence(collection, filter_q: dict) -> int:
+    top = await collection.find(filter_q, {"_id": 0, "sequence": 1}).sort("sequence", -1).limit(1).to_list(length=1)
+    return (int(top[0]["sequence"]) + 1) if top else 0
+
+
+async def _cascade_delete_component(user_id: str, component_id: str) -> None:
+    """Delete this component and every descendant. Also detaches Tasks/Check-ins."""
+    stack = [component_id]
+    to_delete: List[str] = []
+    while stack:
+        current = stack.pop()
+        to_delete.append(current)
+        children = await db.knowledge_components.find(
+            {"user_id": user_id, "parent_component_id": current}, {"_id": 0, "id": 1}
+        ).to_list(length=1000)
+        stack.extend(c["id"] for c in children)
+    if to_delete:
+        await db.knowledge_components.delete_many({"user_id": user_id, "id": {"$in": to_delete}})
+        # Detach (do NOT delete) linked tasks and check-ins.
+        await db.tasks.update_many(
+            {"user_id": user_id, "component_id": {"$in": to_delete}},
+            {"$set": {"component_id": None}},
+        )
+        await db.checkins.update_many(
+            {"user_id": user_id, "component_id": {"$in": to_delete}},
+            {"$set": {"component_id": None}},
+        )
+
+
+# ---------------------- Knowledge Journey Routes ----------------------
+@api_router.get("/knowledge/journeys", response_model=List[KnowledgeJourneyResponse])
+async def list_knowledge_journeys(current_user: dict = Depends(get_current_user)):
+    domain = await _get_or_create_knowledge_domain(current_user["id"])
+    await _backfill_legacy_journeys(current_user["id"], domain["id"])
+    journeys = await db.knowledge_journeys.find(
+        {"user_id": current_user["id"]}, {"_id": 0}
+    ).to_list(length=1000)
+    if not journeys:
+        return []
+    goal_ids = [j["goal_id"] for j in journeys]
+    goals = {
+        g["id"]: g
+        for g in await db.goals.find(
+            {"user_id": current_user["id"], "id": {"$in": goal_ids}}, {"_id": 0}
+        ).to_list(length=1000)
+    }
+    journeys.sort(key=lambda j: j.get("created_at", ""), reverse=True)
     result = []
-    for g in goals:
-        stats = await compute_goal_stats(current_user["id"], g["id"])
-        result.append(goal_to_response(g, domain["name"], stats))
+    for j in journeys:
+        goal = goals.get(j["goal_id"])
+        if not goal:
+            continue  # Orphan journey — skip silently.
+        stats = await compute_goal_stats(current_user["id"], goal["id"])
+        result.append(_journey_to_response(j, goal, domain["name"], stats))
     return result
 
 
-@api_router.post("/knowledge/journeys", response_model=GoalResponse, status_code=201)
+@api_router.post("/knowledge/journeys", response_model=KnowledgeJourneyResponse, status_code=201)
 async def create_knowledge_journey(
     body: KnowledgeJourneyCreate, current_user: dict = Depends(get_current_user)
 ):
-    """Atomic wizard creation: Goal + first Expected Outcome + first Task + cadence.
-
-    On any validation failure nothing is persisted. This is the only way to
-    create a Learning Journey. There is no parallel workflow.
-    """
-    # Validate cadence up-front.
+    """Atomic wizard: KnowledgeJourney + Goal + optional Stages + first EO + first Task."""
+    # -- Validate -----------------------------------------------------------
+    if body.journey_type not in JOURNEY_TYPES:
+        raise HTTPException(status_code=400, detail=f"journey_type must be one of {sorted(JOURNEY_TYPES)}")
     if body.checkin_cadence not in CHECKIN_CADENCES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)}",
-        )
+        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)}")
     outcome_type = body.first_outcome.outcome_type or "generic"
     if outcome_type not in OUTCOME_TYPE_REGISTRY:
         raise HTTPException(status_code=400, detail=f"Invalid outcome_type '{outcome_type}'")
     priority = body.first_task.priority or "medium"
     if priority not in TASK_PRIORITIES:
-        raise HTTPException(
-            status_code=400, detail=f"Task priority must be one of {sorted(TASK_PRIORITIES)}"
-        )
+        raise HTTPException(status_code=400, detail=f"Task priority must be one of {sorted(TASK_PRIORITIES)}")
+    if body.has_stages and len(body.stages) == 0:
+        raise HTTPException(status_code=400, detail="At least one stage is required when has_stages is true")
 
     domain = await _get_or_create_knowledge_domain(current_user["id"])
     now = datetime.now(timezone.utc).isoformat()
 
-    # 1. Create the Goal (with the "why" persisted in notes and cadence on the goal).
+    # -- Prepare docs (no writes yet) --------------------------------------
     goal_id = str(uuid.uuid4())
     goal_doc = {
-        "id": goal_id,
-        "user_id": current_user["id"],
-        "title": body.title.strip(),
-        "domain_id": domain["id"],
-        "target_outcome": "",
-        "deadline": (body.target_completion_date or "").strip(),
-        "status": "active",
-        "notes": body.why.strip(),
+        "id": goal_id, "user_id": current_user["id"],
+        "title": body.title.strip(), "domain_id": domain["id"],
+        "target_outcome": "", "deadline": (body.target_completion_date or "").strip(),
+        "status": "active", "notes": body.why.strip(),
         "checkin_cadence": body.checkin_cadence,
-        "created_at": now,
-        "updated_at": now,
+        "created_at": now, "updated_at": now,
     }
-
-    # 2. Prepare the first Expected Outcome.
+    journey_id = str(uuid.uuid4())
+    journey_doc = {
+        "id": journey_id, "user_id": current_user["id"], "goal_id": goal_id,
+        "journey_type": body.journey_type, "has_stages": body.has_stages,
+        "created_at": now, "updated_at": now,
+    }
+    stage_docs = [
+        {
+            "id": str(uuid.uuid4()), "user_id": current_user["id"], "journey_id": journey_id,
+            "name": s.name.strip(), "sequence": i,
+            "created_at": now, "updated_at": now,
+        }
+        for i, s in enumerate(body.stages)
+    ] if body.has_stages else []
     eo_id = str(uuid.uuid4())
     eo_doc = {
-        "id": eo_id,
-        "user_id": current_user["id"],
-        "goal_id": goal_id,
+        "id": eo_id, "user_id": current_user["id"], "goal_id": goal_id,
         "title": body.first_outcome.title.strip(),
         "target_value": (body.first_outcome.target_value or "").strip(),
-        "current_value": "",
-        "unit": (body.first_outcome.unit or "").strip(),
-        "deadline": "",
-        "status": "active",
-        "notes": "",
+        "current_value": "", "unit": (body.first_outcome.unit or "").strip(),
+        "deadline": "", "status": "active", "notes": "",
         "outcome_type": outcome_type,
-        "created_at": now,
-        "updated_at": now,
+        "created_at": now, "updated_at": now,
     }
-
-    # 3. Prepare the first Task, linked to the Expected Outcome.
-    task_id = str(uuid.uuid4())
     task_doc = {
-        "id": task_id,
-        "user_id": current_user["id"],
+        "id": str(uuid.uuid4()), "user_id": current_user["id"],
         "title": body.first_task.title.strip(),
         "due_date": (body.first_task.due_date or "").strip(),
-        "priority": priority,
-        "status": "todo",
-        "notes": "",
-        "origin": "expected_outcome",
-        "expected_outcome_id": eo_id,
-        "project_id": None,
-        "assigned_to_type": "self",
-        "assigned_to_name": "",
-        "assigned_to_phone": "",
-        "created_at": now,
-        "updated_at": now,
+        "priority": priority, "status": "todo", "notes": "",
+        "origin": "expected_outcome", "expected_outcome_id": eo_id,
+        "project_id": None, "component_id": None,
+        "assigned_to_type": "self", "assigned_to_name": "", "assigned_to_phone": "",
+        "created_at": now, "updated_at": now,
     }
 
-    # Persist in order. If EO or Task insert fails, roll back the Goal.
-    await db.goals.insert_one(goal_doc)
+    # -- Persist with cascading rollback -----------------------------------
+    inserted: List[tuple] = []  # (collection, {"id": ...}) for rollback
     try:
-        await db.expected_outcomes.insert_one(eo_doc)
+        await db.goals.insert_one(goal_doc); inserted.append((db.goals, {"id": goal_id}))
+        await db.knowledge_journeys.insert_one(journey_doc); inserted.append((db.knowledge_journeys, {"id": journey_id}))
+        if stage_docs:
+            await db.knowledge_stages.insert_many(stage_docs)
+            inserted.append((db.knowledge_stages, {"id": {"$in": [s["id"] for s in stage_docs]}}))
+        await db.expected_outcomes.insert_one(eo_doc); inserted.append((db.expected_outcomes, {"id": eo_id}))
+        await db.tasks.insert_one(task_doc); inserted.append((db.tasks, {"id": task_doc["id"]}))
     except Exception:
-        await db.goals.delete_one({"id": goal_id})
-        raise
-    try:
-        await db.tasks.insert_one(task_doc)
-    except Exception:
-        await db.expected_outcomes.delete_one({"id": eo_id})
-        await db.goals.delete_one({"id": goal_id})
+        for coll, f in reversed(inserted):
+            try:
+                await coll.delete_many(f) if "$in" in str(f) else await coll.delete_one(f)
+            except Exception:
+                pass
         raise
 
-    goal_doc.pop("_id", None)
-    return goal_to_response(goal_doc, domain["name"], {"total": 1, "completed": 0})
+    journey_doc.pop("_id", None); goal_doc.pop("_id", None)
+    return _journey_to_response(journey_doc, goal_doc, domain["name"], {"total": 1, "completed": 0})
+
+
+@api_router.get("/knowledge/journeys/{journey_id}", response_model=KnowledgeJourneyResponse)
+async def get_knowledge_journey(journey_id: str, current_user: dict = Depends(get_current_user)):
+    domain = await _get_or_create_knowledge_domain(current_user["id"])
+    await _backfill_legacy_journeys(current_user["id"], domain["id"])
+    j = await _get_own_journey(current_user["id"], journey_id)
+    goal = await db.goals.find_one({"id": j["goal_id"], "user_id": current_user["id"]}, {"_id": 0})
+    if not goal:
+        raise HTTPException(status_code=404, detail="Underlying goal missing")
+    stats = await compute_goal_stats(current_user["id"], goal["id"])
+    return _journey_to_response(j, goal, domain["name"], stats)
+
+
+@api_router.put("/knowledge/journeys/{journey_id}", response_model=KnowledgeJourneyResponse)
+async def update_knowledge_journey(
+    journey_id: str, body: KnowledgeJourneyUpdate, current_user: dict = Depends(get_current_user)
+):
+    j = await _get_own_journey(current_user["id"], journey_id)
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if "journey_type" in updates and updates["journey_type"] not in JOURNEY_TYPES:
+        raise HTTPException(status_code=400, detail=f"journey_type must be one of {sorted(JOURNEY_TYPES)}")
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.knowledge_journeys.update_one({"id": journey_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.knowledge_journeys.find_one({"id": journey_id}, {"_id": 0})
+    goal = await db.goals.find_one({"id": j["goal_id"]}, {"_id": 0})
+    domain = await _get_or_create_knowledge_domain(current_user["id"])
+    stats = await compute_goal_stats(current_user["id"], goal["id"])
+    return _journey_to_response(updated, goal, domain["name"], stats)
+
+
+@api_router.delete("/knowledge/journeys/{journey_id}", status_code=200)
+async def delete_knowledge_journey(journey_id: str, current_user: dict = Depends(get_current_user)):
+    j = await _get_own_journey(current_user["id"], journey_id)
+    # Cascade: components (which cascades tasks/checkins detach), stages, journey, goal, EO cascade via goal delete.
+    comps = await db.knowledge_components.find(
+        {"user_id": current_user["id"], "journey_id": journey_id}, {"_id": 0, "id": 1}
+    ).to_list(length=5000)
+    if comps:
+        comp_ids = [c["id"] for c in comps]
+        await db.knowledge_components.delete_many({"user_id": current_user["id"], "id": {"$in": comp_ids}})
+        await db.tasks.update_many(
+            {"user_id": current_user["id"], "component_id": {"$in": comp_ids}},
+            {"$set": {"component_id": None}},
+        )
+        await db.checkins.update_many(
+            {"user_id": current_user["id"], "component_id": {"$in": comp_ids}},
+            {"$set": {"component_id": None}},
+        )
+    await db.knowledge_stages.delete_many({"user_id": current_user["id"], "journey_id": journey_id})
+    await db.knowledge_journeys.delete_one({"id": journey_id, "user_id": current_user["id"]})
+    await db.goals.delete_one({"id": j["goal_id"], "user_id": current_user["id"]})
+    await db.expected_outcomes.delete_many({"user_id": current_user["id"], "goal_id": j["goal_id"]})
+    return {"detail": "Knowledge journey deleted"}
+
+
+# ---------------------- Knowledge Stage Routes ----------------------
+@api_router.get("/knowledge/journeys/{journey_id}/stages", response_model=List[KnowledgeStageResponse])
+async def list_stages(journey_id: str, current_user: dict = Depends(get_current_user)):
+    await _get_own_journey(current_user["id"], journey_id)
+    docs = await db.knowledge_stages.find(
+        {"user_id": current_user["id"], "journey_id": journey_id}, {"_id": 0}
+    ).to_list(length=1000)
+    docs.sort(key=lambda s: int(s.get("sequence", 0)))
+    return [_stage_to_response(d) for d in docs]
+
+
+@api_router.post("/knowledge/stages", response_model=KnowledgeStageResponse, status_code=201)
+async def create_stage(body: KnowledgeStageCreate, current_user: dict = Depends(get_current_user)):
+    await _get_own_journey(current_user["id"], body.journey_id)
+    now = datetime.now(timezone.utc).isoformat()
+    seq = await _next_sequence(db.knowledge_stages, {"user_id": current_user["id"], "journey_id": body.journey_id})
+    doc = {
+        "id": str(uuid.uuid4()), "user_id": current_user["id"], "journey_id": body.journey_id,
+        "name": body.name.strip(), "sequence": seq,
+        "created_at": now, "updated_at": now,
+    }
+    await db.knowledge_stages.insert_one(doc)
+    doc.pop("_id", None)
+    return _stage_to_response(doc)
+
+
+@api_router.put("/knowledge/stages/{stage_id}", response_model=KnowledgeStageResponse)
+async def update_stage(stage_id: str, body: KnowledgeStageUpdate, current_user: dict = Depends(get_current_user)):
+    s = await db.knowledge_stages.find_one({"id": stage_id, "user_id": current_user["id"]})
+    if not s:
+        raise HTTPException(status_code=404, detail="Stage not found")
+    updates = {k: v.strip() if isinstance(v, str) else v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.knowledge_stages.update_one({"id": stage_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.knowledge_stages.find_one({"id": stage_id}, {"_id": 0})
+    return _stage_to_response(updated)
+
+
+@api_router.delete("/knowledge/stages/{stage_id}", status_code=200)
+async def delete_stage(stage_id: str, current_user: dict = Depends(get_current_user)):
+    s = await db.knowledge_stages.find_one({"id": stage_id, "user_id": current_user["id"]})
+    if not s:
+        raise HTTPException(status_code=404, detail="Stage not found")
+    # Cascade: delete every component whose stage_id is this stage (and their descendants).
+    top_level = await db.knowledge_components.find(
+        {"user_id": current_user["id"], "stage_id": stage_id, "parent_component_id": None},
+        {"_id": 0, "id": 1},
+    ).to_list(length=1000)
+    for c in top_level:
+        await _cascade_delete_component(current_user["id"], c["id"])
+    # Anything still attached (nested rows directly under the stage without top parent) — nuke.
+    await db.knowledge_components.delete_many({"user_id": current_user["id"], "stage_id": stage_id})
+    await db.knowledge_stages.delete_one({"id": stage_id, "user_id": current_user["id"]})
+    return {"detail": "Stage deleted"}
+
+
+@api_router.post("/knowledge/stages/{stage_id}/move")
+async def move_stage(stage_id: str, direction: str, current_user: dict = Depends(get_current_user)):
+    if direction not in {"up", "down"}:
+        raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'")
+    s = await db.knowledge_stages.find_one({"id": stage_id, "user_id": current_user["id"]})
+    if not s:
+        raise HTTPException(status_code=404, detail="Stage not found")
+    siblings = await db.knowledge_stages.find(
+        {"user_id": current_user["id"], "journey_id": s["journey_id"]}, {"_id": 0}
+    ).to_list(length=1000)
+    siblings.sort(key=lambda x: int(x.get("sequence", 0)))
+    idx = next((i for i, x in enumerate(siblings) if x["id"] == stage_id), -1)
+    swap_idx = idx - 1 if direction == "up" else idx + 1
+    if idx < 0 or swap_idx < 0 or swap_idx >= len(siblings):
+        return {"detail": "No move"}
+    a, b = siblings[idx], siblings[swap_idx]
+    now = datetime.now(timezone.utc).isoformat()
+    await db.knowledge_stages.update_one({"id": a["id"]}, {"$set": {"sequence": b["sequence"], "updated_at": now}})
+    await db.knowledge_stages.update_one({"id": b["id"]}, {"$set": {"sequence": a["sequence"], "updated_at": now}})
+    return {"detail": "moved"}
+
+
+# ---------------------- Knowledge Component Routes ----------------------
+@api_router.get("/knowledge/journeys/{journey_id}/components", response_model=List[KnowledgeComponentResponse])
+async def list_components(journey_id: str, current_user: dict = Depends(get_current_user)):
+    await _get_own_journey(current_user["id"], journey_id)
+    docs = await db.knowledge_components.find(
+        {"user_id": current_user["id"], "journey_id": journey_id}, {"_id": 0}
+    ).to_list(length=5000)
+    docs.sort(key=lambda c: int(c.get("sequence", 0)))
+    return [_component_to_response(d) for d in docs]
+
+
+@api_router.post("/knowledge/components", response_model=KnowledgeComponentResponse, status_code=201)
+async def create_component(body: KnowledgeComponentCreate, current_user: dict = Depends(get_current_user)):
+    await _get_own_journey(current_user["id"], body.journey_id)
+    if body.status not in COMPONENT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {sorted(COMPONENT_STATUSES)}")
+    if body.progress < 0 or body.progress > 100:
+        raise HTTPException(status_code=400, detail="progress must be between 0 and 100")
+    if body.stage_id:
+        st = await db.knowledge_stages.find_one({"id": body.stage_id, "user_id": current_user["id"], "journey_id": body.journey_id})
+        if not st:
+            raise HTTPException(status_code=400, detail="Invalid stage_id")
+    if body.parent_component_id:
+        pc = await db.knowledge_components.find_one({"id": body.parent_component_id, "user_id": current_user["id"], "journey_id": body.journey_id})
+        if not pc:
+            raise HTTPException(status_code=400, detail="Invalid parent_component_id")
+        # A child inherits the parent's stage_id.
+        body.stage_id = pc.get("stage_id")
+    seq = await _next_sequence(
+        db.knowledge_components,
+        {
+            "user_id": current_user["id"], "journey_id": body.journey_id,
+            "stage_id": body.stage_id, "parent_component_id": body.parent_component_id,
+        },
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    doc = {
+        "id": str(uuid.uuid4()), "user_id": current_user["id"], "journey_id": body.journey_id,
+        "stage_id": body.stage_id, "parent_component_id": body.parent_component_id,
+        "name": body.name.strip(), "type": (body.type or "").strip(),
+        "sequence": seq, "status": body.status, "progress": int(body.progress),
+        "notes": (body.notes or "").strip(),
+        "created_at": now, "updated_at": now,
+    }
+    await db.knowledge_components.insert_one(doc)
+    doc.pop("_id", None)
+    return _component_to_response(doc)
+
+
+@api_router.put("/knowledge/components/{component_id}", response_model=KnowledgeComponentResponse)
+async def update_component(component_id: str, body: KnowledgeComponentUpdate, current_user: dict = Depends(get_current_user)):
+    c = await db.knowledge_components.find_one({"id": component_id, "user_id": current_user["id"]})
+    if not c:
+        raise HTTPException(status_code=404, detail="Component not found")
+    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    if "status" in updates and updates["status"] not in COMPONENT_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {sorted(COMPONENT_STATUSES)}")
+    if "progress" in updates and not (0 <= int(updates["progress"]) <= 100):
+        raise HTTPException(status_code=400, detail="progress must be between 0 and 100")
+    for k in ("name", "type", "notes"):
+        if k in updates and isinstance(updates[k], str):
+            updates[k] = updates[k].strip()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.knowledge_components.update_one({"id": component_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.knowledge_components.find_one({"id": component_id}, {"_id": 0})
+    return _component_to_response(updated)
+
+
+@api_router.delete("/knowledge/components/{component_id}", status_code=200)
+async def delete_component(component_id: str, current_user: dict = Depends(get_current_user)):
+    c = await db.knowledge_components.find_one({"id": component_id, "user_id": current_user["id"]})
+    if not c:
+        raise HTTPException(status_code=404, detail="Component not found")
+    await _cascade_delete_component(current_user["id"], component_id)
+    return {"detail": "Component deleted"}
+
+
+@api_router.post("/knowledge/components/{component_id}/move")
+async def move_component(component_id: str, direction: str, current_user: dict = Depends(get_current_user)):
+    if direction not in {"up", "down"}:
+        raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'")
+    c = await db.knowledge_components.find_one({"id": component_id, "user_id": current_user["id"]})
+    if not c:
+        raise HTTPException(status_code=404, detail="Component not found")
+    siblings = await db.knowledge_components.find(
+        {
+            "user_id": current_user["id"],
+            "journey_id": c["journey_id"],
+            "stage_id": c.get("stage_id"),
+            "parent_component_id": c.get("parent_component_id"),
+        },
+        {"_id": 0},
+    ).to_list(length=1000)
+    siblings.sort(key=lambda x: int(x.get("sequence", 0)))
+    idx = next((i for i, x in enumerate(siblings) if x["id"] == component_id), -1)
+    swap_idx = idx - 1 if direction == "up" else idx + 1
+    if idx < 0 or swap_idx < 0 or swap_idx >= len(siblings):
+        return {"detail": "No move"}
+    a, b = siblings[idx], siblings[swap_idx]
+    now = datetime.now(timezone.utc).isoformat()
+    await db.knowledge_components.update_one({"id": a["id"]}, {"$set": {"sequence": b["sequence"], "updated_at": now}})
+    await db.knowledge_components.update_one({"id": b["id"]}, {"$set": {"sequence": a["sequence"], "updated_at": now}})
+    return {"detail": "moved"}
 
 
 # ---------- App wiring ----------
