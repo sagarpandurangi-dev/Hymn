@@ -1715,19 +1715,24 @@ async def create_knowledge_journey(
     }
 
     # -- Persist with cascading rollback -----------------------------------
-    inserted: List[tuple] = []  # (collection, {"id": ...}) for rollback
+    # Track each insertion so we can roll back in reverse order on failure.
+    # Each entry is a tuple (collection, filter, is_many).
+    inserted: List[tuple] = []
     try:
-        await db.goals.insert_one(goal_doc); inserted.append((db.goals, {"id": goal_id}))
-        await db.knowledge_journeys.insert_one(journey_doc); inserted.append((db.knowledge_journeys, {"id": journey_id}))
+        await db.goals.insert_one(goal_doc); inserted.append((db.goals, {"id": goal_id}, False))
+        await db.knowledge_journeys.insert_one(journey_doc); inserted.append((db.knowledge_journeys, {"id": journey_id}, False))
         if stage_docs:
             await db.knowledge_stages.insert_many(stage_docs)
-            inserted.append((db.knowledge_stages, {"id": {"$in": [s["id"] for s in stage_docs]}}))
-        await db.expected_outcomes.insert_one(eo_doc); inserted.append((db.expected_outcomes, {"id": eo_id}))
-        await db.tasks.insert_one(task_doc); inserted.append((db.tasks, {"id": task_doc["id"]}))
+            inserted.append((db.knowledge_stages, {"id": {"$in": [s["id"] for s in stage_docs]}}, True))
+        await db.expected_outcomes.insert_one(eo_doc); inserted.append((db.expected_outcomes, {"id": eo_id}, False))
+        await db.tasks.insert_one(task_doc); inserted.append((db.tasks, {"id": task_doc["id"]}, False))
     except Exception:
-        for coll, f in reversed(inserted):
+        for coll, f, is_many in reversed(inserted):
             try:
-                await coll.delete_many(f) if "$in" in str(f) else await coll.delete_one(f)
+                if is_many:
+                    await coll.delete_many(f)
+                else:
+                    await coll.delete_one(f)
             except Exception:
                 pass
         raise
@@ -1768,7 +1773,7 @@ async def update_knowledge_journey(
 @api_router.delete("/knowledge/journeys/{journey_id}", status_code=200)
 async def delete_knowledge_journey(journey_id: str, current_user: dict = Depends(get_current_user)):
     j = await _get_own_journey(current_user["id"], journey_id)
-    # Cascade: components (which cascades tasks/checkins detach), stages, journey, goal, EO cascade via goal delete.
+    # Cascade: components (which cascades tasks/checkins detach), stages, journey, goal.
     comps = await db.knowledge_components.find(
         {"user_id": current_user["id"], "journey_id": journey_id}, {"_id": 0, "id": 1}
     ).to_list(length=5000)
@@ -1785,6 +1790,26 @@ async def delete_knowledge_journey(journey_id: str, current_user: dict = Depends
         )
     await db.knowledge_stages.delete_many({"user_id": current_user["id"], "journey_id": journey_id})
     await db.knowledge_journeys.delete_one({"id": journey_id, "user_id": current_user["id"]})
+    # Before deleting the goal + its EOs, detach any tasks/check-ins that referenced them
+    # so those rows don't end up with dangling foreign keys.
+    eos = await db.expected_outcomes.find(
+        {"user_id": current_user["id"], "goal_id": j["goal_id"]}, {"_id": 0, "id": 1}
+    ).to_list(length=5000)
+    if eos:
+        eo_ids = [e["id"] for e in eos]
+        await db.tasks.update_many(
+            {"user_id": current_user["id"], "expected_outcome_id": {"$in": eo_ids}},
+            {"$set": {"expected_outcome_id": None, "origin": "standalone"}},
+        )
+        await db.checkins.update_many(
+            {"user_id": current_user["id"], "expected_outcome_id": {"$in": eo_ids}},
+            {"$set": {"expected_outcome_id": None}},
+        )
+    # Also detach check-ins that referenced the goal directly.
+    await db.checkins.update_many(
+        {"user_id": current_user["id"], "goal_id": j["goal_id"]},
+        {"$set": {"goal_id": None}},
+    )
     await db.goals.delete_one({"id": j["goal_id"], "user_id": current_user["id"]})
     await db.expected_outcomes.delete_many({"user_id": current_user["id"], "goal_id": j["goal_id"]})
     return {"detail": "Knowledge journey deleted"}
