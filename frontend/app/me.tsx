@@ -71,6 +71,14 @@ export default function MeScreen() {
             <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
           </Pressable>
 
+          <Pressable style={styles.row} onPress={() => router.push("/portfolio")} testID="me-open-portfolio">
+            <View style={styles.rowLeft}>
+              <Ionicons name="pie-chart-outline" size={20} color={colors.onSurface} />
+              <Text style={styles.rowText}>Portfolio</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+          </Pressable>
+
           <Pressable style={styles.row} onPress={() => router.push("/settings/overlay")} testID="me-open-overlay">
             <View style={styles.rowLeft}>
               <Ionicons name="layers-outline" size={20} color={colors.onSurface} />

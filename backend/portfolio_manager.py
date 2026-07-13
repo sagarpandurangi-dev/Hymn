@@ -68,7 +68,7 @@ db = _DBProxy()
 DAY_OF_WEEK = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 TIME_COMMITMENT_TYPES = (
-    "sleep", "work", "commute", "meal", "caregiving",
+    "sleep", "work", "commute", "study", "meal", "caregiving",
     "household", "health", "personal", "other",
 )
 FLEXIBILITY = ("fixed", "flexible")
@@ -1169,6 +1169,109 @@ async def get_monthly_money_position(
         planned_investments=_quantize_out(planned_investments),
         available_for_flexible_spending=_quantize_out(available),
     )
+
+
+# ---------------- Portfolio setup status (per-user completion gate) ----------------
+class PortfolioSetupStatusResponse(BaseModel):
+    completed: bool
+    completed_at: Optional[str] = None
+    reporting_currency: Optional[str] = None
+    has_time_commitments: bool
+    has_financial_accounts: bool
+    has_monthly_money_commitments: bool
+
+
+class PortfolioSetupStatusUpdate(BaseModel):
+    reporting_currency: Optional[str] = None
+    completed: Optional[bool] = None
+
+
+async def _setup_status_dict(user: dict) -> dict:
+    """Assemble the read-only projection of a user's Portfolio setup state.
+
+    "Has X" is a simple existence probe against the three CRUD collections so
+    the frontend gate can decide whether to allow "Complete Setup" without
+    listing the collections themselves.
+    """
+    uid = user["id"]
+    # Use estimated_document_count-style existence probes: find_one is cheap
+    # and returns a document or None; we only need the boolean.
+    tc = await db.time_commitments.find_one({"user_id": uid}, {"_id": 0, "id": 1})
+    fa = await db.financial_accounts.find_one({"user_id": uid}, {"_id": 0, "id": 1})
+    mm = await db.monthly_money_commitments.find_one({"user_id": uid}, {"_id": 0, "id": 1})
+    return {
+        "completed": bool(user.get("portfolio_setup_completed_at")),
+        "completed_at": user.get("portfolio_setup_completed_at"),
+        "reporting_currency": user.get("portfolio_reporting_currency"),
+        "has_time_commitments": tc is not None,
+        "has_financial_accounts": fa is not None,
+        "has_monthly_money_commitments": mm is not None,
+    }
+
+
+@portfolio_router.get("/setup-status", response_model=PortfolioSetupStatusResponse)
+async def get_portfolio_setup_status(current_user: dict = Depends(get_current_user)):
+    return await _setup_status_dict(current_user)
+
+
+@portfolio_router.put("/setup-status", response_model=PortfolioSetupStatusResponse)
+async def update_portfolio_setup_status(
+    body: PortfolioSetupStatusUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    incoming = body.dict(exclude_unset=True)
+    updates: dict = {}
+
+    # Reporting currency: validate ISO 4217 and persist independently of the
+    # completion flag so the setup wizard can save it early.
+    if "reporting_currency" in incoming:
+        rc = incoming.get("reporting_currency")
+        if rc is not None and rc != "":
+            _require_currency(rc, "reporting_currency")
+            updates["portfolio_reporting_currency"] = rc
+        else:
+            updates["portfolio_reporting_currency"] = None
+
+    # Completion flag: setting True requires reporting_currency AND at least
+    # one row in each of the three Portfolio collections. Setting False
+    # clears the timestamp but never deletes user data.
+    if "completed" in incoming:
+        want_complete = bool(incoming["completed"])
+        if want_complete:
+            effective_rc = updates.get(
+                "portfolio_reporting_currency",
+                current_user.get("portfolio_reporting_currency"),
+            )
+            if not effective_rc:
+                raise HTTPException(
+                    status_code=400,
+                    detail="reporting_currency is required before completing setup",
+                )
+            probe = await _setup_status_dict({**current_user, **updates})
+            if not probe["has_time_commitments"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="at least one time_commitment is required before completing setup",
+                )
+            if not probe["has_financial_accounts"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="at least one financial_account is required before completing setup",
+                )
+            if not probe["has_monthly_money_commitments"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail="at least one monthly_money_commitment is required before completing setup",
+                )
+            updates["portfolio_setup_completed_at"] = _now()
+        else:
+            updates["portfolio_setup_completed_at"] = None
+
+    if updates:
+        await db.users.update_one({"id": current_user["id"]}, {"$set": updates})
+
+    refreshed = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
+    return await _setup_status_dict(refreshed or current_user)
 
 
 # ---------------- Resource allocations ----------------

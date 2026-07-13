@@ -156,6 +156,77 @@ export const api = {
     request<
       { goal_id: string; goal_title: string; domain_name: string; checkin_cadence: string; completed_for_period: boolean }[]
     >(`/checkins/required?date=${encodeURIComponent(date)}`, { auth: true }),
+
+  // ---------- Portfolio: setup status ----------
+  getPortfolioSetupStatus: () =>
+    request<{
+      completed: boolean;
+      completed_at: string | null;
+      reporting_currency: string | null;
+      has_time_commitments: boolean;
+      has_financial_accounts: boolean;
+      has_monthly_money_commitments: boolean;
+    }>("/portfolio/setup-status", { auth: true }),
+  updatePortfolioSetupStatus: (payload: { reporting_currency?: string | null; completed?: boolean }) =>
+    request<{
+      completed: boolean;
+      completed_at: string | null;
+      reporting_currency: string | null;
+      has_time_commitments: boolean;
+      has_financial_accounts: boolean;
+      has_monthly_money_commitments: boolean;
+    }>("/portfolio/setup-status", { method: "PUT", body: payload, auth: true }),
+
+  // ---------- Portfolio: time_commitments ----------
+  listTimeCommitments: () =>
+    request<
+      { id: string; user_id: string; title: string; day_of_week: string; start_time: string; end_time: string; commitment_type: string; flexibility: string; effective_from: string; effective_until: string | null; source_type: string; source_id: string | null; notes: string; created_at: string; updated_at: string }[]
+    >("/portfolio/time-commitments", { auth: true }),
+  createTimeCommitment: (payload: { title: string; day_of_week: string; start_time: string; end_time: string; commitment_type: string; flexibility: string; effective_from: string; effective_until?: string | null; source_type?: string; source_id?: string | null; notes?: string }) =>
+    request<{ id: string }>("/portfolio/time-commitments", { method: "POST", body: payload, auth: true }),
+  updateTimeCommitment: (id: string, payload: Partial<{ title: string; day_of_week: string; start_time: string; end_time: string; commitment_type: string; flexibility: string; effective_from: string; effective_until: string | null; notes: string }>) =>
+    request<{ id: string }>(`/portfolio/time-commitments/${id}`, { method: "PUT", body: payload, auth: true }),
+  deleteTimeCommitment: (id: string) =>
+    request<{ detail: string }>(`/portfolio/time-commitments/${id}`, { method: "DELETE", auth: true }),
+
+  // ---------- Portfolio: financial_accounts ----------
+  listFinancialAccounts: () =>
+    request<
+      { id: string; user_id: string; account_type: string; name: string; currency: string; current_value: string; liquidity_type: string; fixed_or_flexible: string; notes: string; created_at: string; updated_at: string }[]
+    >("/portfolio/financial-accounts", { auth: true }),
+  createFinancialAccount: (payload: { account_type: string; name: string; currency: string; current_value: string | number; liquidity_type: string; fixed_or_flexible: string; notes?: string }) =>
+    request<{ id: string }>("/portfolio/financial-accounts", { method: "POST", body: payload, auth: true }),
+  updateFinancialAccount: (id: string, payload: Partial<{ account_type: string; name: string; currency: string; current_value: string | number; liquidity_type: string; fixed_or_flexible: string; notes: string }>) =>
+    request<{ id: string }>(`/portfolio/financial-accounts/${id}`, { method: "PUT", body: payload, auth: true }),
+  deleteFinancialAccount: (id: string) =>
+    request<{ detail: string }>(`/portfolio/financial-accounts/${id}`, { method: "DELETE", auth: true }),
+
+  // ---------- Portfolio: monthly_money_commitments ----------
+  listMonthlyMoneyCommitments: () =>
+    request<
+      { id: string; user_id: string; title: string; currency: string; amount: string; commitment_type: string; fixed_or_flexible: string; start_month: string; end_month: string | null; source_type: string; source_id: string | null; notes: string; created_at: string; updated_at: string }[]
+    >("/portfolio/monthly-money-commitments", { auth: true }),
+  createMonthlyMoneyCommitment: (payload: { title: string; currency: string; amount: string | number; commitment_type: string; fixed_or_flexible: string; start_month: string; end_month?: string | null; source_type?: string; source_id?: string | null; notes?: string }) =>
+    request<{ id: string }>("/portfolio/monthly-money-commitments", { method: "POST", body: payload, auth: true }),
+  updateMonthlyMoneyCommitment: (id: string, payload: Partial<{ title: string; currency: string; amount: string | number; commitment_type: string; fixed_or_flexible: string; start_month: string; end_month: string | null; notes: string }>) =>
+    request<{ id: string }>(`/portfolio/monthly-money-commitments/${id}`, { method: "PUT", body: payload, auth: true }),
+  deleteMonthlyMoneyCommitment: (id: string) =>
+    request<{ detail: string }>(`/portfolio/monthly-money-commitments/${id}`, { method: "DELETE", auth: true }),
+
+  // ---------- Portfolio: derived ----------
+  getWeeklyTimeCapacity: (weekStartDate: string) =>
+    request<{
+      week_start_date: string;
+      days: { date: string; day_of_week: string; total_minutes: number; committed_minutes: number; available_minutes: number; overlapping_minutes: number; commitments: { id: string; title: string; start_time: string; end_time: string; commitment_type: string; flexibility: string }[] }[];
+    }>(`/portfolio/time-capacity/week?week_start_date=${encodeURIComponent(weekStartDate)}`, { auth: true }),
+  getMonthlyMoneyPosition: (month: string, currency: string) =>
+    request<{
+      month: string; currency: string;
+      opening_liquid_assets: string; planned_income: string;
+      fixed_outflows: string; flexible_outflows: string;
+      planned_savings: string; planned_investments: string;
+      available_for_flexible_spending: string;
+    }>(`/portfolio/money-position?month=${encodeURIComponent(month)}&currency=${encodeURIComponent(currency)}`, { auth: true }),
   createCheckin: (payload: any) =>
     request<{ id: string }>("/checkins", { method: "POST", body: payload, auth: true }),
   getCheckin: (id: string) =>

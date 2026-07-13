@@ -18,11 +18,25 @@ function AuthGate() {
   useEffect(() => {
     if (loading) return;
     const seg0 = segments[0] as string | undefined;
+    const seg1 = segments[1] as string | undefined;
     const inAuthGroup = seg0 === "(auth)";
+    // /portfolio/setup is allowed while portfolio setup is incomplete — we
+    // must not redirect the user away from the very screen they need to use.
+    const onPortfolioSetup = seg0 === "portfolio" && seg1 === "setup";
+
     if (!user && !inAuthGroup) {
       router.replace("/(auth)/sign-in");
-    } else if (user && inAuthGroup) {
+      return;
+    }
+    if (user && inAuthGroup) {
       router.replace("/(tabs)/today");
+      return;
+    }
+    if (user && !user.portfolio_setup_completed_at && !onPortfolioSetup) {
+      // Portfolio Setup is the mandatory gate for any authenticated user
+      // whose profile is still incomplete. Once completed_at is populated
+      // (see /api/portfolio/setup-status PUT) this block stops firing.
+      router.replace("/portfolio/setup");
     }
   }, [user, loading, segments, router]);
 
@@ -72,6 +86,8 @@ export default function RootLayout() {
           <Stack.Screen name="me" />
           <Stack.Screen name="knowledge/new" options={{ presentation: "modal", gestureEnabled: false }} />
           <Stack.Screen name="knowledge/[id]" />
+          <Stack.Screen name="portfolio/setup" options={{ gestureEnabled: false }} />
+          <Stack.Screen name="portfolio/index" />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>

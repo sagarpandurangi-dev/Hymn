@@ -8,7 +8,12 @@ import {
   startGoogleAuth,
 } from "./googleAuth";
 
-export type User = { id: string; email: string };
+export type User = {
+  id: string;
+  email: string;
+  portfolio_setup_completed_at?: string | null;
+  portfolio_reporting_currency?: string | null;
+};
 
 type AuthState = {
   user: User | null;
@@ -17,6 +22,7 @@ type AuthState = {
   signUp: (email: string, password: string, securityQuestion: string, securityAnswer: string) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthState | undefined>(undefined);
@@ -99,8 +105,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(res.user);
   }, []);
 
+  const refreshUser = useCallback(async () => {
+    try {
+      const me = await api.me();
+      setUser(me);
+    } catch {
+      // Silently ignore — the caller decides how to react.
+    }
+  }, []);
+
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signInWithGoogle, signOut }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ user, loading, signIn, signUp, signInWithGoogle, signOut, refreshUser }}>{children}</AuthContext.Provider>
   );
 };
 

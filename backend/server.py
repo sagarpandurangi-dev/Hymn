@@ -66,6 +66,8 @@ class SecurityQuestionResponse(BaseModel):
 class UserResponse(BaseModel):
     id: str
     email: EmailStr
+    portfolio_setup_completed_at: Optional[str] = None
+    portfolio_reporting_currency: Optional[str] = None
 
 
 class TokenResponse(BaseModel):
@@ -447,7 +449,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 
 
 def user_to_response(u: dict) -> UserResponse:
-    return UserResponse(id=u["id"], email=u["email"])
+    return UserResponse(
+        id=u["id"],
+        email=u["email"],
+        portfolio_setup_completed_at=u.get("portfolio_setup_completed_at"),
+        portfolio_reporting_currency=u.get("portfolio_reporting_currency"),
+    )
 
 
 def domain_to_response(d: dict) -> DomainResponse:
