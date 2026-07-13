@@ -1,10 +1,11 @@
-from fastapi import FastAPI, APIRouter, Depends, HTTPException, status
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, status
 from fastapi.security import OAuth2PasswordBearer
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
+import re
 import uuid
 from pathlib import Path
 from pydantic import BaseModel, EmailStr, Field
@@ -1298,6 +1299,141 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
     await db.checkins.insert_one(doc)
     doc.pop("_id", None)
     return checkin_to_response(doc)
+
+
+@api_router.get("/checkins/required")
+async def list_required_checkins(
+    date: str = Query(..., description="Client's local date, YYYY-MM-DD"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return Goals that need a check-in for the period containing ``date``.
+
+    Scheduling source: ``Goal.checkin_cadence``. This endpoint does NOT
+    materialise any records — it computes the "required" set at read time by
+    inspecting the checkins collection for the current period. Cadence rules:
+
+        * ``manual``     -> never required.
+        * ``daily``      -> required if no checkin exists for that Goal on
+                            the requested local date.
+        * ``weekly``     -> required if no checkin exists in that ISO calendar
+                            week (Mon..Sun containing ``date``).
+        * ``monthly``    -> required if no checkin exists in that calendar
+                            month (YYYY-MM prefix of ``date``).
+
+    Goals with status in {completed, paused, abandoned} are never returned.
+    A Goal is "completed for the period" if either
+        * a checkin exists with ``goal_id`` = this Goal, OR
+        * a checkin exists whose ``expected_outcome_id`` belongs to any
+          Expected Outcome of this Goal.
+
+    Response fields: goal_id, goal_title, domain_name, checkin_cadence,
+    completed_for_period. Sort: daily -> weekly -> monthly -> goal_title.
+    """
+    # Validate the incoming date string in the same format the rest of the
+    # backend uses. This is a stateless computation — the client owns the
+    # notion of "today" per its local timezone.
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date or ""):
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    try:
+        y, m, d = (int(p) for p in date.split("-"))
+        anchor = datetime(y, m, d, tzinfo=timezone.utc).date()
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"date is not a valid calendar date: {exc}") from exc
+
+    # Period bounds (all bounds are inclusive strings comparable lexically).
+    day_str = date
+    week_start = anchor - timedelta(days=anchor.weekday())  # Monday
+    week_end = week_start + timedelta(days=6)               # Sunday
+    week_start_str, week_end_str = week_start.isoformat(), week_end.isoformat()
+    month_prefix = date[:7]  # YYYY-MM
+
+    user_id = current_user["id"]
+
+    # Only active goals that have a schedulable cadence are candidates. We
+    # filter out manual up front so the response is compact.
+    goals = await db.goals.find(
+        {
+            "user_id": user_id,
+            "status": "active",
+            "checkin_cadence": {"$in": ["daily", "weekly", "monthly"]},
+        },
+        {"_id": 0, "id": 1, "title": 1, "domain_id": 1, "checkin_cadence": 1},
+    ).to_list(length=5000)
+    if not goals:
+        return []
+
+    goal_ids = [g["id"] for g in goals]
+
+    # Expected-outcome -> goal_id map so we can attribute EO-linked checkins
+    # back to their parent Goal.
+    eos = await db.expected_outcomes.find(
+        {"user_id": user_id, "goal_id": {"$in": goal_ids}},
+        {"_id": 0, "id": 1, "goal_id": 1},
+    ).to_list(length=10000)
+    eo_to_goal = {e["id"]: e["goal_id"] for e in eos}
+    all_eo_ids = list(eo_to_goal.keys())
+
+    # Pull every relevant checkin for the union of the three periods in one
+    # trip. The daily bound is inside the weekly bound, which is inside the
+    # month prefix — so a week-bounded date range covers all three.
+    checkins = await db.checkins.find(
+        {
+            "user_id": user_id,
+            "date": {"$gte": min(week_start_str, month_prefix + "-01"),
+                     "$lte": max(week_end_str, month_prefix + "-31")},
+            "$or": [
+                {"goal_id": {"$in": goal_ids}},
+                {"expected_outcome_id": {"$in": all_eo_ids}} if all_eo_ids else {"goal_id": None},
+            ],
+        },
+        {"_id": 0, "goal_id": 1, "expected_outcome_id": 1, "date": 1},
+    ).to_list(length=20000)
+
+    # Build per-goal sets of the dates on which a check-in exists.
+    goal_checkin_dates: dict = {gid: set() for gid in goal_ids}
+    for c in checkins:
+        gid = c.get("goal_id") or eo_to_goal.get(c.get("expected_outcome_id") or "")
+        if not gid or gid not in goal_checkin_dates:
+            continue
+        d_val = c.get("date") or ""
+        if d_val:
+            goal_checkin_dates[gid].add(d_val)
+
+    # Domain names in one lookup.
+    domain_ids = list({g["domain_id"] for g in goals if g.get("domain_id")})
+    domain_docs = await db.domains.find(
+        {"user_id": user_id, "id": {"$in": domain_ids}}, {"_id": 0, "id": 1, "name": 1},
+    ).to_list(length=1000) if domain_ids else []
+    domain_name_by_id = {d["id"]: d["name"] for d in domain_docs}
+
+    def _completed(gid: str, cadence: str) -> bool:
+        dates = goal_checkin_dates.get(gid) or set()
+        if cadence == "daily":
+            return day_str in dates
+        if cadence == "weekly":
+            return any(week_start_str <= x <= week_end_str for x in dates)
+        if cadence == "monthly":
+            return any((x or "").startswith(month_prefix) for x in dates)
+        return False
+
+    cadence_rank = {"daily": 0, "weekly": 1, "monthly": 2}
+    result = []
+    for g in goals:
+        cadence = g.get("checkin_cadence") or ""
+        completed = _completed(g["id"], cadence)
+        if completed:
+            # Spec: return only goals that still need a checkin for the period.
+            continue
+        result.append({
+            "goal_id": g["id"],
+            "goal_title": g.get("title", ""),
+            "domain_name": domain_name_by_id.get(g.get("domain_id", ""), ""),
+            "checkin_cadence": cadence,
+            "completed_for_period": False,
+        })
+
+    result.sort(key=lambda r: (cadence_rank.get(r["checkin_cadence"], 99), r["goal_title"].lower()))
+    return result
 
 
 @api_router.get("/checkins/{checkin_id}", response_model=CheckInResponse)

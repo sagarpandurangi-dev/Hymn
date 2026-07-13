@@ -152,6 +152,10 @@ export const api = {
       { id: string; type: string; title: string; date: string; time: string; notes: string; attachment: string; expected_outcome_id: string | null; goal_id: string | null; project_id: string | null; task_id: string | null; follow_up_task_id: string | null }[]
     >(`/checkins${qs}`, { auth: true });
   },
+  listRequiredCheckins: (date: string) =>
+    request<
+      { goal_id: string; goal_title: string; domain_name: string; checkin_cadence: string; completed_for_period: boolean }[]
+    >(`/checkins/required?date=${encodeURIComponent(date)}`, { auth: true }),
   createCheckin: (payload: any) =>
     request<{ id: string }>("/checkins", { method: "POST", body: payload, auth: true }),
   getCheckin: (id: string) =>

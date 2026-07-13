@@ -44,5 +44,11 @@ export const formStyles = StyleSheet.create({
   },
   rowTitle: { fontSize: 15, color: colors.onSurface, fontWeight: "500" },
   rowMeta: { fontSize: 11, color: colors.onSurfaceTertiary, marginTop: 2 },
+  readonlyRow: {
+    backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm,
+    paddingHorizontal: spacing.lg, paddingVertical: spacing.md,
+    borderWidth: 1, borderColor: colors.border,
+  },
+  readonlyText: { fontSize: 15, color: colors.onSurface, fontWeight: "500" },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
 });

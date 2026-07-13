@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, Switch, Text, TextInput, View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { colors, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
@@ -19,10 +19,21 @@ type FieldDef = { key: string; label: string; type: string; required?: boolean; 
 
 export default function GoalCheckinScreen() {
   const router = useRouter();
+  // Route parameters — if either is present it locks its respective picker.
+  // The "required check-ins" flow always passes goalId; a per-EO deep link
+  // may additionally pass expectedOutcomeId.
+  const params = useLocalSearchParams<{ goalId?: string; expectedOutcomeId?: string }>();
+  const preselectedGoalId = typeof params.goalId === "string" && params.goalId ? params.goalId : "";
+  const preselectedEoId = typeof params.expectedOutcomeId === "string" && params.expectedOutcomeId
+    ? params.expectedOutcomeId
+    : "";
+  const goalLocked = !!preselectedGoalId;
+  const eoLocked = !!preselectedEoId;
+
   const [goals, setGoals] = useState<Goal[]>([]);
   const [eos, setEos] = useState<EO[]>([]);
-  const [goalId, setGoalId] = useState<string>("");
-  const [eoId, setEoId] = useState<string>("");
+  const [goalId, setGoalId] = useState<string>(preselectedGoalId);
+  const [eoId, setEoId] = useState<string>(preselectedEoId);
   const [registry, setRegistry] = useState<Record<string, { label: string; checkin_fields: FieldDef[] }>>({});
   const [dynamicData, setDynamicData] = useState<Record<string, any>>({});
   const [title, setTitle] = useState("");
@@ -41,24 +52,45 @@ export default function GoalCheckinScreen() {
         const [gs, reg] = await Promise.all([api.listGoals(), api.getOutcomeTypes()]);
         setGoals(gs.map((g) => ({ id: g.id, title: g.title })));
         setRegistry(reg.types as any);
-        if (gs.length > 0) setGoalId(gs[0].id);
+        // Preserve current manual flow when no route params are supplied.
+        if (!preselectedGoalId && gs.length > 0) setGoalId(gs[0].id);
       } catch { /* ignore */ }
     })();
-  }, []);
+  }, [preselectedGoalId]);
 
   useEffect(() => {
     if (!goalId) { setEos([]); return; }
     (async () => {
       try {
         const list = await api.listExpectedOutcomes(goalId);
-        setEos(list.map((x) => ({ id: x.id, goal_id: x.goal_id, title: x.title, outcome_type: (x as any).outcome_type || "generic" })));
-        setEoId(list[0]?.id || "");
+        const mapped = list.map((x) => ({
+          id: x.id,
+          goal_id: x.goal_id,
+          title: x.title,
+          outcome_type: (x as any).outcome_type || "generic",
+        }));
+        setEos(mapped);
+        if (eoLocked) {
+          // Only accept the pre-selected EO if it actually belongs to this Goal.
+          const matched = mapped.find((e) => e.id === preselectedEoId);
+          setEoId(matched ? matched.id : "");
+        } else if (mapped.length === 1) {
+          // Exactly one EO -> auto-select. Covers the "required check-ins"
+          // deep link where the caller only knows the Goal.
+          setEoId(mapped[0].id);
+        } else if (mapped.length > 1) {
+          // Multiple EOs -> let the user pick, but scoped to this Goal only.
+          setEoId((prev) => (mapped.some((e) => e.id === prev) ? prev : ""));
+        } else {
+          setEoId("");
+        }
       } catch { setEos([]); setEoId(""); }
     })();
-  }, [goalId]);
+  }, [goalId, eoLocked, preselectedEoId]);
 
   useEffect(() => { setDynamicData({}); }, [eoId]);
 
+  const selectedGoal = useMemo(() => goals.find((g) => g.id === goalId), [goals, goalId]);
   const selectedEO = eos.find((e) => e.id === eoId);
   const outcomeType = selectedEO?.outcome_type || "generic";
   const fields: FieldDef[] = registry[outcomeType]?.checkin_fields || [];
@@ -95,20 +127,34 @@ export default function GoalCheckinScreen() {
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={s.flex}>
         <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
           <Text style={s.label}>Goal</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
-            {goals.map((g) => {
-              const sel = goalId === g.id;
-              return (
-                <Pressable key={g.id} onPress={() => setGoalId(g.id)} style={[s.chip, sel && s.chipSelected]} testID={`goal-checkin-goal-chip-${g.id}`}>
-                  <Text style={[s.chipText, sel && s.chipTextSelected]}>{g.title}</Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
+          {goalLocked ? (
+            <View style={s.readonlyRow} testID="goal-checkin-goal-readonly">
+              <Text style={s.readonlyText} numberOfLines={2}>
+                {selectedGoal?.title || "Loading goal…"}
+              </Text>
+            </View>
+          ) : (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
+              {goals.map((g) => {
+                const sel = goalId === g.id;
+                return (
+                  <Pressable key={g.id} onPress={() => setGoalId(g.id)} style={[s.chip, sel && s.chipSelected]} testID={`goal-checkin-goal-chip-${g.id}`}>
+                    <Text style={[s.chipText, sel && s.chipTextSelected]}>{g.title}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          )}
 
           <Text style={s.label}>Expected Outcome</Text>
           {eos.length === 0 ? (
             <Text style={{ color: colors.onSurfaceSecondary, fontSize: 13 }}>No expected outcomes for this goal yet. Add one from the goal.</Text>
+          ) : eoLocked ? (
+            <View style={s.readonlyRow} testID="goal-checkin-eo-readonly">
+              <Text style={s.readonlyText} numberOfLines={2}>
+                {selectedEO?.title || "Loading…"}
+              </Text>
+            </View>
           ) : (
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
               {eos.map((e) => {
