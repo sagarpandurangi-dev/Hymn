@@ -1999,6 +1999,12 @@ async def move_component(component_id: str, direction: str, current_user: dict =
 
 
 # ---------- App wiring ----------
+# Portfolio Manager — imported here (after db/get_current_user are defined) to
+# avoid a circular import. It owns CRUD for its four collections and exposes
+# derived time/money calculations under /api/portfolio/*.
+from portfolio_manager import portfolio_router, ensure_portfolio_indexes  # noqa: E402
+
+api_router.include_router(portfolio_router)
 app.include_router(api_router)
 
 app.add_middleware(
@@ -2023,6 +2029,7 @@ async def startup_indexes():
     await db.user_sessions.create_index("session_token", unique=True)
     await db.user_sessions.create_index("user_id")
     await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await ensure_portfolio_indexes(db)
 
 
 @app.on_event("shutdown")
