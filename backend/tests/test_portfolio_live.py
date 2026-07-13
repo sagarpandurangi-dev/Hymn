@@ -52,13 +52,46 @@ def _signup() -> tuple[str, dict]:
 @pytest.fixture(scope="module")
 def user_a():
     tok, u = _signup()
-    return {"token": tok, "user": u, "h": {"Authorization": f"Bearer {tok}"}}
+    h = {"Authorization": f"Bearer {tok}"}
+    # Seed real Hymn objects so allocation tests can reference them and
+    # satisfy the new owner-integrity check.
+    owner_ids = _seed_owner_objects(h)
+    return {"token": tok, "user": u, "h": h, "owners": owner_ids}
 
 
 @pytest.fixture(scope="module")
 def user_b():
     tok, u = _signup()
-    return {"token": tok, "user": u, "h": {"Authorization": f"Bearer {tok}"}}
+    h = {"Authorization": f"Bearer {tok}"}
+    owner_ids = _seed_owner_objects(h)
+    return {"token": tok, "user": u, "h": h, "owners": owner_ids}
+
+
+def _seed_owner_objects(h: dict) -> dict:
+    """Create one task, one project and one knowledge journey per user."""
+    rt = requests.post(f"{API}/tasks", json={"title": f"TEST_pm_owner_{uuid.uuid4().hex[:6]}"},
+                      headers=h, timeout=30)
+    assert rt.status_code == 201, rt.text
+    task_id = rt.json()["id"]
+
+    rp = requests.post(f"{API}/projects", json={"title": f"TEST_pm_proj_{uuid.uuid4().hex[:6]}"},
+                       headers=h, timeout=30)
+    assert rp.status_code == 201, rp.text
+    proj_id = rp.json()["id"]
+
+    rj = requests.post(f"{API}/knowledge/journeys", json={
+        "journey_type": "skill",
+        "title": f"TEST_pm_kj_{uuid.uuid4().hex[:6]}",
+        "why": "portfolio-owner-integrity",
+        "target_completion_date": "",
+        "first_outcome": {"title": "eo"},
+        "first_task": {"title": "t", "priority": "medium"},
+        "checkin_cadence": "manual",
+    }, headers=h, timeout=30)
+    assert rj.status_code == 201, rj.text
+    kj_id = rj.json()["id"]
+
+    return {"task": task_id, "project": proj_id, "knowledge_journey": kj_id}
 
 
 # ==========================================================================
@@ -162,7 +195,8 @@ class TestFinancialAccounts:
         assert r.status_code == 201, r.text
         d = r.json()
         assert d["currency"] == "USD"
-        assert d["current_value"] == 500.0
+        assert d["current_value"] == "500.0"
+        assert isinstance(d["current_value"], str)
         user_a["fa_id"] = d["id"]
 
     def test_create_liability_positive_value(self, user_a):
@@ -170,7 +204,7 @@ class TestFinancialAccounts:
                 "current_value": 1200.0, "liquidity_type": "liquid", "fixed_or_flexible": "fixed"}
         r = requests.post(f"{API}/portfolio/financial-accounts", json=body, headers=user_a["h"], timeout=30)
         assert r.status_code == 201, r.text
-        assert r.json()["current_value"] == 1200.0
+        assert r.json()["current_value"] == "1200.0"
 
     def test_reject_negative_value(self, user_a):
         body = {"account_type": "cash", "name": "n", "currency": "USD",
@@ -202,7 +236,7 @@ class TestFinancialAccounts:
         r = requests.post(f"{API}/portfolio/financial-accounts", json=body, headers=user_a["h"], timeout=30)
         aid = r.json()["id"]
         r2 = requests.put(f"{API}/portfolio/financial-accounts/{aid}", json={"current_value": 99}, headers=user_a["h"], timeout=30)
-        assert r2.status_code == 200 and r2.json()["current_value"] == 99
+        assert r2.status_code == 200 and r2.json()["current_value"] == "99"
         r3 = requests.delete(f"{API}/portfolio/financial-accounts/{aid}", headers=user_a["h"], timeout=30)
         assert r3.status_code == 200
 
@@ -217,7 +251,7 @@ class TestMonthlyMoneyCommitments:
                 "start_month": "2026-01"}
         r = requests.post(f"{API}/portfolio/monthly-money-commitments", json=body, headers=user_a["h"], timeout=30)
         assert r.status_code == 201, r.text
-        assert r.json()["amount"] == 5000
+        assert r.json()["amount"] == "5000"
         user_a["mm_income"] = r.json()["id"]
 
     def test_create_expense_fixed(self, user_a):
@@ -265,7 +299,7 @@ class TestMonthlyMoneyCommitments:
         r = requests.post(f"{API}/portfolio/monthly-money-commitments", json=body, headers=user_a["h"], timeout=30)
         mid = r.json()["id"]
         r2 = requests.put(f"{API}/portfolio/monthly-money-commitments/{mid}", json={"amount": 42}, headers=user_a["h"], timeout=30)
-        assert r2.status_code == 200 and r2.json()["amount"] == 42
+        assert r2.status_code == 200 and r2.json()["amount"] == "42"
         r3 = requests.delete(f"{API}/portfolio/monthly-money-commitments/{mid}", headers=user_a["h"], timeout=30)
         assert r3.status_code == 200
 
@@ -282,7 +316,8 @@ class TestResourceAllocations:
         assert r.status_code == 201, r.text
         d = r.json()
         assert d["currency"] is None and d["date"] is None
-        assert d["quantity"] == 60
+        assert d["quantity"] == "60"
+        assert isinstance(d["quantity"], str)
 
     def test_time_recurring_forbids_date(self, user_a):
         body = {"resource_type": "time", "owner_type": "standalone", "allocation_mode": "recurring",
@@ -293,7 +328,7 @@ class TestResourceAllocations:
         assert r.status_code == 400
 
     def test_time_one_time_ok(self, user_a):
-        body = {"resource_type": "time", "owner_type": "task", "owner_id": "some-task-id",
+        body = {"resource_type": "time", "owner_type": "task", "owner_id": user_a["owners"]["task"],
                 "allocation_mode": "one_time", "date": "2026-01-05",
                 "start_time": "08:00", "end_time": "09:30", "quantity": 90,
                 "unit": "minutes", "status": "proposed", "fixed_or_flexible": "flexible"}
@@ -324,12 +359,14 @@ class TestResourceAllocations:
         assert r.status_code == 400
 
     def test_money_one_time_ok(self, user_a):
-        body = {"resource_type": "money", "owner_type": "project", "owner_id": "some-proj",
+        body = {"resource_type": "money", "owner_type": "project", "owner_id": user_a["owners"]["project"],
                 "allocation_mode": "one_time", "date": "2026-01-15",
                 "quantity": 100.0, "unit": "currency", "currency": "USD",
                 "status": "proposed", "fixed_or_flexible": "flexible"}
         r = requests.post(f"{API}/portfolio/resource-allocations", json=body, headers=user_a["h"], timeout=30)
         assert r.status_code == 201, r.text
+        assert r.json()["quantity"] == "100.0"
+        assert isinstance(r.json()["quantity"], str)
 
     def test_money_requires_currency(self, user_a):
         body = {"resource_type": "money", "owner_type": "standalone", "allocation_mode": "one_time",
@@ -363,11 +400,12 @@ class TestResourceAllocations:
         assert r.status_code in (400, 422)
 
     def test_owner_type_accepted_set(self, user_a):
-        # standalone requires owner_id=null; the other three require owner_id
+        # standalone requires owner_id=null; the other three require owner_id AND
+        # the referenced object must exist for this user.
         cases = [
-            ("task", "t1"),
-            ("project", "p1"),
-            ("knowledge_journey", "k1"),
+            ("task", user_a["owners"]["task"]),
+            ("project", user_a["owners"]["project"]),
+            ("knowledge_journey", user_a["owners"]["knowledge_journey"]),
         ]
         for ot, oid in cases:
             body = {"resource_type": "money", "owner_type": ot, "owner_id": oid,
@@ -461,13 +499,13 @@ class TestDerivedCapacity:
         assert r.status_code == 200, r.text
         d = r.json()
         assert d["month"] == "2026-01" and d["currency"] == "USD"
-        assert d["planned_income"] == 5000.0
-        assert d["fixed_outflows"] == 1500.0
-        assert d["flexible_outflows"] == 600.0
+        assert d["planned_income"] == "5000.00"
+        assert d["fixed_outflows"] == "1500.00"
+        assert d["flexible_outflows"] == "600.00"
         # opening liquid assets: cash 500 (credit_card excluded because it's liability)
-        assert d["opening_liquid_assets"] == 500.0
+        assert d["opening_liquid_assets"] == "500.00"
         # available = 500 + 5000 - 1500 - 600 = 3400
-        assert d["available_for_flexible_spending"] == 3400.0
+        assert d["available_for_flexible_spending"] == "3400.00"
 
     def test_money_position_empty_currency(self, user_a):
         r = requests.get(f"{API}/portfolio/money-position",
@@ -475,11 +513,11 @@ class TestDerivedCapacity:
                          headers=user_a["h"], timeout=30)
         assert r.status_code == 200
         d = r.json()
-        assert d["planned_income"] == 0.0
-        assert d["fixed_outflows"] == 0.0
-        assert d["flexible_outflows"] == 0.0
-        assert d["opening_liquid_assets"] == 0.0
-        assert d["available_for_flexible_spending"] == 0.0
+        assert d["planned_income"] == "0.00"
+        assert d["fixed_outflows"] == "0.00"
+        assert d["flexible_outflows"] == "0.00"
+        assert d["opening_liquid_assets"] == "0.00"
+        assert d["available_for_flexible_spending"] == "0.00"
 
     def test_money_position_bad_month_and_currency(self, user_a):
         r = requests.get(f"{API}/portfolio/money-position",
@@ -529,6 +567,240 @@ class TestUserIsolation:
     def test_auth_required(self):
         r = requests.get(f"{API}/portfolio/time-commitments", timeout=30)
         assert r.status_code in (401, 403)
+
+
+# ==========================================================================
+# Owner integrity — existence + user ownership of the referenced object
+# ==========================================================================
+class TestAllocationOwnerIntegrity:
+    def test_valid_task_owner(self, user_a):
+        body = {"resource_type": "money", "owner_type": "task",
+                "owner_id": user_a["owners"]["task"],
+                "allocation_mode": "one_time", "date": "2026-01-15",
+                "quantity": 10, "unit": "currency", "currency": "USD",
+                "status": "proposed", "fixed_or_flexible": "flexible"}
+        r = requests.post(f"{API}/portfolio/resource-allocations", json=body,
+                          headers=user_a["h"], timeout=30)
+        assert r.status_code == 201, r.text
+
+    def test_nonexistent_owner_rejected(self, user_a):
+        for ot in ("task", "project", "knowledge_journey"):
+            body = {"resource_type": "money", "owner_type": ot,
+                    "owner_id": str(uuid.uuid4()),
+                    "allocation_mode": "one_time", "date": "2026-01-15",
+                    "quantity": 10, "unit": "currency", "currency": "USD",
+                    "status": "proposed", "fixed_or_flexible": "flexible"}
+            r = requests.post(f"{API}/portfolio/resource-allocations", json=body,
+                              headers=user_a["h"], timeout=30)
+            assert r.status_code == 400, f"{ot}: {r.text}"
+
+    def test_foreign_user_owner_rejected(self, user_a, user_b):
+        # user_a references user_b's task -> 400
+        for ot in ("task", "project", "knowledge_journey"):
+            body = {"resource_type": "money", "owner_type": ot,
+                    "owner_id": user_b["owners"][ot],
+                    "allocation_mode": "one_time", "date": "2026-01-15",
+                    "quantity": 10, "unit": "currency", "currency": "USD",
+                    "status": "proposed", "fixed_or_flexible": "flexible"}
+            r = requests.post(f"{API}/portfolio/resource-allocations", json=body,
+                              headers=user_a["h"], timeout=30)
+            assert r.status_code == 400, f"{ot}: {r.text}"
+
+    def test_standalone_with_null_owner_id_accepted(self, user_a):
+        body = {"resource_type": "money", "owner_type": "standalone", "owner_id": None,
+                "allocation_mode": "one_time", "date": "2026-01-15",
+                "quantity": 10, "unit": "currency", "currency": "USD",
+                "status": "proposed", "fixed_or_flexible": "flexible"}
+        r = requests.post(f"{API}/portfolio/resource-allocations", json=body,
+                          headers=user_a["h"], timeout=30)
+        assert r.status_code == 201, r.text
+
+    def test_standalone_with_non_null_owner_id_rejected(self, user_a):
+        body = {"resource_type": "money", "owner_type": "standalone",
+                "owner_id": "should-be-null",
+                "allocation_mode": "one_time", "date": "2026-01-15",
+                "quantity": 10, "unit": "currency", "currency": "USD",
+                "status": "proposed", "fixed_or_flexible": "flexible"}
+        r = requests.post(f"{API}/portfolio/resource-allocations", json=body,
+                          headers=user_a["h"], timeout=30)
+        assert r.status_code == 400
+
+
+# ==========================================================================
+# Money as Decimal — no binary float leakage, precision preserved
+# ==========================================================================
+class TestMoneyDecimalStorage:
+    def test_account_string_precision(self, user_a):
+        body = {"account_type": "cash", "name": f"TEST_dec_{uuid.uuid4().hex[:6]}",
+                "currency": "USD", "current_value": "9999.9999",
+                "liquidity_type": "liquid", "fixed_or_flexible": "flexible"}
+        r = requests.post(f"{API}/portfolio/financial-accounts", json=body,
+                          headers=user_a["h"], timeout=30)
+        assert r.status_code == 201, r.text
+        d = r.json()
+        assert d["current_value"] == "9999.9999"
+        assert isinstance(d["current_value"], str)
+
+    def test_account_reject_nan_and_infinity(self, user_a):
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            body = {"account_type": "cash", "name": "x", "currency": "USD",
+                    "current_value": bad, "liquidity_type": "liquid",
+                    "fixed_or_flexible": "flexible"}
+            r = requests.post(f"{API}/portfolio/financial-accounts", json=body,
+                              headers=user_a["h"], timeout=30)
+            assert r.status_code == 400, f"{bad}: {r.text}"
+
+    def test_commitment_string_precision(self, user_a):
+        body = {"title": f"TEST_pdec_{uuid.uuid4().hex[:6]}", "currency": "USD",
+                "amount": "1234.5678", "commitment_type": "saving",
+                "fixed_or_flexible": "flexible", "start_month": "2026-01"}
+        r = requests.post(f"{API}/portfolio/monthly-money-commitments", json=body,
+                          headers=user_a["h"], timeout=30)
+        assert r.status_code == 201, r.text
+        assert r.json()["amount"] == "1234.5678"
+
+    def test_money_allocation_string_precision(self, user_a):
+        body = {"resource_type": "money", "owner_type": "standalone", "owner_id": None,
+                "allocation_mode": "one_time", "date": "2026-01-15",
+                "quantity": "99.9500", "unit": "currency", "currency": "USD",
+                "status": "proposed", "fixed_or_flexible": "flexible"}
+        r = requests.post(f"{API}/portfolio/resource-allocations", json=body,
+                          headers=user_a["h"], timeout=30)
+        assert r.status_code == 201, r.text
+        assert r.json()["quantity"] == "99.9500"
+
+    def test_money_allocation_reject_nan(self, user_a):
+        body = {"resource_type": "money", "owner_type": "standalone", "owner_id": None,
+                "allocation_mode": "one_time", "date": "2026-01-15",
+                "quantity": "NaN", "unit": "currency", "currency": "USD",
+                "status": "proposed", "fixed_or_flexible": "flexible"}
+        r = requests.post(f"{API}/portfolio/resource-allocations", json=body,
+                          headers=user_a["h"], timeout=30)
+        assert r.status_code == 400
+
+
+# ==========================================================================
+# Iteration 1A explicit money-position scenario (fresh user, exact numbers)
+# ==========================================================================
+class TestMoneyPositionIteration1A:
+    def test_exact_scenario(self):
+        tok, u = _signup()
+        h = {"Authorization": f"Bearer {tok}"}
+
+        # Assets: bank USD liquid 100.50, cash USD liquid 25.25,
+        #         semi_liquid stock (excluded), credit_card USD (liability, excluded).
+        for body in [
+            {"account_type": "bank", "name": "TEST_bank", "currency": "USD",
+             "current_value": "100.50", "liquidity_type": "liquid",
+             "fixed_or_flexible": "flexible"},
+            {"account_type": "cash", "name": "TEST_cash", "currency": "USD",
+             "current_value": "25.25", "liquidity_type": "liquid",
+             "fixed_or_flexible": "flexible"},
+            {"account_type": "stock", "name": "TEST_stock", "currency": "USD",
+             "current_value": "9999.99", "liquidity_type": "semi_liquid",
+             "fixed_or_flexible": "flexible"},
+            {"account_type": "credit_card", "name": "TEST_cc", "currency": "USD",
+             "current_value": "300.00", "liquidity_type": "liquid",
+             "fixed_or_flexible": "fixed"},
+        ]:
+            r = requests.post(f"{API}/portfolio/financial-accounts", json=body,
+                              headers=h, timeout=30)
+            assert r.status_code == 201, r.text
+
+        # Commitments active for 2026-05, USD.
+        for body in [
+            {"title": "TEST_income", "currency": "USD", "amount": "500.25",
+             "commitment_type": "income", "fixed_or_flexible": "fixed",
+             "start_month": "2026-01"},
+            {"title": "TEST_rent", "currency": "USD", "amount": "100.10",
+             "commitment_type": "expense", "fixed_or_flexible": "fixed",
+             "start_month": "2026-01"},
+            {"title": "TEST_food", "currency": "USD", "amount": "50.05",
+             "commitment_type": "expense", "fixed_or_flexible": "flexible",
+             "start_month": "2026-01"},
+            {"title": "TEST_save", "currency": "USD", "amount": "10.10",
+             "commitment_type": "saving", "fixed_or_flexible": "fixed",
+             "start_month": "2026-01"},
+            {"title": "TEST_invest", "currency": "USD", "amount": "5.20",
+             "commitment_type": "investment", "fixed_or_flexible": "fixed",
+             "start_month": "2026-01"},
+        ]:
+            r = requests.post(f"{API}/portfolio/monthly-money-commitments",
+                              json=body, headers=h, timeout=30)
+            assert r.status_code == 201, r.text
+
+        r = requests.get(f"{API}/portfolio/money-position",
+                         params={"month": "2026-05", "currency": "USD"},
+                         headers=h, timeout=30)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["opening_liquid_assets"] == "125.75", d
+        assert d["planned_income"] == "500.25", d
+        assert d["fixed_outflows"] == "100.10", d
+        assert d["flexible_outflows"] == "50.05", d
+        assert d["planned_savings"] == "10.10", d
+        assert d["planned_investments"] == "5.20", d
+        assert d["available_for_flexible_spending"] == "460.55", d
+        # Every money field must be a JSON string, never a float.
+        for k in ("opening_liquid_assets", "planned_income", "fixed_outflows",
+                  "flexible_outflows", "planned_savings", "planned_investments",
+                  "available_for_flexible_spending"):
+            assert isinstance(d[k], str), f"{k} is {type(d[k])}"
+
+    def test_empty_currency_returns_zeros(self):
+        tok, u = _signup()
+        h = {"Authorization": f"Bearer {tok}"}
+        r = requests.get(f"{API}/portfolio/money-position",
+                         params={"month": "2026-05", "currency": "JPY"},
+                         headers=h, timeout=30)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        for k in ("opening_liquid_assets", "planned_income", "fixed_outflows",
+                  "flexible_outflows", "planned_savings", "planned_investments",
+                  "available_for_flexible_spending"):
+            assert d[k] == "0.00", f"{k}={d[k]}"
+
+
+# ==========================================================================
+# PUT owner-integrity: switching owner to nonexistent / foreign user rejects
+# and does NOT mutate the persisted row.
+# ==========================================================================
+class TestAllocationUpdateOwnerIntegrity:
+    def test_put_reject_nonexistent_and_foreign(self, user_a, user_b):
+        # Seed a valid standalone money allocation on user_a.
+        body = {"resource_type": "money", "owner_type": "standalone",
+                "owner_id": None, "allocation_mode": "one_time",
+                "date": "2026-02-01", "quantity": "42.42", "unit": "currency",
+                "currency": "USD", "status": "proposed",
+                "fixed_or_flexible": "flexible"}
+        r = requests.post(f"{API}/portfolio/resource-allocations", json=body,
+                          headers=user_a["h"], timeout=30)
+        assert r.status_code == 201, r.text
+        aid = r.json()["id"]
+
+        # PUT switch to task/nonexistent uuid -> 400
+        r = requests.put(f"{API}/portfolio/resource-allocations/{aid}",
+                         json={"owner_type": "task",
+                               "owner_id": str(uuid.uuid4())},
+                         headers=user_a["h"], timeout=30)
+        assert r.status_code == 400, r.text
+
+        # PUT switch to user_b's task -> 400
+        r = requests.put(f"{API}/portfolio/resource-allocations/{aid}",
+                         json={"owner_type": "task",
+                               "owner_id": user_b["owners"]["task"]},
+                         headers=user_a["h"], timeout=30)
+        assert r.status_code == 400, r.text
+
+        # Persisted row unchanged: still standalone, quantity 42.42.
+        r = requests.get(f"{API}/portfolio/resource-allocations",
+                         headers=user_a["h"], timeout=30)
+        assert r.status_code == 200
+        row = next((x for x in r.json() if x["id"] == aid), None)
+        assert row is not None
+        assert row["owner_type"] == "standalone"
+        assert row["owner_id"] is None
+        assert row["quantity"] == "42.42"
 
 
 # ==========================================================================

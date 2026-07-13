@@ -57,6 +57,69 @@ def other_token() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Owner-integrity helpers — create real Hymn objects to reference from
+# resource_allocations. Standalone allocations still bypass this entirely.
+# ---------------------------------------------------------------------------
+
+def _create_task(tok: str) -> str:
+    r = requests.post(
+        f"{API}/tasks",
+        json={"title": f"pm-task-{uuid.uuid4().hex[:6]}"},
+        headers=_hdrs(tok), timeout=10,
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def _create_project(tok: str) -> str:
+    r = requests.post(
+        f"{API}/projects",
+        json={"title": f"pm-project-{uuid.uuid4().hex[:6]}"},
+        headers=_hdrs(tok), timeout=10,
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["id"]
+
+
+def _create_knowledge_journey(tok: str) -> str:
+    r = requests.post(
+        f"{API}/knowledge/journeys",
+        json={
+            "journey_type": "skill",
+            "title": f"pm-kj-{uuid.uuid4().hex[:6]}",
+            "why": "portfolio-owner-integrity",
+            "target_completion_date": "",
+            "first_outcome": {"title": "eo", "outcome_type": "generic"},
+            "first_task": {"title": "t", "priority": "medium"},
+            "checkin_cadence": "manual",
+        },
+        headers=_hdrs(tok), timeout=10,
+    )
+    assert r.status_code == 201, r.text
+    # The journey wizard returns a KnowledgeJourneyResponse whose `id` is the
+    # journey_id (not the goal_id) — that is exactly what owner_id must be.
+    return r.json()["id"]
+
+
+@pytest.fixture(scope="module")
+def owner_ids(token: str) -> dict:
+    return {
+        "task": _create_task(token),
+        "project": _create_project(token),
+        "knowledge_journey": _create_knowledge_journey(token),
+    }
+
+
+@pytest.fixture(scope="module")
+def other_owner_ids(other_token: str) -> dict:
+    return {
+        "task": _create_task(other_token),
+        "project": _create_project(other_token),
+        "knowledge_journey": _create_knowledge_journey(other_token),
+    }
+
+
+# ---------------------------------------------------------------------------
 # TIME COMMITMENTS
 # ---------------------------------------------------------------------------
 
@@ -213,7 +276,7 @@ class TestFinancialAccountsCrud:
                                               current_value=12000, liquidity_type="liquid"),
                           headers=_hdrs(token), timeout=10)
         assert r.status_code == 201
-        assert r.json()["current_value"] == 12000.0
+        assert r.json()["current_value"] == "12000"
 
     def test_update_and_delete(self, token):
         r = requests.post(f"{API}/portfolio/financial-accounts",
@@ -222,10 +285,31 @@ class TestFinancialAccountsCrud:
         r = requests.put(f"{API}/portfolio/financial-accounts/{aid}",
                          json={"current_value": 75000},
                          headers=_hdrs(token), timeout=10)
-        assert r.status_code == 200 and r.json()["current_value"] == 75000.0
+        assert r.status_code == 200 and r.json()["current_value"] == "75000"
         r = requests.delete(f"{API}/portfolio/financial-accounts/{aid}",
                             headers=_hdrs(token), timeout=10)
         assert r.status_code == 200
+
+    def test_decimal_precision_preserved(self, token):
+        # String input keeps trailing zeros — no float round-trip.
+        r = requests.post(f"{API}/portfolio/financial-accounts",
+                          json=_acct_payload(name="precise", current_value="12345.6789"),
+                          headers=_hdrs(token), timeout=10)
+        assert r.status_code == 201, r.text
+        assert r.json()["current_value"] == "12345.6789"
+
+    def test_reject_nan_and_infinity(self, token):
+        for bad in ("NaN", "Infinity", "-Infinity"):
+            r = requests.post(f"{API}/portfolio/financial-accounts",
+                              json=_acct_payload(current_value=bad),
+                              headers=_hdrs(token), timeout=10)
+            assert r.status_code == 400, f"{bad!r} should be rejected: {r.text}"
+
+    def test_reject_non_numeric_string(self, token):
+        r = requests.post(f"{API}/portfolio/financial-accounts",
+                          json=_acct_payload(current_value="not a number"),
+                          headers=_hdrs(token), timeout=10)
+        assert r.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +393,7 @@ def _time_alloc_one_time(**over) -> dict:
 
 def _time_alloc_recurring(**over) -> dict:
     base = {
-        "resource_type": "time", "owner_type": "task", "owner_id": "fake-task-id",
+        "resource_type": "time", "owner_type": "standalone", "owner_id": None,
         "allocation_mode": "recurring",
         "date": None, "day_of_week": "tuesday",
         "start_time": "18:00", "end_time": "19:00",
@@ -322,7 +406,7 @@ def _time_alloc_recurring(**over) -> dict:
 
 def _money_alloc_one_time(**over) -> dict:
     base = {
-        "resource_type": "money", "owner_type": "project", "owner_id": "proj-1",
+        "resource_type": "money", "owner_type": "standalone", "owner_id": None,
         "allocation_mode": "one_time",
         "date": "2026-05-05", "day_of_week": None,
         "start_time": None, "end_time": None,
@@ -335,8 +419,8 @@ def _money_alloc_one_time(**over) -> dict:
 
 def _money_alloc_recurring(**over) -> dict:
     base = {
-        "resource_type": "money", "owner_type": "knowledge_journey",
-        "owner_id": "kj-1", "allocation_mode": "recurring",
+        "resource_type": "money", "owner_type": "standalone", "owner_id": None,
+        "allocation_mode": "recurring",
         "date": None, "day_of_week": None,
         "start_time": None, "end_time": None,
         "quantity": 200, "unit": "currency", "currency": "USD",
@@ -696,16 +780,16 @@ class TestMoneyPosition:
         b = r.json()
         # Assets: Bank 100000 + Cash 25000 = 125000
         # (Stocks excluded — semi_liquid, US bank excluded — USD, CC excluded — liability)
-        assert b["opening_liquid_assets"] == 125000.00
-        assert b["planned_income"] == 80000.00
+        assert b["opening_liquid_assets"] == "125000.00"
+        assert b["planned_income"] == "80000.00"
         # Fixed outflows: Rent 25000 + Loan EMI 10000 = 35000
-        assert b["fixed_outflows"] == 35000.00
+        assert b["fixed_outflows"] == "35000.00"
         # Flexible outflows: Groceries 12000  (Old subscription excluded)
-        assert b["flexible_outflows"] == 12000.00
-        assert b["planned_savings"] == 5000.00
-        assert b["planned_investments"] == 8000.00
-        expected = 125000 + 80000 - 35000 - 12000 - 5000 - 8000
-        assert b["available_for_flexible_spending"] == float(expected)
+        assert b["flexible_outflows"] == "12000.00"
+        assert b["planned_savings"] == "5000.00"
+        assert b["planned_investments"] == "8000.00"
+        # available = 125000 + 80000 - 35000 - 12000 - 5000 - 8000 = 145000
+        assert b["available_for_flexible_spending"] == "145000.00"
 
     def test_position_bad_month(self, position_token):
         r = requests.get(f"{API}/portfolio/money-position?month=May-2026&currency=INR",
@@ -721,9 +805,271 @@ class TestMoneyPosition:
         r = requests.get(f"{API}/portfolio/money-position?month=2026-05&currency=EUR",
                          headers=_hdrs(position_token), timeout=10)
         b = r.json()
-        assert b["opening_liquid_assets"] == 0
-        assert b["planned_income"] == 0
-        assert b["available_for_flexible_spending"] == 0
+        assert b["opening_liquid_assets"] == "0.00"
+        assert b["planned_income"] == "0.00"
+        assert b["available_for_flexible_spending"] == "0.00"
+
+
+# ---------------------------------------------------------------------------
+# OWNER INTEGRITY — the referenced object must exist AND belong to the user
+# ---------------------------------------------------------------------------
+
+class TestAllocationOwnerIntegrity:
+    def test_task_owner_valid(self, token, owner_ids):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_time_alloc_recurring(owner_type="task", owner_id=owner_ids["task"]),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["owner_type"] == "task"
+        assert r.json()["owner_id"] == owner_ids["task"]
+
+    def test_project_owner_valid(self, token, owner_ids):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_money_alloc_one_time(owner_type="project", owner_id=owner_ids["project"]),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["owner_id"] == owner_ids["project"]
+
+    def test_knowledge_journey_owner_valid(self, token, owner_ids):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_money_alloc_recurring(
+                owner_type="knowledge_journey",
+                owner_id=owner_ids["knowledge_journey"],
+            ),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+
+    def test_nonexistent_task_owner_rejected(self, token):
+        ghost = str(uuid.uuid4())
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_time_alloc_recurring(owner_type="task", owner_id=ghost),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400, r.text
+        assert ghost in r.json()["detail"] or "no matching row" in r.json()["detail"]
+
+    def test_nonexistent_project_owner_rejected(self, token):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_money_alloc_one_time(owner_type="project", owner_id=str(uuid.uuid4())),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400
+
+    def test_nonexistent_knowledge_journey_owner_rejected(self, token):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_money_alloc_recurring(owner_type="knowledge_journey", owner_id=str(uuid.uuid4())),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400
+
+    def test_foreign_user_task_owner_rejected(self, token, other_owner_ids):
+        # user A tries to reference user B's task -> 400
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_time_alloc_recurring(owner_type="task", owner_id=other_owner_ids["task"]),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400, r.text
+
+    def test_foreign_user_project_owner_rejected(self, token, other_owner_ids):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_money_alloc_one_time(owner_type="project", owner_id=other_owner_ids["project"]),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400
+
+    def test_foreign_user_knowledge_journey_owner_rejected(self, token, other_owner_ids):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_money_alloc_recurring(
+                owner_type="knowledge_journey",
+                owner_id=other_owner_ids["knowledge_journey"],
+            ),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400
+
+    def test_standalone_with_null_owner_id_accepted(self, token):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_time_alloc_one_time(owner_type="standalone", owner_id=None),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["owner_type"] == "standalone"
+        assert r.json()["owner_id"] is None
+
+    def test_standalone_with_non_null_owner_id_rejected(self, token):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_time_alloc_one_time(owner_type="standalone", owner_id="not-null"),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400
+
+    def test_update_to_foreign_owner_rejected(self, token, owner_ids, other_owner_ids):
+        # Create an allocation that references user A's own task.
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_time_alloc_recurring(owner_type="task", owner_id=owner_ids["task"],
+                                       day_of_week="wednesday"),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        aid = r.json()["id"]
+        # Attempt to repoint it at user B's task -> must be rejected.
+        r2 = requests.put(
+            f"{API}/portfolio/resource-allocations/{aid}",
+            json={"owner_id": other_owner_ids["task"]},
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r2.status_code == 400, r2.text
+        # Original allocation should remain unchanged.
+        r3 = requests.get(f"{API}/portfolio/resource-allocations",
+                          headers=_hdrs(token), timeout=10)
+        row = next(x for x in r3.json() if x["id"] == aid)
+        assert row["owner_id"] == owner_ids["task"]
+
+    def test_update_to_nonexistent_owner_rejected(self, token, owner_ids):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_money_alloc_one_time(owner_type="project", owner_id=owner_ids["project"]),
+            headers=_hdrs(token), timeout=10,
+        )
+        aid = r.json()["id"]
+        r2 = requests.put(
+            f"{API}/portfolio/resource-allocations/{aid}",
+            json={"owner_id": str(uuid.uuid4())},
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r2.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# MONEY AS DECIMAL — no binary floats, precision preserved, sane rejections
+# ---------------------------------------------------------------------------
+
+class TestMoneyDecimalStorage:
+    def test_account_string_precision_preserved(self, token):
+        r = requests.post(
+            f"{API}/portfolio/financial-accounts",
+            json=_acct_payload(name="tp", currency="USD", current_value="9999.9999"),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["current_value"] == "9999.9999"
+
+    def test_account_int_input_serialized_as_string(self, token):
+        r = requests.post(
+            f"{API}/portfolio/financial-accounts",
+            json=_acct_payload(name="ip", currency="USD", current_value=42),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        # int input keeps integer form — no ".0" suffix.
+        assert r.json()["current_value"] == "42"
+        assert isinstance(r.json()["current_value"], str)
+
+    def test_commitment_string_precision_preserved(self, token):
+        r = requests.post(
+            f"{API}/portfolio/monthly-money-commitments",
+            json=_mmc_payload(title="prec", amount="1234.5678"),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["amount"] == "1234.5678"
+
+    def test_commitment_reject_nan(self, token):
+        r = requests.post(
+            f"{API}/portfolio/monthly-money-commitments",
+            json=_mmc_payload(amount="NaN"),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400
+
+    def test_commitment_reject_infinity(self, token):
+        r = requests.post(
+            f"{API}/portfolio/monthly-money-commitments",
+            json=_mmc_payload(amount="Infinity"),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400
+
+    def test_money_allocation_string_precision(self, token):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_money_alloc_one_time(quantity="99.9500"),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["quantity"] == "99.9500"
+        assert isinstance(r.json()["quantity"], str)
+
+    def test_money_allocation_reject_nan(self, token):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_money_alloc_one_time(quantity="NaN"),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 400
+
+    def test_time_allocation_quantity_is_string_int(self, token):
+        r = requests.post(
+            f"{API}/portfolio/resource-allocations",
+            json=_time_alloc_one_time(),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["quantity"] == "90"
+        assert isinstance(body["quantity"], str)
+
+    def test_stored_values_are_decimal128(self, token):
+        # Create a fresh account then verify it's stored as Decimal128 in Mongo.
+        import asyncio
+        from motor.motor_asyncio import AsyncIOMotorClient
+        from bson.decimal128 import Decimal128 as _D128
+
+        marker_name = f"dec128-check-{uuid.uuid4().hex[:8]}"
+        r = requests.post(
+            f"{API}/portfolio/financial-accounts",
+            json=_acct_payload(name=marker_name, current_value="777.7777"),
+            headers=_hdrs(token), timeout=10,
+        )
+        assert r.status_code == 201, r.text
+
+        mongo_url = os.environ["MONGO_URL"]
+        db_name = os.environ["DB_NAME"]
+
+        async def _check():
+            client = AsyncIOMotorClient(mongo_url)
+            database = client[db_name]
+            doc = await database.financial_accounts.find_one({"name": marker_name}, {"_id": 0})
+            client.close()
+            return doc
+
+        loop = asyncio.new_event_loop()
+        try:
+            doc = loop.run_until_complete(_check())
+        finally:
+            loop.close()
+
+        assert doc is not None, f"seeded account {marker_name} not found"
+        assert isinstance(doc["current_value"], _D128), (
+            f"current_value stored as {type(doc['current_value']).__name__}, expected Decimal128"
+        )
+        # And it must round-trip to the exact Decimal string we sent.
+        assert str(doc["current_value"].to_decimal()) == "777.7777"
 
 
 # ---------------------------------------------------------------------------

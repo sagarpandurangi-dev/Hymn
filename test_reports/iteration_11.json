@@ -1,0 +1,27 @@
+{
+  "summary": "PORTFOLIO MANAGER Iteration 1A corrective validation — backend only, live HTTP against EXPO_PUBLIC_BACKEND_URL. 66/66 tests PASS in 16.84s. Both defect areas confirmed fixed: (1) ALLOCATION OWNER INTEGRITY — POST/PUT /api/portfolio/resource-allocations now rejects with HTTP 400 for nonexistent owner_id (random uuid) and for foreign-user references across task/project/knowledge_journey; standalone still requires owner_id=null; on a rejecting PUT the persisted row remains unchanged (owner_type/owner_id/quantity intact). (2) MONEY AS DECIMAL/Decimal128 — financial_accounts.current_value, monthly_money_commitments.amount, and money resource_allocations.quantity round-trip as decimal STRINGS with exact precision preserved (e.g. \"9999.9999\", \"1234.5678\", \"99.9500\"). NaN/Infinity/-Infinity/negative all yield HTTP 400. Time-allocation quantity remains integer minutes serialised as string (\"60\", isinstance str). Money-position aggregate returns two-decimal-place strings; the exact iteration-1A scenario (bank 100.50 + cash 25.25 liquid USD; stock semi_liquid excluded; USD credit_card liability excluded; commitments income 500.25 fixed, expense 100.10 fixed, expense 50.05 flexible, saving 10.10 fixed, investment 5.20 fixed) yielded opening_liquid_assets=\"125.75\", planned_income=\"500.25\", fixed_outflows=\"100.10\", flexible_outflows=\"50.05\", planned_savings=\"10.10\", planned_investments=\"5.20\", available_for_flexible_spending=\"460.55\". Empty currency returns all fields as \"0.00\". Regression suite green on /api/auth/me, /api/domains, /api/goals, /api/tasks, /api/checkins, /api/knowledge/journeys, plus every pre-existing portfolio validation rule (enums, HH:mm, YYYY-MM, YYYY-MM-DD, effective windows, duration=quantity for time, currency rules, user isolation across all 4 collections).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": [], "react_native_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_portfolio_live.py",
+    "/app/test_reports/pytest/portfolio_live_1a_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Owner integrity is validated by _validate_owner_reference in portfolio_manager.py: single indexed find_one({id, user_id}) per non-standalone allocation on POST, and again on PUT only when owner_type or owner_id are in the incoming payload — cheap and correct. Existence + ownership combined into one query prevents any information leak about foreign rows.",
+    "Money storage uses bson.decimal128.Decimal128 throughout: _parse_money_input strictly rejects bool, NaN, Infinity, and negative; strings/floats/ints all normalise through str(...) before Decimal, so no binary-float representation is ever persisted. _money_from_stored/_dec_to_str produce plain decimal notation (never scientific) and preserve exact caller precision.",
+    "Only *derived* aggregates in money-position are quantised to two decimals via _MONEY_OUTPUT_QUANTUM; individual stored values keep their input precision. Verified: 100.50+25.25=125.75 and 125.75+500.25-100.10-50.05-10.10-5.20=460.55, all serialised as strings.",
+    "PUT re-runs owner integrity only when owner_type/owner_id are present in the incoming payload; unchanged fields skip the DB round-trip. Correct.",
+    "Time-allocation quantity is stored as int and projected via str(int(q)) — response type is 'str' as required, while stored type stays int for correct duration validation.",
+    "Foreign-user rejection returns 400 (not 404). The message explicitly says 'no matching row exists for this user' — this is the correct security posture (no information disclosure about foreign IDs)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_portfolio_live.py (added TestMoneyPositionIteration1A + TestAllocationUpdateOwnerIntegrity, total 66 tests)"
+  ],
+  "success_rate": {"backend": "100% (66/66)", "frontend": "N/A - backend-only per request"},
+  "seed_data_creation": "Each test module run signs up fresh TEST_pm_<uuid>@example.com users; all created rows are prefixed TEST_. Iteration-1A scenario creates 4 accounts + 5 commitments under a throwaway user; regression flow creates one TEST_regress_kj journey. No shared/production data touched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Live-HTTP portfolio suite is /app/backend/tests/test_portfolio_live.py — 66 tests, self-contained, uses only EXPO_PUBLIC_BACKEND_URL. Run: `python -m pytest /app/backend/tests/test_portfolio_live.py -v`. Key contracts: (a) money values are decimal STRINGS in every response; (b) money-position aggregates are quantised to two decimals; (c) owner_type ∈ {task, project, knowledge_journey, standalone} — standalone REQUIRES owner_id=null; the other three require an owner_id that both exists and belongs to the caller (400 otherwise, with no information disclosure about foreign rows); (d) time-allocation quantity is integer minutes serialised as string; (e) NaN/Infinity/negative money values → 400.",
+  "rca_of_issue": "N/A — no defects. Both corrective fixes verified end-to-end via live HTTP."
+}
