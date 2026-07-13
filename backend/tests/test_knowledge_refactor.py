@@ -80,6 +80,7 @@ class TestKnowledgeWizardHappyPath:
 
     def test_create_journey_full_body(self, fresh_user):
         payload = {
+            "journey_type": "skill",
             "title": "TEST_Learn Spanish",
             "why": "To speak with abuela",
             "target_completion_date": "2026-12-31",
@@ -96,14 +97,15 @@ class TestKnowledgeWizardHappyPath:
         assert g["expected_outcomes_completed"] == 0
         assert g["notes"] == "To speak with abuela"
         assert g["deadline"] == "2026-12-31"
-        fresh_user["goal_id"] = g["id"]
+        fresh_user["journey_id"] = g["id"]
+        fresh_user["goal_id"] = g["goal_id"]
 
     def test_list_returns_new_journey(self, fresh_user):
         r = requests.get(f"{API}/knowledge/journeys", headers=fresh_user["headers"])
         assert r.status_code == 200
         items = r.json()
         assert len(items) == 1
-        assert items[0]["id"] == fresh_user["goal_id"]
+        assert items[0]["id"] == fresh_user["journey_id"]
 
     def test_get_goal_returns_same(self, fresh_user):
         r = requests.get(f"{API}/goals/{fresh_user['goal_id']}", headers=fresh_user["headers"])
@@ -149,6 +151,7 @@ def _count_journeys(headers) -> int:
 class TestKnowledgeWizardRejections:
     def _base(self):
         return {
+            "journey_type": "skill",
             "title": "TEST_reject",
             "why": "reason",
             "target_completion_date": "",
@@ -305,6 +308,7 @@ class TestIsolation:
         other_h = {"Authorization": f"Bearer {r.json()['access_token']}"}
         # Other user creates a journey
         rj = requests.post(f"{API}/knowledge/journeys", json={
+            "journey_type": "skill",
             "title": "TEST_other_journey", "why": "reason",
             "first_outcome": {"title": "eo"}, "first_task": {"title": "t"},
             "checkin_cadence": "manual",
