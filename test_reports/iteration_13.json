@@ -1,0 +1,39 @@
+{
+  "summary": "Backend-only smoke test for Project + Life check-ins with task_id linkage, complete_task, and money_spent. All 9 scenarios PASS (11/11 in test_life_project_checkin_task.py). Regression against test_projects_eo_tasks_checkins.py + test_defer_spending_money.py: 64/64 PASS. Coverage: (1) Project check-in + task under same project + complete_task=false + money=12.50 USD -> 201, task stays 'todo', updated_at bumps, money_spent/money_currency echoed exactly (as decimal string '12.50'). (2) Project check-in + complete_task=true flips task status to 'done'. (3) Project check-in with task belonging to DIFFERENT project -> 400 'Invalid task for this project'. (4) Life check-in + user-owned task + complete_task=false + money=5 INR -> 201, task stays 'todo', updated_at bumps, response echoes money_spent='5' (str(Decimal('5'))) and money_currency='INR'. (5) Life check-in + complete_task=true flips task to 'done'. (6) Life check-in with task owned by ANOTHER user -> 400 'Invalid task' (user_id ownership filter working — server.py:1422-1428). (7) Life check-in with money_spent but no money_currency -> 400 'money_currency must be an ISO 4217 code when money_spent is set'. (8) GET /api/spending?date=<today> returns groups keyed by currency; USD group total >= 12.50 (from project checkin), INR group total >= 5.00 (from life checkin); each group.total is a 2-dp string; entries sorted by time. (9) GET /api/portfolio/money-position?month=<curr>&currency=USD shows actual_spending as 2-dp string reflecting the USD 12.50 checkin (>= 12.50). No backend defects found — all spec requirements satisfied end-to-end via live HTTP.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_life_project_checkin_task.py",
+    "/app/test_reports/pytest/life_project_checkin_task_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:1417-1429 — Life check-in task ownership check correctly filters by user_id only (no owning-entity constraint), matching spec. Uses projection {_id:0, id:1} which is efficient.",
+    "server.py:1412-1416 — Project check-in task ownership check filters by user_id AND project_id, correctly rejecting tasks from a different project with 400.",
+    "server.py:1495-1504 — complete_task flag handling is uniform across all three check-in types (goal/project/life) — the same block runs whenever task_id was resolved, so behavior is consistent. Only bumps updated_at unless complete_task=true, then $set status='done'.",
+    "server.py:1446-1461 — money_spent/money_currency validation runs identically regardless of type (including life). Missing currency when money_spent is set returns 400 with clear message.",
+    "server.py:1665 — /api/spending regex ^\\d{4}-\\d{2}-\\d{2}$ correctly rejects malformed dates with 400; missing param yields 422 (FastAPI Query enforcement).",
+    "server.py:1674-1678 — /api/spending projection deliberately omits 'type' and 'project_id' fields — entries only expose id/title/time/amount/notes/goal_id/task_id/expected_outcome_id. If the UI ever needs to badge entries as 'life' vs 'project' vs 'goal', it will need one of these added (currently only goal_id is exposed which lets the UI infer goal vs non-goal, but not project vs life). Not a defect per spec (spec doesn't require this), but worth flagging for future UX.",
+    "server.py:586-596 — _money_str returns str(Decimal(v)) which does NOT force a canonical 2-dp form (e.g. input '5' echoes as '5', not '5.00'). Individual check-in responses therefore reflect the input precision. /api/spending totals and /api/portfolio/money-position DO force 2dp via .quantize(Decimal('0.01')). Consistent with iteration 12 behavior."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_life_project_checkin_task.py (new — 11 tests, self-contained live-HTTP suite covering all 9 scenarios + 2 regression checks)"
+  ],
+  "success_rate": {
+    "backend": "100% (11/11 new + 64/64 regression)",
+    "frontend": "N/A - backend-only per request"
+  },
+  "seed_data_creation": "Each module provisions two fresh TEST_ users (TEST_ck_a_*, TEST_ck_b_*) via /api/auth/signup, then seeds two projects owned by A (p_used, p_foreign), one task per project, and two standalone life tasks (one per user). All TEST_-prefixed. No shared/seeded production data touched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "New live-HTTP suite at /app/backend/tests/test_life_project_checkin_task.py (11 tests, ~6s). Run: `python -m pytest backend/tests/test_life_project_checkin_task.py -v`. Key contract observations: (a) Life check-in task ownership uses user_id filter ONLY — any task owned by the caller is accepted regardless of origin/project/EO scope. (b) money_spent echo on the check-in response preserves input precision via str(Decimal(input)) — '5' echoes as '5', '12.50' echoes as '12.50'. Do NOT assert forced 2-dp on the checkin echo. (c) /api/spending groups DO force 2-dp via .quantize(Decimal('0.01')). (d) /api/spending entries lack a 'type' field and lack 'project_id' — only id/title/time/amount/notes/goal_id/task_id/expected_outcome_id are exposed. If a future scenario needs to distinguish project vs life in spending payload, either extend the projection server-side or verify via a separate GET /api/checkins/{id}. (e) money-position actual_spending is monthly, USD-filtered, 2dp string. (f) task's updated_at is bumped even when complete_task=false — a check-in on a task always counts as recent activity per server.py:1499.",
+  "rca_of_issue": "N/A — no defects found. All 9 scenarios behave exactly as specified."
+}

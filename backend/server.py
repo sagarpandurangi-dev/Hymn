@@ -1414,7 +1414,19 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
             if not t:
                 raise HTTPException(status_code=400, detail="Invalid task for this project")
             task_id = t["id"]
-    # life: no linkage
+    else:
+        # Life check-ins have no owning entity, but users may still attach an
+        # arbitrary task to record incidental progress or completion. The
+        # only ownership check here is user_id — a Life check-in can point
+        # at any of the user's tasks.
+        if body.task_id:
+            t = await db.tasks.find_one(
+                {"id": body.task_id, "user_id": current_user["id"]},
+                {"_id": 0, "id": 1},
+            )
+            if not t:
+                raise HTTPException(status_code=400, detail="Invalid task")
+            task_id = t["id"]
 
     validated_component_id: Optional[str] = None
     if body.component_id:
