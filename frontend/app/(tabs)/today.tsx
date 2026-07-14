@@ -30,7 +30,10 @@ type TaskItem = {
   due_date: string;
   priority: string;
   status: string;
+  deferred_until?: string | null;
 };
+
+type SpendingGroup = { currency: string; total: string };
 
 // Generate YYYY-MM-DD from the local device date. Never use UTC — the user's
 // wall-clock "today" is authoritative for scheduling comparisons.
@@ -98,18 +101,23 @@ export default function TodayScreen() {
   const [events, setEvents] = useState<EventItem[]>([]);
   const [required, setRequired] = useState<RequiredCheckin[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [spending, setSpending] = useState<SpendingGroup[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     const today = localTodayISO();
-    // Single Promise.all() feeds all three Today datasets in one refresh.
-    // Any individual failure degrades that dataset only — the other two still
-    // render — so returning to Today after completing a task or check-in
-    // always reflects the newest state.
-    const [checkinsRes, requiredRes, tasksRes] = await Promise.all([
+    // Single Promise.all() feeds every Today dataset in one refresh.
+    // Any individual failure degrades that dataset only — the other cards
+    // still render — so returning to Today after completing a task or
+    // check-in always reflects the newest state.
+    const [checkinsRes, requiredRes, tasksRes, spendingRes] = await Promise.all([
       api.listCheckins().catch(() => []),
       api.listRequiredCheckins(today).catch(() => []),
-      api.listTasks().catch(() => []),
+      // Completed and cancelled tasks are hidden — check-ins now surface
+      // Goal-level progress separately and the tasks preview only lists
+      // work that still needs attention.
+      api.listTasks({ includeCompleted: false }).catch(() => []),
+      api.getSpending(today).catch(() => ({ date: today, groups: [] as any })),
     ]);
 
     // Recent Check-ins: only those recorded on the user's local "today".
@@ -117,9 +125,9 @@ export default function TodayScreen() {
 
     setRequired(requiredRes as RequiredCheckin[]);
 
-    // Upcoming tasks: exclude done + cancelled, then order Overdue -> Today
-    // -> Future -> Undated. Undated tasks come last because they have no
-    // temporal anchor.
+    // Upcoming tasks: hide deferred (which live in their own /tasks section)
+    // and order Overdue -> Today -> Future -> Undated. Undated tasks come
+    // last because they have no temporal anchor.
     const bucket = (t: TaskItem): number => {
       if (!t.due_date) return 3;
       if (t.due_date < today) return 0;
@@ -127,7 +135,9 @@ export default function TodayScreen() {
       return 2;
     };
     const filtered = (tasksRes as TaskItem[]).filter(
-      (t) => t.status !== "done" && t.status !== "cancelled",
+      (t) => t.status !== "done" && t.status !== "cancelled"
+        && !(t.deferred_until && t.deferred_until >= today)
+        && t.status !== "deferred",
     );
     filtered.sort((a, b) => {
       const ba = bucket(a);
@@ -138,6 +148,8 @@ export default function TodayScreen() {
       return a.title.localeCompare(b.title);
     });
     setTasks(filtered);
+
+    setSpending(((spendingRes as any).groups || []) as SpendingGroup[]);
   }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -263,7 +275,23 @@ export default function TodayScreen() {
             icon="cash-outline"
             empty="Quiet spending today."
             onPress={() => router.push("/spending")}
-          />
+          >
+            {spending.length > 0 ? (
+              <View style={styles.rowList}>
+                {spending.slice(0, 3).map((g) => (
+                  <View key={g.currency} style={styles.row} testID={`today-spending-row-${g.currency}`}>
+                    <Text style={styles.rowTitle}>{g.currency}</Text>
+                    <Text style={styles.rowMeta}>{g.total}</Text>
+                  </View>
+                ))}
+                {spending.length > 3 && (
+                  <Text style={styles.moreLine}>+{spending.length - 3} more</Text>
+                )}
+              </View>
+            ) : (
+              <Text style={styles.cardEmpty}>Quiet spending today.</Text>
+            )}
+          </Card>
         </View>
       </ScrollView>
     </SafeAreaView>

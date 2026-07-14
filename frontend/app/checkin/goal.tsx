@@ -5,9 +5,11 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
+import { useAuth } from "@/src/lib/AuthContext";
 import { colors, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
+import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
 
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
 const nowDate = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
@@ -15,25 +17,31 @@ const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad
 
 type Goal = { id: string; title: string };
 type EO = { id: string; goal_id: string; title: string; outcome_type: string };
+type Task = { id: string; title: string; status: string; expected_outcome_id: string | null };
 type FieldDef = { key: string; label: string; type: string; required?: boolean; options?: string[] };
 
 export default function GoalCheckinScreen() {
   const router = useRouter();
+  const { user } = useAuth();
   // Route parameters — if either is present it locks its respective picker.
   // The "required check-ins" flow always passes goalId; a per-EO deep link
   // may additionally pass expectedOutcomeId.
-  const params = useLocalSearchParams<{ goalId?: string; expectedOutcomeId?: string }>();
+  const params = useLocalSearchParams<{ goalId?: string; expectedOutcomeId?: string; taskId?: string }>();
   const preselectedGoalId = typeof params.goalId === "string" && params.goalId ? params.goalId : "";
   const preselectedEoId = typeof params.expectedOutcomeId === "string" && params.expectedOutcomeId
     ? params.expectedOutcomeId
     : "";
+  const preselectedTaskId = typeof params.taskId === "string" && params.taskId ? params.taskId : "";
   const goalLocked = !!preselectedGoalId;
   const eoLocked = !!preselectedEoId;
 
   const [goals, setGoals] = useState<Goal[]>([]);
   const [eos, setEos] = useState<EO[]>([]);
+  const [tasksForEo, setTasksForEo] = useState<Task[]>([]);
   const [goalId, setGoalId] = useState<string>(preselectedGoalId);
   const [eoId, setEoId] = useState<string>(preselectedEoId);
+  const [taskId, setTaskId] = useState<string>(preselectedTaskId);
+  const [completeTask, setCompleteTask] = useState<boolean>(false);
   const [registry, setRegistry] = useState<Record<string, { label: string; checkin_fields: FieldDef[] }>>({});
   const [dynamicData, setDynamicData] = useState<Record<string, any>>({});
   const [title, setTitle] = useState("");
@@ -43,6 +51,12 @@ export default function GoalCheckinScreen() {
   const [attachment, setAttachment] = useState("");
   const [addFollowUp, setAddFollowUp] = useState(false);
   const [followUpTitle, setFollowUpTitle] = useState("");
+  // Money spent alongside this check-in. Optional. When set, the amount is
+  // added to today's spending and subtracted from the money-position's
+  // "available for flexible spending" for the current month + currency.
+  const [moneySpent, setMoneySpent] = useState<string>("");
+  const [moneyCurrency, setMoneyCurrency] = useState<string>(user?.portfolio_reporting_currency || "USD");
+  const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -90,6 +104,27 @@ export default function GoalCheckinScreen() {
 
   useEffect(() => { setDynamicData({}); }, [eoId]);
 
+  // Load tasks under the currently-selected EO so the user can attach the
+  // check-in to a specific task. Only open tasks (todo | deferred) are
+  // shown — completed ones don't need a check-in.
+  useEffect(() => {
+    if (!eoId) { setTasksForEo([]); return; }
+    (async () => {
+      try {
+        // We fetch by parent Goal (the backend filters by EO belongings) and
+        // then intersect on the selected EO client-side. This keeps us on the
+        // existing api.listTasks shape without a new backend query param.
+        const all = await api.listTasks({ goalId, includeCompleted: false });
+        const filtered = all.filter((t: any) => t.expected_outcome_id === eoId);
+        setTasksForEo(filtered.map((t: any) => ({
+          id: t.id, title: t.title, status: t.status, expected_outcome_id: t.expected_outcome_id,
+        })));
+        // If the user deep-linked with taskId, keep it; otherwise clear.
+        setTaskId((prev) => (filtered.some((t: any) => t.id === prev) ? prev : (preselectedTaskId && filtered.some((t: any) => t.id === preselectedTaskId) ? preselectedTaskId : "")));
+      } catch { setTasksForEo([]); }
+    })();
+  }, [eoId, goalId, preselectedTaskId]);
+
   const selectedGoal = useMemo(() => goals.find((g) => g.id === goalId), [goals, goalId]);
   const selectedEO = eos.find((e) => e.id === eoId);
   const outcomeType = selectedEO?.outcome_type || "generic";
@@ -101,12 +136,33 @@ export default function GoalCheckinScreen() {
     if (!title.trim()) { setError("Title is required."); return; }
     const missing = fields.filter((f) => f.required && (dynamicData[f.key] === undefined || dynamicData[f.key] === "" || dynamicData[f.key] === null)).map((f) => f.label);
     if (missing.length > 0) { setError(`Missing required fields: ${missing.join(", ")}`); return; }
+    // Money spent input is optional. When provided, it must be a positive
+    // decimal string and money_currency must be a 3-letter ISO 4217 code.
+    const trimmedMoney = (moneySpent || "").trim();
+    if (trimmedMoney && !/^\d+(\.\d+)?$/.test(trimmedMoney)) {
+      setError("Money spent must be a positive number.");
+      return;
+    }
+    if (trimmedMoney && !/^[A-Z]{3}$/.test(moneyCurrency)) {
+      setError("Pick a currency for the money spent.");
+      return;
+    }
     setBusy(true);
     try {
       const payload: any = {
         type: "goal", title: title.trim(), date, time, notes: notes.trim(),
         attachment, expected_outcome_id: eoId, source: "manual", data: dynamicData,
       };
+      if (taskId) {
+        payload.task_id = taskId;
+        // Only flip the linked task to `done` when the user opted in — a
+        // check-in on a task is normally an *update*, not a completion.
+        payload.complete_task = completeTask;
+      }
+      if (trimmedMoney) {
+        payload.money_spent = trimmedMoney;
+        payload.money_currency = moneyCurrency;
+      }
       if (addFollowUp && followUpTitle.trim()) payload.follow_up_task = { title: followUpTitle.trim() };
       await api.createCheckin(payload);
       router.back();
@@ -234,6 +290,66 @@ export default function GoalCheckinScreen() {
           <Text style={s.label}>Attachment (paste URL — placeholder)</Text>
           <TextInput style={s.input} value={attachment} onChangeText={setAttachment} placeholder="Optional" placeholderTextColor={colors.onSurfaceTertiary} testID="goal-checkin-attachment-input" />
 
+          {/* --- Optional Task linkage --- */}
+          {tasksForEo.length > 0 && (
+            <>
+              <Text style={s.label}>Update a task under this outcome (optional)</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
+                <Pressable
+                  onPress={() => setTaskId("")}
+                  style={[s.chip, taskId === "" && s.chipSelected]}
+                  testID="goal-checkin-task-chip-none"
+                >
+                  <Text style={[s.chipText, taskId === "" && s.chipTextSelected]}>None</Text>
+                </Pressable>
+                {tasksForEo.map((t) => {
+                  const sel = taskId === t.id;
+                  return (
+                    <Pressable
+                      key={t.id}
+                      onPress={() => setTaskId(t.id)}
+                      style={[s.chip, sel && s.chipSelected]}
+                      testID={`goal-checkin-task-chip-${t.id}`}
+                    >
+                      <Text style={[s.chipText, sel && s.chipTextSelected]} numberOfLines={1}>{t.title}</Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+              {!!taskId && (
+                <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.sm }}>
+                  <Text style={{ fontSize: 14, color: colors.onSurface }}>Mark this task complete</Text>
+                  <Switch value={completeTask} onValueChange={setCompleteTask} testID="goal-checkin-complete-task-switch" />
+                </View>
+              )}
+            </>
+          )}
+
+          {/* --- Optional Money Spent --- */}
+          <Text style={s.label}>Money spent (optional)</Text>
+          <View style={{ flexDirection: "row", gap: spacing.md }}>
+            <View style={{ flex: 1 }}>
+              <TextInput
+                style={s.input}
+                value={moneySpent}
+                onChangeText={(v) => setMoneySpent(v.replace(/[^0-9.]/g, ""))}
+                keyboardType="decimal-pad"
+                placeholder="0"
+                placeholderTextColor={colors.onSurfaceTertiary}
+                testID="goal-checkin-money-input"
+              />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Pressable
+                onPress={() => setCurrencyPickerOpen(true)}
+                style={s.input}
+                testID="goal-checkin-currency-select"
+              >
+                <Text style={{ fontSize: 15, color: colors.onSurface }}>{moneyCurrency}</Text>
+              </Pressable>
+            </View>
+          </View>
+
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.lg }}>
             <Text style={{ fontSize: 14, color: colors.onSurface }}>Create follow-up task</Text>
             <Switch value={addFollowUp} onValueChange={setAddFollowUp} testID="goal-checkin-followup-switch" />
@@ -251,6 +367,13 @@ export default function GoalCheckinScreen() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+
+      <CurrencyPickerModal
+        visible={currencyPickerOpen}
+        selected={moneyCurrency}
+        onSelect={(c) => setMoneyCurrency(c)}
+        onClose={() => setCurrencyPickerOpen(false)}
+      />
     </SafeAreaView>
   );
 }

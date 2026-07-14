@@ -545,6 +545,9 @@ class MonthlyMoneyPositionResponse(BaseModel):
     flexible_outflows: str
     planned_savings: str
     planned_investments: str
+    # Actual money spent this month in `currency`, summed from checkins with
+    # money_spent populated. Subtracted from `available_for_flexible_spending`.
+    actual_spending: str
     available_for_flexible_spending: str
 
 
@@ -1158,6 +1161,26 @@ async def get_monthly_money_position(
         - planned_investments
     )
 
+    # Actual spending: sum of checkin.money_spent for the requested month +
+    # currency. This is treated as a real-time deduction from the available
+    # pool so the "available for flexible spending" number reflects reality,
+    # not just the plan.
+    month_prefix = month  # YYYY-MM
+    spend_docs = await db.checkins.find(
+        {
+            "user_id": current_user["id"],
+            "money_currency": currency,
+            "money_spent": {"$ne": None},
+            "date": {"$regex": f"^{re.escape(month_prefix)}-"},
+        },
+        {"_id": 0, "money_spent": 1},
+    ).to_list(length=20000)
+    actual_spending = sum(
+        (_decimal_from_stored(x.get("money_spent")) for x in spend_docs),
+        Decimal(0),
+    )
+    available = available - actual_spending
+
     return MonthlyMoneyPositionResponse(
         month=month,
         currency=currency,
@@ -1167,6 +1190,7 @@ async def get_monthly_money_position(
         flexible_outflows=_quantize_out(flexible_outflows),
         planned_savings=_quantize_out(planned_savings),
         planned_investments=_quantize_out(planned_investments),
+        actual_spending=_quantize_out(actual_spending),
         available_for_flexible_spending=_quantize_out(available),
     )
 

@@ -437,6 +437,7 @@ export function MonthlyMoneyPanel({ defaultCurrency, onChanged }: { defaultCurre
                 <View style={styles.posCell}><Text style={styles.posLabel}>Fixed outflows</Text><Text style={styles.posValue}>{formatMoney(pos.fixed_outflows)}</Text></View>
                 <View style={styles.posCell}><Text style={styles.posLabel}>Planned savings</Text><Text style={styles.posValue}>{formatMoney(pos.planned_savings)}</Text></View>
                 <View style={styles.posCell}><Text style={styles.posLabel}>Planned investments</Text><Text style={styles.posValue}>{formatMoney(pos.planned_investments)}</Text></View>
+                <View style={styles.posCell}><Text style={styles.posLabel}>Actual spending</Text><Text style={styles.posValue}>{formatMoney(pos.actual_spending)}</Text></View>
                 <View style={[styles.posCell, { flexBasis: "100%" }]}><Text style={styles.posLabel}>Available for flexible spending</Text><Text style={styles.posValueStrong}>{formatMoney(pos.available_for_flexible_spending)}</Text></View>
               </View>
             )}

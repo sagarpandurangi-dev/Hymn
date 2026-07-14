@@ -128,30 +128,42 @@ export const api = {
   deleteProject: (id: string) =>
     request<{ detail: string }>(`/projects/${id}`, { method: "DELETE", auth: true }),
 
-  listTasks: (params?: { goalId?: string }) => {
-    const qs = params?.goalId ? `?goal_id=${encodeURIComponent(params.goalId)}` : "";
+  listTasks: (params?: { goalId?: string; includeCompleted?: boolean }) => {
+    const parts: string[] = [];
+    if (params?.goalId) parts.push(`goal_id=${encodeURIComponent(params.goalId)}`);
+    if (params?.includeCompleted === false) parts.push("include_completed=false");
+    const qs = parts.length ? `?${parts.join("&")}` : "";
     return request<
-      { id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null }[]
+      { id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }[]
     >(`/tasks${qs}`, { auth: true });
   },
   createTask: (payload: { title: string; due_date?: string; priority?: string; status?: string; notes?: string; origin: string; expected_outcome_id?: string | null; project_id?: string | null }) =>
     request<{ id: string }>("/tasks", { method: "POST", body: payload, auth: true }),
   getTask: (id: string) =>
-    request<{ id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null }>(
+    request<{ id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }>(
       `/tasks/${id}`,
       { auth: true },
     ),
   updateTask: (id: string, payload: { title?: string; due_date?: string; priority?: string; status?: string; notes?: string }) =>
     request<{ id: string }>(`/tasks/${id}`, { method: "PUT", body: payload, auth: true }),
+  deferTask: (id: string, deferred_until: string) =>
+    request<{ id: string; deferred_until: string | null; defer_count: number }>(
+      `/tasks/${id}/defer`, { method: "POST", body: { deferred_until }, auth: true },
+    ),
   deleteTask: (id: string) =>
     request<{ detail: string }>(`/tasks/${id}`, { method: "DELETE", auth: true }),
 
   listCheckins: (params?: { goalId?: string }) => {
     const qs = params?.goalId ? `?goal_id=${encodeURIComponent(params.goalId)}` : "";
     return request<
-      { id: string; type: string; title: string; date: string; time: string; notes: string; attachment: string; expected_outcome_id: string | null; goal_id: string | null; project_id: string | null; task_id: string | null; follow_up_task_id: string | null }[]
+      { id: string; type: string; title: string; date: string; time: string; notes: string; attachment: string; expected_outcome_id: string | null; goal_id: string | null; project_id: string | null; task_id: string | null; follow_up_task_id: string | null; money_spent: string | null; money_currency: string | null }[]
     >(`/checkins${qs}`, { auth: true });
   },
+  getSpending: (date: string) =>
+    request<{
+      date: string;
+      groups: { currency: string; total: string; entries: { id: string; title: string; time: string; amount: string; notes: string; goal_id: string | null; task_id: string | null; expected_outcome_id: string | null }[] }[];
+    }>(`/spending?date=${encodeURIComponent(date)}`, { auth: true }),
   listRequiredCheckins: (date: string) =>
     request<
       { goal_id: string; goal_title: string; domain_name: string; checkin_cadence: string; completed_for_period: boolean }[]
@@ -225,6 +237,7 @@ export const api = {
       opening_liquid_assets: string; planned_income: string;
       fixed_outflows: string; flexible_outflows: string;
       planned_savings: string; planned_investments: string;
+      actual_spending: string;
       available_for_flexible_spending: string;
     }>(`/portfolio/money-position?month=${encodeURIComponent(month)}&currency=${encodeURIComponent(currency)}`, { auth: true }),
   createCheckin: (payload: any) =>

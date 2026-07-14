@@ -1,0 +1,32 @@
+{
+  "summary": "Backend-only validation of Task Deferment + Check-in money_spent/complete_task + /api/spending + money-position actual_spending. 30/30 new tests PASS in 27.66s (test_defer_spending_money.py). Full spec coverage: (1) DEFER — max-3 cap chain (base+4, +9, +14 boundary OK; 4th rejected 400), 14-day cap (+14 OK, +15 400), no-due-date branch (baseline frozen to today on first defer, +1 OK, +15 400), strictly-future rule (past date 400, same-day 400, malformed 400), done-task 400, nonexistent 404, defer_count/original_due_date/deferred_until all persisted and echoed via GET. NOTE: scenario re-anchored to today+60 baseline because container clock is 2026-07-14 — spec's literal 2026-06-01 baseline is already in the past and would trip the strictly-future guard before the count/day rules are even reached. Semantics identical to spec. (2) include_completed filter — default & =true return both todo+done; =false excludes done (via $nin: [done, cancelled]). (3) CHECK-IN task linking — complete_task=false keeps status todo & bumps updated_at; complete_task=true flips to done; task from a different EO under the same goal correctly 400s (checkin lookup filters by both user_id AND expected_outcome_id). (4) MONEY on check-in — '42.50'/USD stored and echoed as strings, numeric 0 accepted, NaN/-1/Infinity all 400 with distinct messages, missing currency 400, non-ISO currency 400, omitted money returns null/null. (5) MONEY-POSITION — actual_spending correctly sums check-ins for the given month+currency; exact-scenario yielded opening_liquid_assets=100.00, planned_income=500.00, fixed_outflows=100.00, actual_spending=25.00, available_for_flexible_spending=475.00; isolated by month (2020 spend ignored) and by currency (INR spend not in USD position). (6) /api/spending — grouped by currency, totals two-dp strings, entries sorted by time ascending; check-ins without money_spent excluded; older dates excluded; missing date -> 422 (FastAPI Query), malformed -> 400; empty day returns {date, groups:[]}. Regression sweep against test_projects_eo_tasks_checkins.py + test_domains_goals.py: 51/51 PASS.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": [], "react_native_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_defer_spending_money.py",
+    "/app/test_reports/pytest/defer_spending_money_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:1231 — target_date <= today strictly-future rule runs BEFORE the count/day caps. This means once a task's original_due_date has slipped into the past, ALL defer attempts (even ones within +14 of baseline) are refused with the 'must be strictly in the future' message. Consider whether the spec intends the strictly-future check to trump the +14 baseline cap — it currently makes a task un-deferrable once its baseline has expired even if the user still has remaining defers.",
+    "server.py:1244 — baseline defaults to today when the task has NO due_date; but note that on first defer this today-baseline is FROZEN into original_due_date (line 1266) so subsequent defers keep comparing against the SAME anchor as required. Confirmed working: no-due-date task on day D can only ever be pushed to at most D+14, regardless of when the later defers are made. Correct.",
+    "server.py:1218 — status check uses ('done', 'cancelled') but TASK_STATUSES = {'todo','done','deferred'} — 'cancelled' is never a valid status via /api/tasks CRUD. Harmless defensive check but 'cancelled' branch is dead code today.",
+    "server.py:1116-1120 — include_completed=false correctly filters $nin: [done, cancelled] using the same pair — consistent with the defer check. Deferred tasks stay visible (correct, per UX intent).",
+    "server.py:1446 — money_currency validation only triggers when money_spent is set; the CheckInUpdate PUT path doesn't run this validation (checked separately). Not in scope for this iteration but worth noting for future PUT-money-update work.",
+    "server.py:1653 — /api/spending uses FastAPI Query(...) which yields 422 on missing param, not 400. Spec accepts either (\"422 or 400\"), so contract holds; malformed-format returns 400 via explicit regex check.",
+    "portfolio_manager.py:1174 — date filter uses regex ^{month}- which is efficient because 'date' is stored as YYYY-MM-DD string; alternatives (range gte/lt on YYYY-MM-01) would also work and be index-friendlier if a date index exists.",
+    "portfolio_manager.py:1178-1181 — sum(...) over Decimals with Decimal(0) start is safe and precision-preserving; final quantize to 0.01 correct."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_defer_spending_money.py (new — 30 tests, self-contained live-HTTP suite)"
+  ],
+  "success_rate": {"backend": "100% (30/30 new + 51/51 regression)", "frontend": "N/A - backend-only per request"},
+  "seed_data_creation": "Each test provisions a fresh TEST_defer_<uuid>@hymn.app user via /api/auth/signup and creates its own TEST_-prefixed goals/EOs/projects/tasks/checkins/financial_accounts/monthly_money_commitments. No shared or seeded production data touched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Suite lives at /app/backend/tests/test_defer_spending_money.py — 30 tests, ~28s. Run: `python -m pytest backend/tests/test_defer_spending_money.py -v`. Key contract quirks to remember: (a) defer endpoint applies strictly-future check BEFORE count/day caps — if you seed a task with a due_date already in the past, ALL defers fail with 'must be strictly in the future', regardless of remaining count budget. Tests use today+60 as baseline to avoid this. (b) baseline for +14 cap is FROZEN on first defer into original_due_date (line 1266), preventing users from walking the cap forward. (c) include_completed=false uses $nin: [done, cancelled] — deferred tasks stay visible. (d) /api/spending returns 422 (not 400) for missing ?date param because FastAPI Query(...) enforces at parse time. Malformed format returns 400 via explicit regex. (e) money-position actual_spending is filtered on date regex ^YYYY-MM- and money_currency exact match; check-ins with money_spent=null are excluded via {money_spent: {$ne: null}}.",
+  "rca_of_issue": "N/A — no defects found. All spec requirements satisfied end-to-end via live HTTP."
+}

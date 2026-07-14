@@ -9,7 +9,7 @@ import re
 import uuid
 from pathlib import Path
 from pydantic import BaseModel, EmailStr, Field
-from typing import List, Optional
+from typing import Any, List, Optional
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -322,6 +322,17 @@ class TaskUpdate(BaseModel):
     assigned_to_phone: Optional[str] = None
 
 
+class TaskDefer(BaseModel):
+    """Payload for POST /tasks/{id}/defer.
+
+    Task deferment cap (spec: option 1c) — both rules apply together:
+        1. Max 3 defers total per task.
+        2. deferred_until must be <= (original_due_date OR first-defer baseline)
+           + 14 days.
+    """
+    deferred_until: str  # YYYY-MM-DD (must be strictly in the future)
+
+
 class TaskResponse(BaseModel):
     id: str
     title: str
@@ -336,6 +347,12 @@ class TaskResponse(BaseModel):
     assigned_to_type: str
     assigned_to_name: str
     assigned_to_phone: str
+    # Deferment fields — nullable / zero on newly created tasks. `original_due_date`
+    # is captured on the FIRST defer (or seeded from due_date if present) so the
+    # 14-day cap can be applied consistently across subsequent defers.
+    deferred_until: Optional[str] = None
+    original_due_date: Optional[str] = None
+    defer_count: int = 0
     created_at: str
     updated_at: str
 
@@ -368,6 +385,17 @@ class CheckInCreate(BaseModel):
     follow_up_task: Optional[FollowUpTask] = None
     source: str = "manual"
     data: dict = Field(default_factory=dict)  # type-specific dynamic fields
+    # Money spent while performing the check-in. Optional. When present it
+    # counts as an *actual* expense for the check-in's month/currency and is
+    # subtracted from `available_for_flexible_spending` in the money-position
+    # endpoint. Currency is ISO 4217; amount is a decimal string.
+    money_spent: Optional[Any] = None
+    money_currency: Optional[str] = None
+    # If true and task_id is set, the linked task is marked done atomically
+    # with the check-in write. Otherwise the task is only updated
+    # (`updated_at` bumped) but its status is preserved — a check-in on a
+    # task is an *update*, not necessarily a completion.
+    complete_task: bool = False
 
 
 class CheckInUpdate(BaseModel):
@@ -378,6 +406,8 @@ class CheckInUpdate(BaseModel):
     attachment: Optional[str] = None
     component_id: Optional[str] = None
     data: Optional[dict] = None
+    money_spent: Optional[Any] = None
+    money_currency: Optional[str] = None
 
 
 class CheckInResponse(BaseModel):
@@ -397,6 +427,8 @@ class CheckInResponse(BaseModel):
     source: str
     outcome_type: Optional[str] = None
     data: dict
+    money_spent: Optional[str] = None
+    money_currency: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -543,9 +575,25 @@ def task_to_response(t: dict) -> TaskResponse:
         assigned_to_type=t.get("assigned_to_type", "self"),
         assigned_to_name=t.get("assigned_to_name", "") or "",
         assigned_to_phone=t.get("assigned_to_phone", "") or "",
+        deferred_until=t.get("deferred_until"),
+        original_due_date=t.get("original_due_date"),
+        defer_count=int(t.get("defer_count") or 0),
         created_at=t.get("created_at", ""),
         updated_at=t.get("updated_at", ""),
     )
+
+
+def _money_str(v) -> Optional[str]:
+    """Cast a stored money value (Decimal128 / str / float) to a decimal string."""
+    if v is None:
+        return None
+    try:
+        from bson.decimal128 import Decimal128 as _D128  # local import — bson is available server-wide
+        if isinstance(v, _D128):
+            return str(v.to_decimal())
+    except Exception:  # noqa: BLE001
+        pass
+    return str(v)
 
 
 def checkin_to_response(c: dict) -> CheckInResponse:
@@ -566,6 +614,8 @@ def checkin_to_response(c: dict) -> CheckInResponse:
         source=c.get("source", "manual"),
         outcome_type=c.get("outcome_type"),
         data=c.get("data") or {},
+        money_spent=_money_str(c.get("money_spent")),
+        money_currency=c.get("money_currency"),
         created_at=c.get("created_at", ""),
         updated_at=c.get("updated_at", ""),
     )
@@ -1060,8 +1110,14 @@ async def list_tasks(
     current_user: dict = Depends(get_current_user),
     goal_id: Optional[str] = None,
     component_id: Optional[str] = None,
+    include_completed: bool = True,
 ):
     q: dict = {"user_id": current_user["id"]}
+    if not include_completed:
+        # "done" and "cancelled" are considered completed for list purposes —
+        # neither should surface on the tasks homepage after the user has
+        # already closed them out.
+        q["status"] = {"$nin": ["done", "cancelled"]}
     if component_id:
         q["component_id"] = component_id
     if goal_id:
@@ -1124,12 +1180,95 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         "assigned_to_type": body.assigned_to_type,
         "assigned_to_name": (body.assigned_to_name or "").strip() if body.assigned_to_type == "external" else "",
         "assigned_to_phone": (body.assigned_to_phone or "").strip() if body.assigned_to_type == "external" else "",
+        # Deferment state. `original_due_date` is seeded from the initial
+        # `due_date` (if present) so subsequent defers compare against the
+        # user's original intent, not the last-deferred date. `defer_count`
+        # is the total number of defers performed against this task.
+        "deferred_until": None,
+        "original_due_date": (body.due_date or "").strip() or None,
+        "defer_count": 0,
         "created_at": now,
         "updated_at": now,
     }
     await db.tasks.insert_one(doc)
     doc.pop("_id", None)
     return task_to_response(doc)
+
+
+# --- Task deferment ---------------------------------------------------------
+_MAX_DEFERS = 3
+_MAX_DEFER_DAYS = 14
+
+
+@api_router.post("/tasks/{task_id}/defer", response_model=TaskResponse)
+async def defer_task(task_id: str, body: TaskDefer, current_user: dict = Depends(get_current_user)):
+    """Defer a task to a strictly-future date, subject to two caps:
+
+        * At most 3 defers per task (defer_count).
+        * The new deferred_until date must be within 14 days of the task's
+          original due date (or, when no due date was ever set, within 14
+          days of today).
+
+    Returning HTTP 400 with an explicit message on cap breach — the frontend
+    surfaces this so users understand why they can no longer defer.
+    """
+    t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if t.get("status") in ("done", "cancelled"):
+        raise HTTPException(status_code=400, detail="Completed or cancelled tasks cannot be deferred")
+
+    target = (body.deferred_until or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", target):
+        raise HTTPException(status_code=400, detail="deferred_until must be YYYY-MM-DD")
+    try:
+        y, m, d = (int(p) for p in target.split("-"))
+        target_date = datetime(y, m, d).date()
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"deferred_until is not a valid calendar date: {exc}") from exc
+
+    today = datetime.now(timezone.utc).date()
+    if target_date <= today:
+        raise HTTPException(status_code=400, detail="deferred_until must be strictly in the future")
+
+    defer_count = int(t.get("defer_count") or 0)
+    if defer_count >= _MAX_DEFERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"This task has already been deferred {_MAX_DEFERS} times and cannot be deferred again",
+        )
+
+    # Baseline for the +14 day cap: the ORIGINAL due date if we have one, else
+    # today. Once fixed, this baseline never moves so users cannot walk the
+    # cap forward one defer at a time.
+    baseline_raw = t.get("original_due_date") or t.get("due_date") or today.isoformat()
+    if isinstance(baseline_raw, str) and re.match(r"^\d{4}-\d{2}-\d{2}$", baseline_raw):
+        by, bm, bd = (int(p) for p in baseline_raw.split("-"))
+        baseline = datetime(by, bm, bd).date()
+    else:
+        baseline = today
+    from datetime import timedelta as _td
+    max_allowed = baseline + _td(days=_MAX_DEFER_DAYS)
+    if target_date > max_allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"deferred_until cannot be more than {_MAX_DEFER_DAYS} days "
+                f"past the original due date ({baseline.isoformat()})"
+            ),
+        )
+
+    updates = {
+        "deferred_until": target,
+        "defer_count": defer_count + 1,
+        # Freeze the baseline the first time we defer so subsequent defers
+        # keep comparing against the same anchor.
+        "original_due_date": baseline.isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.tasks.update_one({"id": task_id, "user_id": current_user["id"]}, {"$set": updates})
+    updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    return task_to_response(updated)
 
 
 @api_router.get("/tasks/{task_id}", response_model=TaskResponse)
@@ -1254,6 +1393,15 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         ]
         if missing:
             raise HTTPException(status_code=400, detail=f"Missing required fields for outcome type '{outcome_type}': {missing}")
+        # Optional task link — must live under this Expected Outcome.
+        if body.task_id:
+            t = await db.tasks.find_one(
+                {"id": body.task_id, "user_id": current_user["id"], "expected_outcome_id": expected_outcome_id},
+                {"_id": 0, "id": 1},
+            )
+            if not t:
+                raise HTTPException(status_code=400, detail="Invalid task for this expected outcome")
+            task_id = t["id"]
     elif body.type == "project":
         if not body.project_id:
             raise HTTPException(status_code=400, detail="Project check-in requires project_id")
@@ -1274,6 +1422,31 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         if not comp:
             raise HTTPException(status_code=400, detail="Invalid component_id")
         validated_component_id = comp["id"]
+
+    # Money spent — optional. Validated as a non-negative finite Decimal and
+    # stored as Decimal128. Requires currency when present. `available_for_
+    # flexible_spending` in the money-position endpoint subtracts the sum of
+    # these values for the same month + currency.
+    from bson.decimal128 import Decimal128 as _D128
+    from decimal import Decimal as _Dec, InvalidOperation as _InvOp
+    stored_money_spent = None
+    stored_money_currency: Optional[str] = None
+    if body.money_spent is not None and body.money_spent != "":
+        raw = body.money_spent
+        if isinstance(raw, bool):
+            raise HTTPException(status_code=400, detail="money_spent must be a decimal number")
+        try:
+            d = _Dec(str(raw))
+        except (_InvOp, ValueError, TypeError) as _e:
+            raise HTTPException(status_code=400, detail=f"money_spent must be a valid decimal: {_e}") from _e
+        if d.is_nan() or d.is_infinite():
+            raise HTTPException(status_code=400, detail="money_spent must be a finite number")
+        if d < 0:
+            raise HTTPException(status_code=400, detail="money_spent must be zero or positive")
+        if not body.money_currency or not re.match(r"^[A-Z]{3}$", body.money_currency):
+            raise HTTPException(status_code=400, detail="money_currency must be an ISO 4217 code when money_spent is set")
+        stored_money_spent = _D128(d)
+        stored_money_currency = body.money_currency
 
     follow_up_task_id: Optional[str] = None
     if body.follow_up_task:
@@ -1300,10 +1473,24 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         "source": body.source,
         "outcome_type": outcome_type,
         "data": body.data or {},
+        "money_spent": stored_money_spent,
+        "money_currency": stored_money_currency,
         "created_at": now,
         "updated_at": now,
     }
     await db.checkins.insert_one(doc)
+
+    # A check-in on a task is an "update", not a completion — bump the task's
+    # updated_at so the tasks list surfaces recent activity. Only flip status
+    # to `done` when the caller explicitly opts in with complete_task=true.
+    if task_id:
+        task_updates: dict = {"updated_at": now}
+        if body.complete_task:
+            task_updates["status"] = "done"
+        await db.tasks.update_one(
+            {"id": task_id, "user_id": current_user["id"]}, {"$set": task_updates},
+        )
+
     doc.pop("_id", None)
     return checkin_to_response(doc)
 
@@ -1441,6 +1628,88 @@ async def list_required_checkins(
 
     result.sort(key=lambda r: (cadence_rank.get(r["checkin_cadence"], 99), r["goal_title"].lower()))
     return result
+
+
+@api_router.get("/spending")
+async def get_spending(
+    date: str = Query(..., description="Local YYYY-MM-DD to fetch spending for"),
+    current_user: dict = Depends(get_current_user),
+):
+    """Return check-ins with money_spent for the given local date.
+
+    Response shape::
+
+        {
+          "date": "YYYY-MM-DD",
+          "groups": [
+            { "currency": "USD", "total": "42.50",
+              "entries": [ { id, title, time, amount, notes, goal_id, task_id, expected_outcome_id }, ... ] }
+          ]
+        }
+
+    The Today screen consumes this to render the "Today's Spending" card and
+    the /spending detail page groups entries per currency (no FX conversion).
+    """
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date or ""):
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+    docs = await db.checkins.find(
+        {
+            "user_id": current_user["id"],
+            "date": date,
+            "money_spent": {"$ne": None},
+        },
+        {
+            "_id": 0, "id": 1, "title": 1, "date": 1, "time": 1,
+            "money_spent": 1, "money_currency": 1, "notes": 1,
+            "goal_id": 1, "task_id": 1, "expected_outcome_id": 1,
+        },
+    ).to_list(length=5000)
+
+    from bson.decimal128 import Decimal128 as _D128
+    from decimal import Decimal as _Dec
+
+    def _to_dec(v):
+        if v is None:
+            return _Dec(0)
+        if isinstance(v, _D128):
+            return v.to_decimal()
+        try:
+            return _Dec(str(v))
+        except Exception:  # noqa: BLE001
+            return _Dec(0)
+
+    groups: dict = {}
+    for d in docs:
+        cur = d.get("money_currency") or ""
+        amt = _to_dec(d.get("money_spent"))
+        if not cur:
+            continue
+        g = groups.setdefault(cur, {"currency": cur, "total": _Dec(0), "entries": []})
+        g["total"] += amt
+        g["entries"].append({
+            "id": d.get("id"),
+            "title": d.get("title") or "",
+            "time": d.get("time") or "",
+            "amount": str(amt),
+            "notes": d.get("notes") or "",
+            "goal_id": d.get("goal_id"),
+            "task_id": d.get("task_id"),
+            "expected_outcome_id": d.get("expected_outcome_id"),
+        })
+
+    payload = {
+        "date": date,
+        "groups": [
+            {
+                "currency": g["currency"],
+                "total": str(g["total"].quantize(_Dec("0.01"))),
+                "entries": sorted(g["entries"], key=lambda e: e.get("time") or ""),
+            }
+            for g in sorted(groups.values(), key=lambda x: x["currency"])
+        ],
+    }
+    return payload
 
 
 @api_router.get("/checkins/{checkin_id}", response_model=CheckInResponse)
