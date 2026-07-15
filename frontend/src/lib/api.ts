@@ -153,8 +153,11 @@ export const api = {
   deleteTask: (id: string) =>
     request<{ detail: string }>(`/tasks/${id}`, { method: "DELETE", auth: true }),
 
-  listCheckins: (params?: { goalId?: string }) => {
-    const qs = params?.goalId ? `?goal_id=${encodeURIComponent(params.goalId)}` : "";
+  listCheckins: (params?: { goalId?: string; q?: string }) => {
+    const bits: string[] = [];
+    if (params?.goalId) bits.push(`goal_id=${encodeURIComponent(params.goalId)}`);
+    if (params?.q && params.q.trim()) bits.push(`q=${encodeURIComponent(params.q.trim())}`);
+    const qs = bits.length ? `?${bits.join("&")}` : "";
     return request<
       { id: string; type: string; title: string; date: string; time: string; notes: string; attachment: string; expected_outcome_id: string | null; goal_id: string | null; project_id: string | null; task_id: string | null; follow_up_task_id: string | null; money_spent: string | null; money_currency: string | null }[]
     >(`/checkins${qs}`, { auth: true });

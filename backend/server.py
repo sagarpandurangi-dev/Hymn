@@ -1351,14 +1351,35 @@ async def list_checkins(
     current_user: dict = Depends(get_current_user),
     goal_id: Optional[str] = None,
     component_id: Optional[str] = None,
+    q: Optional[str] = Query(None, description="Case-insensitive search across title and notes"),
+    limit: int = Query(1000, ge=1, le=5000),
 ):
-    q: dict = {"user_id": current_user["id"]}
+    """List the authenticated user's check-ins.
+
+    When ``q`` is present, filter to check-ins whose ``title`` or ``notes``
+    match the query case-insensitively. Search is user-scoped by construction
+    — the ``user_id`` filter is always the first predicate, so we never see
+    another user's rows regardless of the query string. Results remain
+    date/time descending so Timeline sees the latest matches first.
+    """
+    query: dict = {"user_id": current_user["id"]}
     if goal_id:
-        q["goal_id"] = goal_id
+        query["goal_id"] = goal_id
     if component_id:
-        q["component_id"] = component_id
-    cursor = db.checkins.find(q, {"_id": 0})
-    docs = await cursor.to_list(length=1000)
+        query["component_id"] = component_id
+    if q and q.strip():
+        # Anchor the search on user_id first so the query planner never scans
+        # rows outside the authenticated user's collection, then apply an
+        # $or across searchable text fields with a case-insensitive regex.
+        # `re.escape` neutralises any regex meta-characters the user typed
+        # (e.g. ".", "*") so the search behaves like a literal substring.
+        needle = re.escape(q.strip())
+        query["$or"] = [
+            {"title": {"$regex": needle, "$options": "i"}},
+            {"notes": {"$regex": needle, "$options": "i"}},
+        ]
+    cursor = db.checkins.find(query, {"_id": 0})
+    docs = await cursor.to_list(length=limit)
     docs.sort(key=lambda c: (c.get("date", ""), c.get("time", "")), reverse=True)
     return [checkin_to_response(d) for d in docs]
 

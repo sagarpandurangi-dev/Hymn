@@ -1,0 +1,38 @@
+{
+  "summary": "Backend-only validation of Timeline search on GET /api/checkins?q=<term>. All 9 spec scenarios PASS (9/9 in test_checkin_search.py, ~6s). Regression: 45/45 across test_life_project_checkin_task.py (11) + test_projects_eo_tasks_checkins.py (34) — one transient TLS connect-timeout on /api/domains, cleanly re-ran green (network flake, not a defect). Coverage per scenario: (1) User isolation — user A queries q=morning after B creates 'MorningRun in Berlin'; A sees only A's row, never B's; user_id anchoring correct. (2) Case insensitivity — q=morningrun, q=MorningRun, q=MORNING all return the exact same id. (3) Notes match — created life check-in with notes='Grocery run at whole foods'; q=grocery and q=whole match; q=nonsense_xyzzy_<rand> returns []. (4) Substring — q=orn matches 'MorningRun', q=akfa matches 'Breakfast log'. (5) Regex metachars literal — title 'cost was 12.50$'; q=12.50 matches, q=12x50 does NOT (proves `.` is escaped, not interpreted as any-char). (6) goal_id + q combo — seeded G1 (2 rows) + G2 (1 row) + unrelated life row all containing 'demoX'; GET ?goal_id=G1&q=demoX returned exactly G1's two rows; every returned row's goal_id==G1. (7) Sort order — created 2026-06-01T09:00, 2026-06-05T08:00, 2026-06-05T10:00 for a fresh user; response ordered [06-05 10:00, 06-05 08:00, 06-01 09:00] exactly. (8) Empty/whitespace — q='' and q=' ' both return the same id-set as no q at all (server.py:1370 uses `q.strip()` gate). (9) Regression no-q — full list returned in date/time desc; B's 'MorningRun in Berlin' never leaked. No defects found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_checkin_search.py",
+    "/app/test_reports/pytest/checkin_search_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:1365 — query dict is seeded with {'user_id': current_user['id']} BEFORE the $or is added, so the user-scoping predicate is always present regardless of q. This gives correct isolation even if the $or logic were bypassed. Verified via TestUserIsolation.",
+    "server.py:1370 — `if q and q.strip()` correctly treats empty string and whitespace-only q as 'no filter', matching spec scenario 8. Note: leading/trailing whitespace within a non-empty q is stripped before escaping (line 1376), which is desirable (e.g. q=' morning ' behaves like q='morning').",
+    "server.py:1376 — re.escape() neutralises regex metacharacters. Confirmed with '12.50' vs '12x50' — the `.` does not match `x`, proving literal treatment.",
+    "server.py:1377-1380 — $or across title/notes with $options:'i' provides case-insensitive substring search. Confirmed via TestCaseInsensitivity + TestMatchOnNotes.",
+    "server.py:1381-1383 — Python-side sort by (date, time) desc is applied AFTER fetching up to `limit` docs. This means: if the total user checkin count exceeds `limit` (default 1000, max 5000), the DB may return an arbitrary slice and only that slice is sorted. Not a defect for current spec (limit is generous), but if a single user ever exceeds 5000 checkins the newest ones could be dropped. Consider adding a Mongo-side sort+skip if this ever becomes a concern.",
+    "server.py:1381 — projection {'_id': 0} correctly hides Mongo ObjectId from responses. No serialisation risk."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_checkin_search.py (new — 9 tests, self-contained live-HTTP suite covering all 9 spec scenarios)"
+  ],
+  "success_rate": {
+    "backend": "100% (9/9 new search tests + 45/45 regression across life_project_checkin_task and projects_eo_tasks_checkins)",
+    "frontend": "N/A - backend-only per request"
+  },
+  "seed_data_creation": "Each run signs up 3 fresh TEST_ users via /api/auth/signup: TEST_search_a_<rand>@hymn.app (user A, primary), TEST_search_b_<rand>@hymn.app (user B, for isolation), TEST_search_sort_<rand>@hymn.app (isolated user for sort order test to avoid contamination). Seed rows: life check-ins ('MorningRun', 'Breakfast log', 'TEST_notes_row' with grocery notes, 'cost was 12.50$', plus B's 'MorningRun in Berlin'); goal check-ins under two goals (G1, G2) with 'demoX' in title; three demo life check-ins with fixed 2026-06 dates for sort verification. All TEST_-prefixed. No shared/seeded production data touched.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Search suite at /app/backend/tests/test_checkin_search.py (9 tests, ~6s). Run: `python -m pytest backend/tests/test_checkin_search.py -v`. Contract observations: (a) `q` is treated as a literal substring — re.escape() is applied server-side, so `.`, `$`, `*`, `(`, etc. do NOT act as regex metachars. Test with e.g. q='12.50' to verify. (b) Empty ('') and whitespace-only (' ') q values are equivalent to no q at all — the same full list comes back. (c) Sort ordering is (date, time) descending, computed Python-side over the fetched slice of up to `limit` docs. (d) user_id anchor is the first predicate in the Mongo query, so isolation is bulletproof even if $or logic changed. (e) When combining `goal_id` and `q`, both filters AND together; the search predicate does NOT bypass the goal_id filter. (f) The response projection excludes _id; no ObjectId leaks.",
+  "rca_of_issue": "N/A — no defects found. All 9 scenarios behave exactly as specified."
+}
