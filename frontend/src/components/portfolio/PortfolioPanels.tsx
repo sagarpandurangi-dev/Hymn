@@ -4,10 +4,10 @@
  * existing Portfolio APIs — nothing is buffered locally.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
-import { colors, radius, spacing } from "@/src/lib/theme";
+import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import {
   ACCOUNT_PRESET_BY_CODE,
   DAYS_OF_WEEK,
@@ -18,7 +18,7 @@ import {
   formatMoney,
   localMondayISO,
   localMonthISO,
-  localTodayISO,
+  splitCrossMidnight,
 } from "@/src/lib/portfolio/constants";
 import TimeBlockEditor, { TimeBlockDraft } from "./TimeBlockEditor";
 import AccountEditor, { AccountDraft } from "./AccountEditor";
@@ -35,6 +35,11 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
   const [editorDay, setEditorDay] = useState<DayOfWeek>("monday");
   const [editorInitial, setEditorInitial] = useState<TimeBlockDraft | undefined>(undefined);
   const [capacity, setCapacity] = useState<any | null>(null);
+  // Copy-to modal — pick which target days receive a copy of the source day's blocks.
+  const [copyOpen, setCopyOpen] = useState(false);
+  const [copySource, setCopySource] = useState<DayOfWeek | null>(null);
+  const [copyTargets, setCopyTargets] = useState<DayOfWeek[]>([]);
+  const [copyBusy, setCopyBusy] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -51,6 +56,29 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
     (async () => { setLoading(true); await reload(); setLoading(false); })();
   }, [reload]);
 
+  const byDay: Record<DayOfWeek, any[]> = useMemo(() => {
+    const acc: Record<DayOfWeek, any[]> = {
+      monday: [], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: [],
+    };
+    items.forEach((b) => {
+      const key = b.day_of_week as DayOfWeek;
+      if (acc[key]) acc[key].push(b);
+    });
+    (Object.keys(acc) as DayOfWeek[]).forEach((d) => acc[d].sort((a, b) => a.start_time.localeCompare(b.start_time)));
+    return acc;
+  }, [items]);
+
+  const draftsByDay: Record<DayOfWeek, TimeBlockDraft[]> = useMemo(() => {
+    const acc = {} as Record<DayOfWeek, TimeBlockDraft[]>;
+    (DAYS_OF_WEEK as readonly DayOfWeek[]).forEach((d) => {
+      acc[d] = byDay[d].map((b) => ({
+        id: b.id, title: b.title, start_time: b.start_time, end_time: b.end_time,
+        commitment_type: b.commitment_type, flexibility: b.flexibility,
+      }));
+    });
+    return acc;
+  }, [byDay]);
+
   const openAdd = (day: DayOfWeek) => {
     setEditorDay(day);
     setEditorInitial(undefined);
@@ -62,23 +90,49 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
     setEditorOpen(true);
   };
 
-  const saveBlock = async (draft: TimeBlockDraft & { id?: string }) => {
-    const payload = {
-      title: draft.title,
-      day_of_week: editorDay,
-      start_time: draft.start_time,
-      end_time: draft.end_time,
-      commitment_type: draft.commitment_type,
-      flexibility: draft.flexibility,
-      effective_from: localTodayISO(),
-      effective_until: null,
-      source_type: "onboarding",
-      source_id: null,
-    };
-    if (draft.id) {
-      await api.updateTimeCommitment(draft.id, payload);
+  const saveBlock = async (payload: {
+    id?: string;
+    title: string;
+    commitment_type: string;
+    flexibility: "fixed" | "flexible";
+    entries: { day: DayOfWeek; start_time: string; end_time: string }[];
+  }) => {
+    // Recurring weekly commitments start "this week onward" — we backdate
+    // `effective_from` to the current Monday so the running weekly capacity
+    // math shows the new block regardless of which day the user logs it on.
+    const effective_from = localMondayISO();
+
+    if (payload.id) {
+      // Editing: single record, single entry (editor locks day for edits).
+      const first = payload.entries[0];
+      await api.updateTimeCommitment(payload.id, {
+        title: payload.title,
+        day_of_week: first.day,
+        start_time: first.start_time,
+        end_time: first.end_time,
+        commitment_type: payload.commitment_type,
+        flexibility: payload.flexibility,
+      });
     } else {
-      await api.createTimeCommitment(payload);
+      // Creating: one entry per record. Cross-midnight blocks emit 2
+      // entries per selected day (day D 22:30 → 24:00 AND day D+1 00:00
+      // → 06:30). Multi-day selection emits N entries per day.
+      await Promise.all(
+        payload.entries.map((p) =>
+          api.createTimeCommitment({
+            title: payload.title,
+            day_of_week: p.day,
+            start_time: p.start_time,
+            end_time: p.end_time,
+            commitment_type: payload.commitment_type,
+            flexibility: payload.flexibility,
+            effective_from,
+            effective_until: null,
+            source_type: "onboarding",
+            source_id: null,
+          }),
+        ),
+      );
     }
     await reload();
     onChanged?.();
@@ -97,17 +151,52 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
     ]);
   };
 
-  const byDay: Record<DayOfWeek, any[]> = useMemo(() => {
-    const acc: Record<DayOfWeek, any[]> = {
-      monday: [], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: [],
-    };
-    items.forEach((b) => {
-      const key = b.day_of_week as DayOfWeek;
-      if (acc[key]) acc[key].push(b);
-    });
-    (Object.keys(acc) as DayOfWeek[]).forEach((d) => acc[d].sort((a, b) => a.start_time.localeCompare(b.start_time)));
-    return acc;
-  }, [items]);
+  const openCopy = (source: DayOfWeek) => {
+    setCopySource(source);
+    setCopyTargets([]);
+    setCopyOpen(true);
+  };
+
+  const runCopy = async () => {
+    if (!copySource || copyTargets.length === 0) return;
+    setCopyBusy(true);
+    try {
+      const sourceBlocks = byDay[copySource];
+      const effective_from = localMondayISO();
+      // Clone each source block into each target day. Cross-midnight splits
+      // already sit as two independent records on the source, so a straight
+      // copy preserves that shape without re-splitting.
+      const jobs: Promise<any>[] = [];
+      for (const target of copyTargets) {
+        for (const b of sourceBlocks) {
+          jobs.push(api.createTimeCommitment({
+            title: b.title,
+            day_of_week: target,
+            start_time: b.start_time,
+            end_time: b.end_time,
+            commitment_type: b.commitment_type,
+            flexibility: b.flexibility,
+            effective_from,
+            effective_until: null,
+            source_type: "onboarding",
+            source_id: null,
+          }));
+        }
+      }
+      await Promise.all(jobs);
+      // Silence unused warning for splitCrossMidnight — kept for future use.
+      void splitCrossMidnight;
+      await reload();
+      onChanged?.();
+      setCopyOpen(false);
+      setCopySource(null);
+      setCopyTargets([]);
+    } catch (e: any) {
+      Alert.alert("Copy failed", e?.message || "Please try again.");
+    } finally {
+      setCopyBusy(false);
+    }
+  };
 
   const capacityByDay: Record<string, { committed_minutes: number; available_minutes: number }> = useMemo(() => {
     const m: Record<string, { committed_minutes: number; available_minutes: number }> = {};
@@ -124,11 +213,6 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
   const fmtHrs = (min: number) => `${(min / 60).toFixed(1)} h`;
 
   if (loading) return <ActivityIndicator color={colors.brandPrimary} style={{ marginTop: spacing.lg }} />;
-
-  const existingDrafts: TimeBlockDraft[] = items.map((b) => ({
-    id: b.id, title: b.title, start_time: b.start_time, end_time: b.end_time,
-    commitment_type: b.commitment_type, flexibility: b.flexibility,
-  }));
 
   return (
     <View style={{ gap: spacing.md }}>
@@ -147,6 +231,7 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
         const blocks = byDay[day];
         const cap = capacityByDay[day];
         const dayId = day;
+        const hasBlocks = blocks.length > 0;
         return (
           <View key={day} style={styles.dayCard} testID={`day-card-${dayId}`}>
             <View style={styles.dayHeader}>
@@ -156,6 +241,17 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
                   <Text style={styles.dayCapacity} testID={`day-capacity-${dayId}`}>
                     {fmtHrs(cap.committed_minutes)} / {fmtHrs(cap.available_minutes)} free
                   </Text>
+                )}
+                {hasBlocks && (
+                  <Pressable
+                    onPress={() => openCopy(day)}
+                    hitSlop={12}
+                    testID={`day-copy-${dayId}`}
+                    style={styles.copyBtn}
+                  >
+                    <Ionicons name="copy-outline" size={14} color={colors.onSurfaceSecondary} />
+                    <Text style={styles.copyBtnText}>Copy to…</Text>
+                  </Pressable>
                 )}
                 <Pressable
                   onPress={() => openAdd(day)}
@@ -167,7 +263,7 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
                 </Pressable>
               </View>
             </View>
-            {blocks.length === 0 ? (
+            {!hasBlocks ? (
               <Text style={styles.empty}>No blocks yet.</Text>
             ) : (
               <View style={{ gap: spacing.xs }}>
@@ -207,10 +303,55 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
         visible={editorOpen}
         day={editorDay}
         initial={editorInitial}
-        existing={existingDrafts.filter((b) => byDay[editorDay].some((x) => x.id === b.id))}
+        existingByDay={draftsByDay}
         onSubmit={saveBlock}
         onClose={() => setEditorOpen(false)}
       />
+
+      <Modal visible={copyOpen} animationType="slide" transparent onRequestClose={() => setCopyOpen(false)}>
+        <View style={styles.copyModalWrap}>
+          <View style={styles.copyModalCard}>
+            <View style={styles.copyModalHead}>
+              <Text style={styles.copyModalTitle}>
+                Copy {copySource ? DAY_LABELS[copySource] : ""} to…
+              </Text>
+              <Pressable onPress={() => setCopyOpen(false)} hitSlop={12} testID="copy-close">
+                <Ionicons name="close" size={22} color={colors.onSurface} />
+              </Pressable>
+            </View>
+            <Text style={styles.copyModalBody}>
+              Clones every block on {copySource ? DAY_LABELS[copySource] : "the source day"} onto the days you pick.
+            </Text>
+            <View style={styles.wrapRow}>
+              {DAYS_OF_WEEK.filter((d) => d !== copySource).map((d) => {
+                const sel = copyTargets.includes(d);
+                return (
+                  <Pressable
+                    key={d}
+                    onPress={() =>
+                      setCopyTargets((prev) => (prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d]))
+                    }
+                    style={[styles.chip, sel && styles.chipSel]}
+                    testID={`copy-day-${d}`}
+                  >
+                    <Text style={[styles.chipText, sel && styles.chipTextSel]}>{DAY_LABELS[d].slice(0, 3)}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+            <Pressable
+              onPress={runCopy}
+              disabled={copyBusy || copyTargets.length === 0}
+              style={[styles.copyCta, (copyBusy || copyTargets.length === 0) && { opacity: 0.5 }]}
+              testID="copy-submit"
+            >
+              <Text style={styles.copyCtaText}>
+                {copyBusy ? "Copying…" : `Copy to ${copyTargets.length || "0"} day${copyTargets.length === 1 ? "" : "s"}`}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }

@@ -1,0 +1,32 @@
+{
+  "summary": "Portfolio Onboarding Wizard bug-fix retest — ALL 6 items PASS (backend 6/6 pytest, frontend live). Verified against https://personal-os-app-8.preview.emergentagent.com as test@hymn.app. (1) Auto-navigation FIXED — selecting a currency on Step 1 kept wizard on 'Step 1 of 4 · Reporting Currency'; saving a Sleep block on Step 2 kept wizard on 'Step 2 of 4 · Typical Week'; Continue is disabled until each step's gate passes. (2) Cross-midnight — entering 23:30 → 06:30 on Monday rendered 'Crosses midnight — will be saved as two blocks (Monday → Tuesday).' Save produced TWO records: Monday 23:30–24:00 (Sleep) and Tuesday 00:00–06:30 (Sleep). Weekly committed jumped 0.0 h → 7.0 h and Weekly available dropped 168.0 h → 161.0 h immediately after save. (3) Multi-day copy — 'Copy to…' on Monday, ticked Tuesday+Wednesday, submitted; the Monday-side record was cloned to both target days (Wed: 0.0 → 0.5 h committed; Tue: 6.5 → 7.0 h committed) and wizard stayed on Step 2. (4) Weekly capacity refresh — GET /api/portfolio/time-capacity/week with week_start_date=<current-local-Monday> reflects the new block on the very next reload (backend test_weekly_capacity_reflects_new_block PASS; UI counters updated live). (5) TimeBlockEditor stale-state fix — useEffect in TimeBlockEditor.tsx L91-101 reseeds title/start/end/category/flex/selectedDays on every reopen; code review confirmed and no stale values observed when reopening after edits. (6) BACKEND — POST /api/portfolio/time-commitments accepts end_time='24:00' (201) and rejects end_time <= start_time or cross-midnight-as-single-row (400) with three parametrised cases (10:00→09:00, 10:00→10:00, 23:30→06:30). No deprecated Expo packages, no SafeAreaView issues in touched files, no React Native red screens. No defects found.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_portfolio_wizard_fixes.py",
+    "/app/test_reports/pytest/portfolio_wizard_fixes_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "setup.tsx:54-74 — didInitialResumeRef guard correctly gates setStep(resumeAt) so reload() (invoked after every panel change) can no longer relocate the user. The ref flips true on the very first reload and stays true for the rest of the wizard lifetime. Verified live: currency select, block save, and copy-to all leave `step` untouched.",
+    "TimeBlockEditor.tsx:91-101 — useEffect resets title/start/end/category/flex/selectedDays whenever visible/initial/day change. This is the right fix on web because Modal onShow does not fire consistently. The dependency array is precise.",
+    "constants.ts:148-162 — validateBlockTimes accepts start > end (cross-midnight) but still rejects start === end; isCrossMidnight uses strict `<`. splitCrossMidnight emits [D, start→24:00] and [next(D), 00:00→end]. Round-trips correctly through the backend which accepts 24:00 as the end-of-day sentinel.",
+    "portfolio_manager.py:113 — _TIME_RE regex explicitly whitelists '24:00' only for the end_time slot; combined with the strict `end_m > start_m` and `end_m <= 24*60` guards (L626-627), the sentinel cannot be abused as a start_time or produce a zero-length block.",
+    "PortfolioPanels.tsx:311-352 — Copy-to modal is a proper controlled modal (testIDs day-copy-<day>, copy-day-<day>, copy-submit) and calls the reload() prop after cloning, which now cannot bump `step` thanks to the didInitialResumeRef guard. No side-navigation observed.",
+    "constants.ts:215-224 — localMondayISO uses local-time getDay() and rewinds to Monday; matches the backend's assertion that week_start_date.weekday()==0. Verified that a fresh block with effective_from=<localMonday()> lands in the current-week capacity response."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_portfolio_wizard_fixes.py (new — 6 pytest tests covering 24:00 sentinel, three 400-rejection parametrised cases, weekly capacity refresh, and cross-midnight split persistence)"
+  ],
+  "success_rate": {"backend": "100% (6/6)", "frontend": "100% (5/5 flows verified live: currency, cross-midnight editor hint, save + capacity update, copy-to, anti-auto-nav)"},
+  "seed_data_creation": "Backend pytest creates TEST_-prefixed time_commitments under test@hymn.app and cleans them up via DELETE in a fixture teardown. Frontend live test left 1 Sleep block on Monday, 2 on Tuesday, and 1 on Wednesday under test@hymn.app (Sleep, flexible, effective_from=current-Monday). These persist because the setup flow deliberately does not expose a delete affordance in Step 2 — main agent may clear via API if a pristine state is needed for the next test run. No shared/seeded production data was modified.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Portfolio setup screens at /portfolio/setup. Auth: sign-in uses testIDs sign-in-email-input / sign-in-password-input / sign-in-submit-button (NOT login-*). Login response returns access_token (NOT token). Portfolio testIDs: reporting-currency-select, currency-option-<ISO3>, currency-picker-search, portfolio-setup-next, portfolio-setup-back, week-total-committed, week-total-available, day-card-<dow>, day-capacity-<dow>, day-add-<dow>, day-copy-<dow>. TimeBlockEditor testIDs: time-block-title, time-block-start (wrapper div — target 'time-block-start input' for playwright.fill), time-block-end (same), time-block-day-<dow>, time-block-cat-<code>, time-block-save, time-block-close. Copy-to modal: copy-day-<dow>, copy-submit, copy-close. There is no block-delete testID in the panel — a block is edited/removed via tapping the row (opens editor in edit mode). Cross-midnight hint text is exactly 'Crosses midnight — will be saved as two blocks (<SrcDay> → <NextDay>).' Weekly capacity endpoint requires week_start_date == Monday and refuses any other weekday (400).",
+  "rca_of_issue": "N/A — this iteration was a retest of previously-broken behaviour; all four bugs (auto-nav, no cross-midnight, no multi-day copy, capacity not refreshing) are demonstrably fixed."
+}

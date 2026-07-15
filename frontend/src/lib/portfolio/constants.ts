@@ -127,22 +127,65 @@ export const MONEY_COMMITMENT_PRESETS: MoneyCommitmentPreset[] = [
 ];
 
 // ---------- Time helpers ----------
+// Accept HH:MM (00:00–23:59) and the "24:00" sentinel — the latter is only
+// used as an end_time to indicate "end of day" when a cross-midnight block
+// is split into two records.
 export const hhmmToMinutes = (s: string): number => {
+  if (s === "24:00") return 24 * 60;
   const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(s || "");
   if (!m) return -1;
   return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
 };
 
-/** Return an error message if the [start, end) block is invalid, else null. */
+/**
+ * Return an error message if the block times are unusable, else null.
+ *
+ * We deliberately allow end_time to be earlier than start_time — that just
+ * means the block crosses midnight (e.g. sleep 23:30 → 06:30). Zero-length
+ * blocks and identical start/end times remain rejected because they contain
+ * no capacity.
+ */
 export const validateBlockTimes = (start: string, end: string): string | null => {
   const s = hhmmToMinutes(start);
   const e = hhmmToMinutes(end);
   if (s < 0) return "Start time must be HH:MM";
   if (e < 0) return "End time must be HH:MM";
-  if (e <= s) return "End time must be after start time";
-  if (e > 24 * 60) return "End time cannot cross midnight";
-  if (e - s === 0) return "Zero-duration block";
+  if (s === e) return "Start and end time cannot be the same";
   return null;
+};
+
+/** True when the block wraps past midnight (end <= start in the same day). */
+export const isCrossMidnight = (start: string, end: string): boolean => {
+  const s = hhmmToMinutes(start);
+  const e = hhmmToMinutes(end);
+  return e < s;  // strict "<" — equal is handled by validateBlockTimes
+};
+
+/** Next day in the week, wrapping Sunday -> Monday. */
+export const nextDay = (day: DayOfWeek): DayOfWeek => {
+  const i = DAYS_OF_WEEK.indexOf(day);
+  return DAYS_OF_WEEK[(i + 1) % 7];
+};
+
+/**
+ * Given a candidate block (possibly cross-midnight) on a specific day,
+ * return the concrete records that should be persisted. Cross-midnight
+ * blocks are split into two same-title records on consecutive days: the
+ * "night" half ends at 24:00 (backend-accepted sentinel meaning end-of-day)
+ * and the "morning" half starts at 00:00 the following day.
+ */
+export const splitCrossMidnight = (
+  day: DayOfWeek,
+  start: string,
+  end: string,
+): { day: DayOfWeek; start_time: string; end_time: string }[] => {
+  if (!isCrossMidnight(start, end)) {
+    return [{ day, start_time: start, end_time: end }];
+  }
+  return [
+    { day, start_time: start, end_time: "24:00" },
+    { day: nextDay(day), start_time: "00:00", end_time: end },
+  ];
 };
 
 /**

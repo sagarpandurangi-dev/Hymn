@@ -529,20 +529,17 @@ frontend:
 
 metadata:
   created_by: "main_agent"
-  version: "1.1"
-  test_sequence: 8
+  version: "1.2"
+  test_sequence: 15
   run_ui: false
 
 test_plan:
   current_focus:
-    - "Removed /api/learning-journeys endpoints"
-    - "Atomic Knowledge wizard endpoint (POST /api/knowledge/journeys)"
-    - "GET /api/knowledge/journeys (Knowledge-scoped Goal list)"
-    - "checkin_cadence field on Goal + idempotent default-domain seeding"
-    - "Optional goal_id filter on /api/tasks and /api/checkins"
-    - "Knowledge tab replaces Learn tab; wizard is the only entry"
-    - "6-step Learning Journey creation wizard"
-    - "Unified Goal detail shows Journey → Expected Outcomes → Tasks → Check-ins"
+    - "Portfolio Onboarding Wizard — no auto-navigation between steps"
+    - "Cross-midnight time blocks (23:30 → 06:30) save as split records"
+    - "Copy day's blocks to multiple other days"
+    - "Weekly capacity math updates immediately after adding a block (effective_from = current Monday)"
+    - "TimeBlockEditor re-seeds state each time the modal opens (add vs edit)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -550,44 +547,60 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      This is an architectural refactor, not a new feature. Please verify:
+      RETEST FOCUS — Portfolio Onboarding bug fixes. Prior features
+      (Knowledge wizard, Portfolio Manager foundation, Timeline search,
+      task completion via check-in) were already verified in earlier runs
+      and do NOT need retesting.
 
-      BACKEND:
-      1. /api/learning-journeys/* is fully gone (any verb → 404). No response should
-         include LearningJourney model fields.
-      2. POST /api/knowledge/journeys with a full valid body creates a Goal, one
-         Expected Outcome and one Task in one shot; the returned goal has domain_name
-         "Knowledge" and checkin_cadence set. Subsequent
-         GET /api/goals/{id}, GET /api/goals/{id}/expected-outcomes,
-         GET /api/tasks?goal_id={id} must reflect the created rows.
-      3. Rejection cases (400/422): missing why, missing title, missing first_outcome.title,
-         missing first_task.title, missing cadence, invalid cadence, invalid outcome_type,
-         invalid task priority. NO Goal, EO or Task should be persisted on any rejection.
-      4. GET /api/knowledge/journeys returns only Knowledge-domain goals with
-         checkin_cadence and completion stats.
-      5. Existing endpoints (goals CRUD, expected-outcomes CRUD, tasks CRUD, checkins CRUD,
-         domains CRUD, outcome-types, auth) still work. In particular, POST /api/goals
-         still accepts an omitted checkin_cadence (defaults to ""), and updateGoal accepts
-         a checkin_cadence patch. Invalid cadence on either → 400.
-      6. GET /api/tasks?goal_id=<id> and /api/checkins?goal_id=<id> filter correctly.
-      7. Existing user (test@hymn.app / TestPass123!) — verify the Knowledge domain now
-         exists in their /api/domains (idempotent seeding).
+      What was fixed in this session:
+      1. /app/frontend/app/portfolio/setup.tsx — reload() no longer moves
+         `step`. Auto-resume to the first incomplete step now runs only on
+         the initial mount via a `didInitialResumeRef` guard. Selecting a
+         currency, saving a time block, or adding an account/commitment
+         must NOT advance the wizard automatically. Advance only via the
+         Continue button (disabled until the step's requirement is met).
+      2. /app/frontend/src/components/portfolio/TimeBlockEditor.tsx — added
+         useEffect that reseeds title/start/end/category/flex/selectedDays
+         whenever the modal reopens with a different `initial`. Fixes
+         stale state when switching add ↔ edit ↔ new-day.
+      3. Cross-midnight (already coded, needs verification): entering
+         start 23:30 / end 06:30 shows a "Crosses midnight" hint and, on
+         Save, calls POST /api/portfolio/time-commitments twice: (day D,
+         23:30→24:00) and (day D+1, 00:00→06:30). Backend accepts 24:00
+         as an end_time sentinel.
+      4. Multi-day copy (already coded, needs verification): Copy-to modal
+         clones every block on the source day onto every selected target
+         day.
+      5. Weekly capacity refresh (already coded, needs verification):
+         new blocks use `effective_from = current local Monday`, so
+         GET /api/portfolio/time-capacity/week returns updated totals for
+         this week on the very next reload.
 
-      FRONTEND (http://localhost:3000):
-      1. Bottom nav has tab-knowledge; tab-learn does NOT exist.
-      2. Knowledge home lists Learning Journeys with LEARNING JOURNEY tag and progress
-         meta. Tap card → routes to /goals/{id} (unified detail).
-      3. Tapping + on Knowledge OR the empty-state CTA opens knowledge-wizard.
-      4. Wizard cannot advance past step 4 without first outcome title, cannot advance
-         past step 5 without first task title, cannot finish without a cadence choice.
-      5. Cancel prompts a confirm modal only when the form is dirty; discarding does not
-         create anything on the backend (verify GET /api/knowledge/journeys unchanged).
-      6. Finishing the wizard opens Goal detail with sections in order: header (Learning
-         Journey tag, chips), Progress, Why This Matters, Expected Outcomes, Tasks,
-         Check-ins. All three sections are present even if empty.
-      7. Non-Knowledge goals still show the classic domain name (e.g. HEALTH) as the tag,
-         and the notes block reads "NOTES", not "WHY THIS MATTERS".
+      BACKEND tests (auth: test@hymn.app / TestPass123!):
+        - POST /api/portfolio/time-commitments with end_time=24:00 succeeds.
+        - POST with end_time <= start_time (and end_time != 24:00) is 400.
+        - After creating a 30-min block today, GET /api/portfolio/time-capacity/week
+          shows committed_minutes >= 30 on that weekday.
 
-      Credentials: /app/memory/test_credentials.md (test@hymn.app / TestPass123!).
-      Report path: /app/test_reports/iteration_8.json.
+      FRONTEND tests (http://localhost:3000):
+        1. Log in, navigate to /portfolio/setup (or run through onboarding).
+        2. STEP 0: pick a currency in the modal. Wizard MUST stay on step 0.
+           Continue button becomes enabled; user taps Continue to advance.
+        3. STEP 1: tap "+" on Monday. In the modal: title "Sleep",
+           start 23:30, end 06:30. Verify the "Crosses midnight" hint
+           appears. Save. Wizard MUST stay on step 1 (no auto-advance).
+           Verify two blocks now render: Monday 23:30–24:00 and Tuesday
+           00:00–06:30. Verify the "Weekly available" total decreased.
+        4. STEP 1 (copy): with Monday populated, tap the "Copy to…" chip,
+           select Tuesday + Wednesday, submit. Both target days get the
+           cloned blocks and the weekly-total updates.
+        5. STEP 1 (edit): tap an existing block. Modal shows THAT block's
+           values (not the previous add-modal's). Change start to 22:00,
+           save, wizard stays on step 1.
+        6. STEP 2/3: same anti-auto-advance behaviour when adding an
+           account or a monthly commitment.
+        7. Complete Setup button on step 3 is enabled only when all four
+           gates pass.
+
+      Report path: /app/test_reports/iteration_15.json.
 

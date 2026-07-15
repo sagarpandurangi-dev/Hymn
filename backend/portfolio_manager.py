@@ -105,7 +105,12 @@ _OWNER_COLLECTIONS = {
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
-_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+# `_TIME_RE` accepts standard HH:MM plus the special "24:00" sentinel which
+# is only meaningful as an end_time (represents "end of day"). Combined with
+# the strict `end_m > start_m` and `end_m <= 24 * 60` checks, this lets a
+# cross-midnight block be stored as two records (day D 22:30 → 24:00, day
+# D+1 00:00 → 06:30) without losing minutes.
+_TIME_RE = re.compile(r"^(?:(?:[01]\d|2[0-3]):[0-5]\d|24:00)$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 # Quantum used only for serialising *derived* money aggregates so JSON does

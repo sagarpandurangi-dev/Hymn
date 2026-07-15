@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -47,21 +47,29 @@ export default function PortfolioSetupScreen() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Auto-resume must only run on the FIRST successful load. After that, the
+  // step is user-controlled — otherwise saving on the current screen would
+  // yank the user to the next step before they've finished (e.g. adding a
+  // time block on step 1 would auto-jump to step 2). See PortfolioSetup bug.
+  const didInitialResumeRef = useRef(false);
 
   const reload = useCallback(async () => {
     try {
       const s = await api.getPortfolioSetupStatus();
       setStatus(s);
-      // Resume at the first incomplete step: currency -> time -> money accounts -> money commitments.
-      // If the wizard is re-entered after a partial pass we jump forward automatically.
-      const resumeAt = (() => {
-        if (!s.reporting_currency) return 0;
-        if (!s.has_time_commitments) return 1;
-        if (!s.has_financial_accounts) return 2;
-        if (!s.has_monthly_money_commitments) return 3;
-        return 3;
-      })();
-      setStep((prev) => (prev > resumeAt ? prev : resumeAt));
+      if (!didInitialResumeRef.current) {
+        // First load only — jump to the first incomplete step so users
+        // who partially completed setup earlier don't restart at step 0.
+        const resumeAt = (() => {
+          if (!s.reporting_currency) return 0;
+          if (!s.has_time_commitments) return 1;
+          if (!s.has_financial_accounts) return 2;
+          if (!s.has_monthly_money_commitments) return 3;
+          return 3;
+        })();
+        setStep(resumeAt);
+        didInitialResumeRef.current = true;
+      }
     } catch { /* ignore */ }
   }, []);
 
