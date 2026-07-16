@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
-import { colors, fonts, radius, spacing } from "@/src/lib/theme";
+import { colors, radius, spacing } from "@/src/lib/theme";
 import {
   ACCOUNT_PRESET_BY_CODE,
   DAYS_OF_WEEK,
@@ -268,30 +268,35 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
             ) : (
               <View style={{ gap: spacing.xs }}>
                 {blocks.map((b) => (
-                  <Pressable
-                    key={b.id}
-                    onPress={() =>
-                      openEdit(day, {
-                        id: b.id,
-                        title: b.title,
-                        start_time: b.start_time,
-                        end_time: b.end_time,
-                        commitment_type: b.commitment_type,
-                        flexibility: b.flexibility,
-                      })
-                    }
-                    onLongPress={() => deleteBlock(b.id)}
-                    style={styles.block}
-                    testID={`block-${b.id}`}
-                  >
-                    <View style={{ flex: 1 }}>
+                  <View key={b.id} style={styles.block} testID={`block-${b.id}`}>
+                    <Pressable
+                      style={styles.blockBody}
+                      onPress={() =>
+                        openEdit(day, {
+                          id: b.id,
+                          title: b.title,
+                          start_time: b.start_time,
+                          end_time: b.end_time,
+                          commitment_type: b.commitment_type,
+                          flexibility: b.flexibility,
+                        })
+                      }
+                      testID={`block-edit-${b.id}`}
+                    >
                       <Text style={styles.blockTitle} numberOfLines={1}>{b.title}</Text>
                       <Text style={styles.blockMeta}>
                         {b.start_time}–{b.end_time} · {TIME_CATEGORY_LABEL[b.commitment_type] || b.commitment_type} · {b.flexibility}
                       </Text>
-                    </View>
-                    <Ionicons name="chevron-forward" size={16} color={colors.onSurfaceTertiary} />
-                  </Pressable>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => deleteBlock(b.id)}
+                      hitSlop={12}
+                      style={styles.rowIconBtn}
+                      testID={`block-delete-${b.id}`}
+                    >
+                      <Ionicons name="trash-outline" size={16} color={colors.error} />
+                    </Pressable>
+                  </View>
                 ))}
               </View>
             )}
@@ -445,22 +450,28 @@ export function FinancialPositionPanel({ defaultCurrency, onChanged }: { default
             </View>
             <View style={{ gap: spacing.xs }}>
               {rows.map((a) => (
-                <Pressable
-                  key={a.id}
-                  onPress={() => { setEditorInitial({ id: a.id, account_type: a.account_type, name: a.name, currency: a.currency, current_value: a.current_value }); setEditorOpen(true); }}
-                  onLongPress={() => remove(a.id)}
-                  style={styles.acctRow}
-                  testID={`account-${a.id}`}
-                >
-                  <View style={{ flex: 1 }}>
+                <View key={a.id} style={styles.acctRow} testID={`account-${a.id}`}>
+                  <Pressable
+                    style={styles.rowBody}
+                    onPress={() => { setEditorInitial({ id: a.id, account_type: a.account_type, name: a.name, currency: a.currency, current_value: a.current_value }); setEditorOpen(true); }}
+                    testID={`account-edit-${a.id}`}
+                  >
                     <Text style={styles.acctName}>{a.name}</Text>
                     <Text style={styles.acctMeta}>
                       {ACCOUNT_PRESET_BY_CODE[a.account_type]?.label || a.account_type}
                       {isAsset(a.account_type) ? " · Asset" : " · Liability"}
                     </Text>
-                  </View>
+                  </Pressable>
                   <Text style={styles.acctValue}>{formatMoney(a.current_value)}</Text>
-                </Pressable>
+                  <Pressable
+                    onPress={() => remove(a.id)}
+                    hitSlop={12}
+                    style={styles.rowIconBtn}
+                    testID={`account-delete-${a.id}`}
+                  >
+                    <Ionicons name="trash-outline" size={16} color={colors.error} />
+                  </Pressable>
+                </View>
               ))}
             </View>
           </View>
@@ -584,23 +595,29 @@ export function MonthlyMoneyPanel({ defaultCurrency, onChanged }: { defaultCurre
             )}
             <View style={{ gap: spacing.xs, marginTop: spacing.sm }}>
               {rows.map((c) => (
-                <Pressable
-                  key={c.id}
-                  onPress={() => { setEditorInitial({
-                    id: c.id, title: c.title, amount: c.amount, currency: c.currency,
-                    start_month: c.start_month, end_month: c.end_month || "",
-                    commitment_type: c.commitment_type, fixed_or_flexible: "fixed",
-                  }); setEditorOpen(true); }}
-                  onLongPress={() => remove(c.id)}
-                  style={styles.acctRow}
-                  testID={`money-${c.id}`}
-                >
-                  <View style={{ flex: 1 }}>
+                <View key={c.id} style={styles.acctRow} testID={`money-${c.id}`}>
+                  <Pressable
+                    style={styles.rowBody}
+                    onPress={() => { setEditorInitial({
+                      id: c.id, title: c.title, amount: c.amount, currency: c.currency,
+                      start_month: c.start_month, end_month: c.end_month || "",
+                      commitment_type: c.commitment_type, fixed_or_flexible: "fixed",
+                    }); setEditorOpen(true); }}
+                    testID={`money-edit-${c.id}`}
+                  >
                     <Text style={styles.acctName}>{c.title}</Text>
                     <Text style={styles.acctMeta}>{groupLabel(c.commitment_type)} · from {c.start_month}{c.end_month ? ` → ${c.end_month}` : ""}</Text>
-                  </View>
+                  </Pressable>
                   <Text style={styles.acctValue}>{formatMoney(c.amount)}</Text>
-                </Pressable>
+                  <Pressable
+                    onPress={() => remove(c.id)}
+                    hitSlop={12}
+                    style={styles.rowIconBtn}
+                    testID={`money-delete-${c.id}`}
+                  >
+                    <Ionicons name="trash-outline" size={16} color={colors.error} />
+                  </Pressable>
+                </View>
               ))}
             </View>
           </View>
@@ -655,8 +672,78 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
+  blockBody: { flex: 1 },
+  rowBody: { flex: 1 },
+  rowIconBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.brandTertiary,
+  },
   blockTitle: { fontSize: 14, color: colors.onSurface, fontWeight: "500" },
   blockMeta: { fontSize: 11, color: colors.onSurfaceSecondary, marginTop: 2 },
+  copyBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: radius.pill,
+    backgroundColor: colors.brandTertiary,
+  },
+  copyBtnText: { fontSize: 11, color: colors.onBrandTertiary, fontWeight: "500" },
+  copyModalWrap: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.4)",
+    justifyContent: "flex-end",
+  },
+  copyModalCard: {
+    backgroundColor: colors.surface,
+    borderTopLeftRadius: radius.lg,
+    borderTopRightRadius: radius.lg,
+    padding: spacing.xl,
+    paddingBottom: spacing.xxxl,
+    gap: spacing.md,
+  },
+  copyModalHead: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  copyModalTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: colors.onSurface,
+  },
+  copyModalBody: {
+    fontSize: 13,
+    color: colors.onSurfaceSecondary,
+    lineHeight: 18,
+  },
+  wrapRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
+  chip: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.pill,
+    backgroundColor: colors.brandTertiary,
+  },
+  chipSel: { backgroundColor: colors.brandPrimary },
+  chipText: { fontSize: 13, color: colors.onBrandTertiary },
+  chipTextSel: { color: colors.onBrandPrimary, fontWeight: "600" },
+  copyCta: {
+    backgroundColor: colors.onSurface,
+    paddingVertical: spacing.md,
+    borderRadius: radius.pill,
+    alignItems: "center",
+    marginTop: spacing.sm,
+  },
+  copyCtaText: {
+    color: colors.onSurfaceInverse,
+    fontSize: 15,
+    fontWeight: "600",
+  },
   primaryBtn: {
     flexDirection: "row",
     alignItems: "center",
