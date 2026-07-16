@@ -1513,6 +1513,70 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
     }
     await db.checkins.insert_one(doc)
 
+    # Feed the Finance Event Pipeline: any check-in carrying money_spent
+    # generates a confirmed outflow event so Finance reflects the spend
+    # exactly once. Deduplication protects against a subsequent SMS/bank
+    # import for the same transaction.
+    if stored_money_spent is not None and stored_money_currency:
+        try:
+            from finance_manager import (  # noqa: WPS433 local import
+                _dedupe_check, _now as _fnow, _money_from_stored,
+            )
+            from bson.decimal128 import Decimal128 as _D128
+            fev = {
+                "id": str(uuid.uuid4()),
+                "user_id": current_user["id"],
+                "amount": stored_money_spent if isinstance(stored_money_spent, _D128) else _D128(stored_money_spent),
+                "currency": stored_money_currency,
+                "direction": "outflow",
+                "event_date": body.date,
+                "description": (body.notes or body.title or "").strip()[:200],
+                "source": "checkin",
+                "source_reference": f"checkin:{doc['id']}",
+                "confirmation_status": "confirmed",
+                "checkin_id": doc["id"],
+                "commitment_id": None,
+                "created_at": _fnow(),
+            }
+            dup_id = await _dedupe_check(db, current_user["id"], fev)
+            if dup_id:
+                fev["confirmation_status"] = "pending"
+                await db.financial_events.insert_one(dict(fev))
+                await db.financial_dedupe_candidates.insert_one({
+                    "id": str(uuid.uuid4()),
+                    "user_id": current_user["id"],
+                    "event_a_id": dup_id,
+                    "event_b_id": fev["id"],
+                    "status": "pending",
+                    "created_at": _fnow(),
+                    "resolved_at": None,
+                })
+            else:
+                await db.financial_events.insert_one(dict(fev))
+            await db.financial_audit.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": current_user["id"],
+                "record_type": "financial_event",
+                "record_id": fev["id"],
+                "action": "created",
+                "timestamp": _fnow(),
+                "source": "checkin",
+                "previous_value": None,
+                "new_value": {
+                    "amount": _money_from_stored(fev["amount"]),
+                    "currency": fev["currency"],
+                    "checkin_id": doc["id"],
+                    "pending_dedupe_with": dup_id,
+                },
+                "related_checkin_id": doc["id"],
+                "related_task_id": task_id,
+                "related_event_id": None,
+                "related_import_id": None,
+                "notes": "",
+            })
+        except Exception as _fx:  # pragma: no cover — never block check-in save
+            logger.warning("finance-event-hook failed: %s", _fx)
+
     # A check-in on a task is an "update", not a completion — bump the task's
     # updated_at so the tasks list surfaces recent activity. Only flip status
     # to `done` when the caller explicitly opts in with complete_task=true.
@@ -2448,8 +2512,10 @@ async def move_component(component_id: str, direction: str, current_user: dict =
 # avoid a circular import. It owns CRUD for its four collections and exposes
 # derived time/money calculations under /api/portfolio/*.
 from portfolio_manager import portfolio_router, ensure_portfolio_indexes  # noqa: E402
+from finance_manager import finance_router, ensure_finance_indexes  # noqa: E402
 
 api_router.include_router(portfolio_router)
+api_router.include_router(finance_router)
 app.include_router(api_router)
 
 app.add_middleware(
@@ -2475,6 +2541,7 @@ async def startup_indexes():
     await db.user_sessions.create_index("user_id")
     await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
     await ensure_portfolio_indexes(db)
+    await ensure_finance_indexes(db)
 
 
 @app.on_event("shutdown")

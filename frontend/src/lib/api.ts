@@ -324,4 +324,74 @@ export const api = {
     request<{ detail: string }>(`/knowledge/components/${id}`, { method: "DELETE", auth: true }),
   moveComponent: (id: string, direction: "up" | "down") =>
     request<{ detail: string }>(`/knowledge/components/${id}/move?direction=${direction}`, { method: "POST", auth: true }),
+
+  // ============================================================================
+  // FINANCE ENGINE
+  // ============================================================================
+  getFinanceDashboard: () => request<any>("/finance/dashboard", { auth: true }),
+  getFinancePosition: () => request<any>("/finance/position", { auth: true }),
+  getFinanceMonthly: (month: string, currency: string) =>
+    request<any>(`/finance/monthly?month=${encodeURIComponent(month)}&currency=${encodeURIComponent(currency)}`, { auth: true }),
+  getFinanceReserved: () => request<any>("/finance/reserved", { auth: true }),
+  getFinanceAvailableLiquidity: () => request<any>("/finance/available-liquidity", { auth: true }),
+  getFinanceForecast: () => request<any>("/finance/forecast", { auth: true }),
+  runFinanceScenario: (payload: { currency: string; additional_monthly_expense?: string | number; additional_monthly_income?: string | number; additional_reservation?: string | number; reservation_due_month?: string }) =>
+    request<any>("/finance/scenarios", { method: "POST", body: payload, auth: true }),
+
+  listFinancialCommitments: (params?: { state?: string; currency?: string; include_terminal?: boolean }) => {
+    const parts: string[] = [];
+    if (params?.state) parts.push(`state=${encodeURIComponent(params.state)}`);
+    if (params?.currency) parts.push(`currency=${encodeURIComponent(params.currency)}`);
+    if (params?.include_terminal !== undefined) parts.push(`include_terminal=${params.include_terminal}`);
+    const qs = parts.length ? `?${parts.join("&")}` : "";
+    return request<any[]>(`/finance/commitments${qs}`, { auth: true });
+  },
+  createFinancialCommitment: (payload: {
+    title: string; description?: string; amount: string | number; currency: string;
+    due_date: string; priority: string;
+    domain_id?: string | null; goal_id?: string | null; project_id?: string | null;
+    create_task?: boolean; task_title?: string; task_due_date?: string;
+  }) => request<any>("/finance/commitments", { method: "POST", body: payload, auth: true }),
+  getFinancialCommitment: (id: string) =>
+    request<any>(`/finance/commitments/${id}`, { auth: true }),
+  updateFinancialCommitment: (id: string, payload: Partial<{ title: string; description: string; amount: string | number; currency: string; due_date: string; priority: string }>) =>
+    request<any>(`/finance/commitments/${id}`, { method: "PUT", body: payload, auth: true }),
+  reserveFinancialCommitment: (id: string) =>
+    request<any>(`/finance/commitments/${id}/reserve`, { method: "POST", auth: true }),
+  completeFinancialCommitment: (id: string, payload: { actual_amount?: string | number; actual_event_id?: string; event_date?: string }) =>
+    request<any>(`/finance/commitments/${id}/complete`, { method: "POST", body: payload, auth: true }),
+  cancelFinancialCommitment: (id: string) =>
+    request<any>(`/finance/commitments/${id}/cancel`, { method: "POST", auth: true }),
+  postponeFinancialCommitment: (id: string, new_due_date: string) =>
+    request<any>(`/finance/commitments/${id}/postpone`, { method: "POST", body: { new_due_date }, auth: true }),
+  keepActiveFinancialCommitment: (id: string) =>
+    request<any>(`/finance/commitments/${id}/keep-active`, { method: "POST", auth: true }),
+  reviewFinancialCommitment: (id: string, payload: { decision: "keep" | "complete" | "cancel" | "postpone"; new_due_date?: string; actual_amount?: string | number; actual_event_id?: string }) =>
+    request<any>(`/finance/commitments/${id}/review`, { method: "POST", body: payload, auth: true }),
+  getTaskLinkedCommitment: (taskId: string) =>
+    request<any>(`/finance/task-linked-commitment/${taskId}`, { auth: true }),
+  getCommitmentsDueForReview: () =>
+    request<any[]>("/finance/commitments-due-for-review", { auth: true }),
+
+  listFinancialEvents: (params?: { currency?: string; confirmation_status?: string; limit?: number }) => {
+    const parts: string[] = [];
+    if (params?.currency) parts.push(`currency=${encodeURIComponent(params.currency)}`);
+    if (params?.confirmation_status) parts.push(`confirmation_status=${encodeURIComponent(params.confirmation_status)}`);
+    if (params?.limit) parts.push(`limit=${params.limit}`);
+    const qs = parts.length ? `?${parts.join("&")}` : "";
+    return request<any[]>(`/finance/events${qs}`, { auth: true });
+  },
+  createFinancialEvent: (payload: { amount: string | number; currency: string; direction: "outflow" | "inflow"; event_date: string; description?: string; source?: string; source_reference?: string; confirmation_status?: string; checkin_id?: string; commitment_id?: string }) =>
+    request<any>("/finance/events", { method: "POST", body: payload, auth: true }),
+  confirmFinancialEvent: (id: string) =>
+    request<any>(`/finance/events/${id}/confirm`, { method: "POST", auth: true }),
+  rejectFinancialEvent: (id: string) =>
+    request<any>(`/finance/events/${id}/reject`, { method: "POST", auth: true }),
+
+  listDedupeCandidates: () => request<any[]>("/finance/dedupe-candidates", { auth: true }),
+  resolveDedupe: (candidateId: string, resolution: "same" | "different", canonical_event_id?: string) =>
+    request<any>(`/finance/dedupe-candidates/${candidateId}/resolve`, { method: "POST", body: { resolution, canonical_event_id }, auth: true }),
+
+  getFinancialAudit: (recordType: string, recordId: string) =>
+    request<any>(`/finance/audit/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}`, { auth: true }),
 };
