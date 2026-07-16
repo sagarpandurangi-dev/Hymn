@@ -2513,9 +2513,11 @@ async def move_component(component_id: str, direction: str, current_user: dict =
 # derived time/money calculations under /api/portfolio/*.
 from portfolio_manager import portfolio_router, ensure_portfolio_indexes  # noqa: E402
 from finance_manager import finance_router, ensure_finance_indexes  # noqa: E402
+from finance_advanced import advanced_router as finance_advanced_router, ensure_finance_advanced_indexes  # noqa: E402
 
 api_router.include_router(portfolio_router)
 api_router.include_router(finance_router)
+api_router.include_router(finance_advanced_router)
 app.include_router(api_router)
 
 app.add_middleware(
@@ -2542,6 +2544,7 @@ async def startup_indexes():
     await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
     await ensure_portfolio_indexes(db)
     await ensure_finance_indexes(db)
+    await ensure_finance_advanced_indexes(db)
 
 
 @app.on_event("shutdown")

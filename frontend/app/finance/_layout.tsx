@@ -15,6 +15,10 @@ export default function FinanceLayout() {
       <Stack.Screen name="forecast/index" />
       <Stack.Screen name="forecast-month" />
       <Stack.Screen name="scenarios" />
+      <Stack.Screen name="scenarios-index" />
+      <Stack.Screen name="scenarios-detail" />
+      <Stack.Screen name="expected-income" />
+      <Stack.Screen name="reconciliation" />
       <Stack.Screen name="events/index" />
       <Stack.Screen name="events/[id]" />
       <Stack.Screen name="reviews" />

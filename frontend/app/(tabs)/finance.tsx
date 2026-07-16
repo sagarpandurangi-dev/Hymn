@@ -40,8 +40,12 @@ export default function FinanceScreen() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const d = await api.getFinanceDashboard();
-      setDash(d);
+      const [d, twin, recon] = await Promise.all([
+        api.getFinanceDashboard(),
+        api.getTwinForecasts().catch(() => null),
+        api.reconciliationSuggestions().catch(() => []),
+      ]);
+      setDash({ ...d, _twin: twin, _recon_count: (recon || []).length });
     } catch (e: any) {
       setError(e?.message || "Could not load Finance");
     }
@@ -67,7 +71,6 @@ export default function FinanceScreen() {
   const monthlyWindows: any[] = dash?.monthly_windows || [];
   const reserved: any[] = dash?.reserved?.by_currency || dash?.reserved || [];
   const liquidity: any[] = dash?.available_liquidity?.by_currency || dash?.available_liquidity || [];
-  const forecast: any[] = dash?.forecast?.by_currency || [];
   const activeCommitments: any[] = dash?.active_commitments || [];
   const dueForReview: any[] = dash?.commitments_due_for_review || [];
   const recentEvents: any[] = dash?.recent_events || [];
@@ -113,6 +116,18 @@ export default function FinanceScreen() {
             </Text>
             <Pressable onPress={() => router.push("/finance/reviews")} hitSlop={12} testID="finance-open-reviews">
               <Text style={styles.reviewCta}>Review</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {dash?._recon_count > 0 && (
+          <View style={styles.reviewBanner} testID="finance-recon-banner">
+            <Ionicons name="git-compare-outline" size={20} color={colors.brandPrimary} />
+            <Text style={styles.reviewBannerText}>
+              {dash._recon_count} confirmed event{dash._recon_count === 1 ? "" : "s"} awaiting reconciliation
+            </Text>
+            <Pressable onPress={() => router.push("/finance/reconciliation")} hitSlop={12} testID="finance-open-recon">
+              <Text style={styles.reviewCta}>Reconcile</Text>
             </Pressable>
           </View>
         )}
@@ -293,53 +308,86 @@ export default function FinanceScreen() {
         </Section>
 
         {/* ============================================================
-           4. Twelve-Month Forecast
+           4. Twelve-Month Forecast (twin: liquidity + net worth §18–§20)
            ============================================================ */}
-        {forecast.map((f: any) => (
-          <Section
-            key={`fc-${f.currency}`}
-            title="Twelve-Month Forecast"
-            subtitle={`${f.currency} · confidence: ${f.confidence}`}
-            testID={`finance-forecast-${f.currency}`}
-            action={{
-              label: "Full forecast",
-              onPress: () => router.push(`/finance/forecast?currency=${f.currency}`),
-            }}
-          >
-            {f.months.slice(0, 6).map((m: any) => (
-              <Pressable
-                key={m.month}
-                style={styles.forecastRow}
-                onPress={() => router.push(`/finance/forecast-month?currency=${f.currency}&month=${m.month}`)}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.forecastMonth}>{monthLabel(m.month)}</Text>
-                  <Text style={styles.forecastMeta}>
-                    Reserved {f.currency} {formatMoney(m.reserved_commitments_amount)}
-                    {m.shortfall ? " · shortfall" : ""}
+        {(dash?._twin?.liquidity_forecast?.by_currency || []).map((f: any) => {
+          const nw = dash._twin.net_worth_forecast.by_currency.find((x: any) => x.currency === f.currency);
+          return (
+            <Section
+              key={`fc-${f.currency}`}
+              title="Twelve-Month Forecast"
+              subtitle={`${f.currency} · liquidity ${f.confidence} · net worth ${nw?.confidence || "—"}`}
+              testID={`finance-forecast-${f.currency}`}
+              action={{
+                label: "Full forecast",
+                onPress: () => router.push(`/finance/forecast?currency=${f.currency}`),
+              }}
+            >
+              <Text style={styles.notice}>Liquidity — “can obligations be met?”</Text>
+              {f.months.slice(0, 4).map((m: any) => (
+                <Pressable
+                  key={`liq-${m.month}`}
+                  style={styles.forecastRow}
+                  onPress={() => router.push(`/finance/forecast-month?currency=${f.currency}&month=${m.month}`)}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.forecastMonth}>{monthLabel(m.month)}</Text>
+                    <Text style={styles.forecastMeta}>
+                      opening {formatMoney(m.opening_liquid_money)} · closing {formatMoney(m.closing_liquid_money)} · {m.confidence}
+                    </Text>
+                  </View>
+                  <Text style={[styles.forecastVal, m.shortfall && { color: colors.error }]}>
+                    {f.currency} {formatMoney(m.available_unreserved_liquid_money)}
                   </Text>
-                </View>
-                <Text style={[styles.forecastVal, m.shortfall && { color: colors.error }]}>
-                  {f.currency} {formatMoney(m.projected_liquid_end_of_month)}
-                </Text>
-              </Pressable>
-            ))}
-          </Section>
-        ))}
+                </Pressable>
+              ))}
+              {nw?.months?.length > 0 && (
+                <>
+                  <Text style={styles.notice}>Net Worth — “how does wealth change?”</Text>
+                  {nw.months.slice(0, 4).map((m: any) => (
+                    <View key={`nw-${m.month}`} style={styles.forecastRow}>
+                      <View style={{ flex: 1 }}>
+                        <Text style={styles.forecastMonth}>{monthLabel(m.month)}</Text>
+                        <Text style={styles.forecastMeta}>
+                          assets Δ {formatMoney(m.asset_changes)} · liab Δ {formatMoney(m.liability_changes)}
+                        </Text>
+                      </View>
+                      <Text style={styles.forecastVal}>{f.currency} {formatMoney(m.net_worth)}</Text>
+                    </View>
+                  ))}
+                </>
+              )}
+            </Section>
+          );
+        })}
 
         {/* ============================================================
-           5. Scenarios
+           5. Scenarios (persistent sandbox §26)
            ============================================================ */}
         {position.length > 0 && (
           <Section
             title="Scenarios"
-            subtitle="What if…"
+            subtitle="What if… (sandbox never touches real data)"
             testID="finance-scenarios"
-            action={{ label: "Open", onPress: () => router.push(`/finance/scenarios?currency=${position[0].currency}`) }}
+            action={{ label: "Open", onPress: () => router.push(`/finance/scenarios-index`) }}
           >
             <Text style={styles.emptyBody}>
-              Simulate a new monthly expense, income change, or one-off reservation and see the impact on
-              your liquidity and net worth.
+              Simulate a new monthly expense, salary change, one-off reservation or loan closure and compare against the
+              base forecast. Save scenarios, duplicate them, rename or delete — nothing changes your Portfolio.
+            </Text>
+          </Section>
+        )}
+
+        {position.length > 0 && (
+          <Section
+            title="Expected income"
+            subtitle="One-time future income · confirmed vs expected"
+            testID="finance-expected-income"
+            action={{ label: "Open", onPress: () => router.push(`/finance/expected-income`) }}
+          >
+            <Text style={styles.emptyBody}>
+              Treat future income cautiously until it has been earned. Expected items need a second confirmation before
+              entering the forecast.
             </Text>
           </Section>
         )}

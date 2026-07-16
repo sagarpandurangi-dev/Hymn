@@ -394,4 +394,48 @@ export const api = {
 
   getFinancialAudit: (recordType: string, recordId: string) =>
     request<any>(`/finance/audit/${encodeURIComponent(recordType)}/${encodeURIComponent(recordId)}`, { auth: true }),
+
+  // -- Finance Advanced (§15–§26) --
+  getTwinForecasts: () => request<any>("/finance/forecasts", { auth: true }),
+  reconciliationSuggestions: () => request<any[]>("/finance/reconciliation/suggestions", { auth: true }),
+  reconcileConfirm: (eventId: string, payload: { commitment_id: string; actual_amount_override?: string | number }) =>
+    request<any>(`/finance/reconciliation/${eventId}/confirm`, { method: "POST", body: payload, auth: true }),
+  reconcileReject: (eventId: string) =>
+    request<any>(`/finance/reconciliation/${eventId}/reject`, { method: "POST", auth: true }),
+
+  listExpectedIncome: () => request<any[]>("/finance/expected-income", { auth: true }),
+  createExpectedIncome: (payload: { title: string; amount: string | number; currency: string; expected_date: string; classification: "confirmed" | "expected"; description?: string }) =>
+    request<any>("/finance/expected-income", { method: "POST", body: payload, auth: true }),
+  confirmExpectedInclusion: (id: string, include_in_forecast: boolean) =>
+    request<any>(`/finance/expected-income/${id}/confirm-inclusion`, { method: "POST", body: { include_in_forecast }, auth: true }),
+  markExpectedReceived: (id: string, payload?: { event_id?: string; actual_amount?: string | number; event_date?: string }) =>
+    request<any>(`/finance/expected-income/${id}/received`, { method: "POST", body: payload || {}, auth: true }),
+  deleteExpectedIncome: (id: string) =>
+    request<{ detail: string }>(`/finance/expected-income/${id}`, { method: "DELETE", auth: true }),
+
+  runDecisionAssessment: (payload: { amount: string | number; currency: string; due_date: string; priority: string }) =>
+    request<any>("/finance/decision-assessment", { method: "POST", body: payload, auth: true }),
+  recordOverride: (payload: any) => request<any>("/finance/overrides", { method: "POST", body: payload, auth: true }),
+  listOverrides: () => request<any[]>("/finance/overrides", { auth: true }),
+
+  rebalanceCandidates: (currency: string, exclude_id?: string) =>
+    request<any[]>(`/finance/rebalance-candidates?currency=${encodeURIComponent(currency)}${exclude_id ? `&exclude_id=${encodeURIComponent(exclude_id)}` : ""}`, { auth: true }),
+
+  saveScenario: (payload: { name: string; currency: string; assumptions: any }) =>
+    request<any>("/finance/scenarios/save", { method: "POST", body: payload, auth: true }),
+  listScenarios: () => request<any[]>("/finance/scenarios/list", { auth: true }),
+  getScenario: (id: string) => request<any>(`/finance/scenarios/detail/${id}`, { auth: true }),
+  updateScenario: (id: string, payload: { name: string; currency: string; assumptions: any }) =>
+    request<any>(`/finance/scenarios/detail/${id}`, { method: "PUT", body: payload, auth: true }),
+  duplicateScenario: (id: string) =>
+    request<any>(`/finance/scenarios/detail/${id}/duplicate`, { method: "POST", auth: true }),
+  deleteScenario: (id: string) =>
+    request<{ detail: string }>(`/finance/scenarios/detail/${id}`, { method: "DELETE", auth: true }),
+  evaluateScenario: (id: string) =>
+    request<any>(`/finance/scenarios/detail/${id}/evaluate`, { method: "POST", auth: true }),
+
+  sharedExpenseIOwe: (payload: { total_amount: string | number; currency: string; other_paid_by: string; my_share: string | number; description?: string; due_date: string; priority?: string; create_task?: boolean }) =>
+    request<any>("/finance/shared-expenses/i-owe", { method: "POST", body: payload, auth: true }),
+  sharedExpenseIPaid: (payload: { total_amount: string | number; currency: string; participants: string[]; event_date: string; description?: string; prepare_repayment_message?: boolean }) =>
+    request<any>("/finance/shared-expenses/i-paid", { method: "POST", body: payload, auth: true }),
 };
