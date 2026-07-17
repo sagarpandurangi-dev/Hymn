@@ -31,6 +31,7 @@ from pydantic import BaseModel
 from deps import get_current_user, get_db
 from finance_manager import (
     _audit,
+    _create_reservation,
     _current_position,
     _decimal_from_stored,
     _find_commitment_allocations,
@@ -42,6 +43,7 @@ from finance_manager import (
     _parse_date,
     _project_commitment,
     _quantize_out,
+    _read_commitment_by_id,
     _require,
     _require_currency,
     _require_date_str,
@@ -364,7 +366,7 @@ async def reconcile_confirm(
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
-    c = await db.financial_commitments.find_one({"id": body.commitment_id, "user_id": current_user["id"]}, {"_id": 0})
+    c = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
     if not c:
         raise HTTPException(status_code=404, detail="Commitment not found")
     _require(c.get("state") in ("reserved", "expired"),
@@ -1143,32 +1145,17 @@ async def shared_expense_i_owe(body: SharedExpenseIOwe, current_user: dict = Dep
             "financial_commitment_id": commitment_id,
             "created_at": now, "updated_at": now,
         })
-    # Immediately reserve so it enters the Liquidity Forecast (\u00a717 says
-    # "reserve the amount immediately" when another person paid).
-    alloc_id = _uuid()
-    await db.resource_allocations.insert_one({
-        "id": alloc_id, "user_id": current_user["id"],
-        "resource_type": "money", "owner_type": "task" if task_id else "standalone",
-        "owner_id": task_id, "allocation_mode": "one_time",
-        "date": body.due_date, "day_of_week": None, "start_time": None, "end_time": None,
-        "quantity": share_stored, "unit": "currency", "currency": body.currency,
-        "status": "reserved", "fixed_or_flexible": "fixed",
-        "created_at": now, "updated_at": now,
-    })
-    await db.financial_commitments.update_one(
-        {"id": commitment_id},
-        {"$set": {"state": "reserved", "resource_allocation_id": alloc_id,
-                  "next_review_date": _today_iso(), "updated_at": _now()}},
-    )
-    # Schema-prep mirror \u2014 keep the new allocation in lock-step with the FC.
-    from finance_manager import _mirror_fc_to_allocation as _mirror  # noqa: WPS433
-    fresh = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
-    await _mirror(db, fresh or {})
+    # Immediately reserve so it enters the Liquidity Forecast (§17 says
+    # "reserve the amount immediately" when another person paid). Reservation
+    # is created exclusively on ``resource_allocations`` — the FC row above
+    # stays frozen at ``state='draft'`` per the write-migration rule.
+    alloc_id = await _create_reservation(db, current_user["id"], doc)
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "created",
         source="manual",
         new_value={"kind": "shared_expense_i_owe", "amount": _money_from_stored(share_stored),
-                   "currency": body.currency, "paid_by": body.other_paid_by, "task_id": task_id},
+                   "currency": body.currency, "paid_by": body.other_paid_by, "task_id": task_id,
+                   "allocation_id": alloc_id},
     )
     return {"commitment_id": commitment_id, "task_id": task_id}
 
