@@ -31,10 +31,10 @@ from pydantic import BaseModel
 from deps import get_current_user, get_db
 from finance_manager import (
     _audit,
-    _create_reservation,
     _current_position,
     _decimal_from_stored,
     _find_commitment_allocations,
+    _insert_commitment_allocation,
     _money_from_stored,
     _money_to_stored,
     _monthly_summary,
@@ -1104,8 +1104,10 @@ class SharedExpenseIOwe(BaseModel):
 
 @advanced_router.post("/shared-expenses/i-owe")
 async def shared_expense_i_owe(body: SharedExpenseIOwe, current_user: dict = Depends(get_current_user)):
-    """When someone else paid and the user owes a share (\u00a717). Creates a
-    Reserved Financial Commitment for the user's share plus a repay Task."""
+    """When someone else paid and the user owes a share (§17). Creates a
+    Reserved Financial Commitment for the user's share plus a repay Task.
+    Every write targets ``resource_allocations`` exclusively —
+    ``financial_commitments`` is never touched."""
     db = get_db()
     _require_currency(body.currency, "currency")
     _require_date_str(body.due_date, "due_date")
@@ -1124,17 +1126,16 @@ async def shared_expense_i_owe(body: SharedExpenseIOwe, current_user: dict = Dep
         "due_date": body.due_date,
         "original_due_date": body.due_date,
         "priority": body.priority,
-        "state": "draft",
         "domain_id": None, "goal_id": None, "project_id": None,
         "task_id": task_id,
-        "resource_allocation_id": None,
-        "actual_amount": None, "variance": None, "unused_reservation": None, "overrun_amount": None,
-        "completed_at": None, "cancelled_at": None,
-        "postpone_count": 0, "last_reviewed_at": None, "next_review_date": None,
         "source": "shared_expense",
-        "created_at": now, "updated_at": now,
     }
-    await db.financial_commitments.insert_one(doc)
+    # Insert as Reserved directly — §17 requires the amount be reserved
+    # immediately when another person paid.
+    alloc_id = await _insert_commitment_allocation(
+        db, current_user["id"], commitment_id,
+        fc_state="reserved", alloc_status="reserved", doc=doc,
+    )
     if task_id:
         await db.tasks.insert_one({
             "id": task_id, "user_id": current_user["id"],
@@ -1145,11 +1146,6 @@ async def shared_expense_i_owe(body: SharedExpenseIOwe, current_user: dict = Dep
             "financial_commitment_id": commitment_id,
             "created_at": now, "updated_at": now,
         })
-    # Immediately reserve so it enters the Liquidity Forecast (§17 says
-    # "reserve the amount immediately" when another person paid). Reservation
-    # is created exclusively on ``resource_allocations`` — the FC row above
-    # stays frozen at ``state='draft'`` per the write-migration rule.
-    alloc_id = await _create_reservation(db, current_user["id"], doc)
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "created",
         source="manual",

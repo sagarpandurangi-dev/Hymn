@@ -5,16 +5,21 @@ from Portfolio-owned sources (`financial_accounts`, `monthly_money_commitments`,
 `resource_allocations`) and money-aware Check-ins (`checkins.money_spent`),
 and it never duplicates those records into a Finance-only copy.
 
-Finance-owned collections (new):
+Finance-owned collections:
 
-* ``financial_commitments`` — user-facing Financial Commitment records with
-  extended metadata (title, priority, linked task, actual/variance, review
-  cadence, state machine). Every Reserved commitment has a matching money
-  ``resource_allocation`` row acting as the reservation ledger.
-* ``financial_events``     — normalized Actual Financial Events flowing
+* ``resource_allocations`` (``resource_type='money'``) — the SINGLE source
+  of truth for every Financial Commitment. Every state — draft, reserved,
+  expired, completed, cancelled — lives on a single allocation row keyed by
+  ``financial_commitment_id``. Ledger status (``proposed``/``reserved``/
+  ``consumed``/``released``/``cancelled``) is co-located with lifecycle
+  state on the same row.
+* ``financial_commitments`` — LEGACY. No writes go here anymore. The
+  collection is retained solely so pre-migration rows remain queryable for
+  verification. All reads and writes flow through ``resource_allocations``.
+* ``financial_events`` — normalized Actual Financial Events flowing
   through the Event Pipeline (from check-ins, SMS, statements, …). Only
   ``confirmation_status='confirmed'`` events affect Finance calculations.
-* ``financial_audit``       — complete append-only audit trail for every
+* ``financial_audit`` — complete append-only audit trail for every
   financial source record and Financial Commitment change.
 * ``financial_dedupe_candidates`` — pending user decisions for probable
   duplicate events.
@@ -562,47 +567,50 @@ def _project_commitment(doc: dict) -> dict:
     return doc
 
 
-async def _create_reservation(db, user_id: str, commitment: dict) -> str:
-    """Create the money resource_allocation row that acts as the reservation
-    ledger AND the canonical lifecycle store for a Financial Commitment.
+async def _insert_commitment_allocation(
+    db, user_id: str, commitment_id: str, fc_state: str, alloc_status: str, doc: dict,
+) -> str:
+    """Insert a new ``resource_allocations`` row that owns the full lifecycle
+    of a Financial Commitment. ``resource_allocations`` is the single source
+    of truth for every commitment state — draft included.
 
-    All Finance-owned lifecycle fields (state, actual_amount, variance,
-    completed_at, review dates, …) are seeded here so subsequent lifecycle
-    writes target ONLY the allocation row — ``financial_commitments`` stays
-    frozen at draft after this point.
+    ``doc`` supplies the commitment payload (``amount``, ``currency``,
+    ``due_date``, ``priority``, task/goal/project/domain links, ``source``…).
+    ``fc_state`` is the Finance lifecycle state (draft/reserved/expired/…)
+    and ``alloc_status`` is the ledger status (proposed/reserved/consumed/…).
     """
     alloc_id = _uuid()
     now = _now()
     await db.resource_allocations.insert_one({
-        # --- ledger fields (unchanged behaviour) ---
+        # --- ledger fields (owned by resource_allocations) ---
         "id": alloc_id,
         "user_id": user_id,
         "resource_type": "money",
-        "owner_type": "task" if commitment.get("task_id") else "standalone",
-        "owner_id": commitment.get("task_id"),
+        "owner_type": "task" if doc.get("task_id") else "standalone",
+        "owner_id": doc.get("task_id"),
         "allocation_mode": "one_time",
-        "date": commitment["due_date"],
+        "date": doc["due_date"],
         "day_of_week": None,
         "start_time": None,
         "end_time": None,
-        "quantity": commitment["amount"],
+        "quantity": doc["amount"],
         "unit": "currency",
-        "currency": commitment["currency"],
-        "status": "reserved",
+        "currency": doc["currency"],
+        "status": alloc_status,
         "fixed_or_flexible": "fixed",
         # --- Finance lifecycle fields (canonical from here on) ---
-        "financial_commitment_id": commitment["id"],
-        "state": "reserved",
-        "title": commitment.get("title"),
-        "description": commitment.get("description") or "",
-        "amount": commitment["amount"],
-        "due_date": commitment["due_date"],
-        "original_due_date": commitment.get("original_due_date") or commitment["due_date"],
-        "priority": commitment.get("priority"),
-        "domain_id": commitment.get("domain_id"),
-        "goal_id": commitment.get("goal_id"),
-        "project_id": commitment.get("project_id"),
-        "task_id": commitment.get("task_id"),
+        "financial_commitment_id": commitment_id,
+        "state": fc_state,
+        "title": doc.get("title"),
+        "description": doc.get("description") or "",
+        "amount": doc["amount"],
+        "due_date": doc["due_date"],
+        "original_due_date": doc.get("original_due_date") or doc["due_date"],
+        "priority": doc.get("priority"),
+        "domain_id": doc.get("domain_id"),
+        "goal_id": doc.get("goal_id"),
+        "project_id": doc.get("project_id"),
+        "task_id": doc.get("task_id"),
         "resource_allocation_id": alloc_id,
         "actual_amount": None,
         "variance": None,
@@ -612,28 +620,52 @@ async def _create_reservation(db, user_id: str, commitment: dict) -> str:
         "cancelled_at": None,
         "postpone_count": 0,
         "last_reviewed_at": None,
-        "next_review_date": _add_days(_today_iso(), REVIEW_INTERVAL_DAYS),
-        "source": commitment.get("source") or "manual",
-        "fc_mirrored_at": now,
+        "next_review_date": (
+            _add_days(_today_iso(), REVIEW_INTERVAL_DAYS) if fc_state == "reserved" else None
+        ),
+        "source": doc.get("source") or "manual",
         "created_at": now,
         "updated_at": now,
     })
-    await _audit(
-        db, user_id, "resource_allocation", alloc_id, "reservation_created",
-        source="manual",
-        new_value={"amount": _money_from_stored(commitment["amount"]),
-                   "currency": commitment["currency"]},
-    )
     return alloc_id
 
 
+async def _promote_draft_to_reserved(db, user_id: str, commitment_id: str) -> str:
+    """Transition an existing draft commitment row to Reserved. Returns the
+    allocation id. No new row is inserted — the row was created at commitment
+    creation time. Ledger status flips from ``proposed`` to ``reserved`` and
+    lifecycle state flips from ``draft`` to ``reserved``."""
+    alloc = await db.resource_allocations.find_one(
+        {"user_id": user_id, "resource_type": "money",
+         "financial_commitment_id": commitment_id}, {"_id": 0},
+    )
+    if not alloc:
+        raise HTTPException(status_code=404, detail="Financial Commitment not found")
+    now = _now()
+    await db.resource_allocations.update_one(
+        {"id": alloc["id"]},
+        {"$set": {
+            "state": "reserved",
+            "status": "reserved",
+            "next_review_date": _add_days(_today_iso(), REVIEW_INTERVAL_DAYS),
+            "updated_at": now,
+        }},
+    )
+    await _audit(
+        db, user_id, "resource_allocation", alloc["id"], "reservation_created",
+        source="manual",
+        new_value={"amount": _money_from_stored(alloc.get("amount")),
+                   "currency": alloc.get("currency")},
+    )
+    return alloc["id"]
+
+
 async def _update_lifecycle(db, commitment_id: str, fields: dict) -> None:
-    """Write a Finance lifecycle update onto the allocation row identified by
-    ``financial_commitment_id``. All lifecycle writes after reservation MUST
-    go through this helper — ``financial_commitments`` is not touched."""
+    """Write a lifecycle update onto the allocation row identified by
+    ``financial_commitment_id``. This is the ONLY write path for
+    commitments — ``financial_commitments`` is never touched."""
     payload = dict(fields)
     payload["updated_at"] = _now()
-    payload["fc_mirrored_at"] = _now()
     await db.resource_allocations.update_one(
         {"resource_type": "money", "financial_commitment_id": commitment_id},
         {"$set": payload},
@@ -641,19 +673,14 @@ async def _update_lifecycle(db, commitment_id: str, fields: dict) -> None:
 
 
 # ============================================================================
-# Schema preparation \u2014 mirror Finance-owned fields onto resource_allocations.
+# Read model — resource_allocations is the ONLY source of truth for reads.
 #
-# The plan is to let `resource_allocations` become the canonical Financial
-# Commitment model in a later iteration. This helper stages every FC field
-# on the linked allocation row so a future switch has zero data migration.
-#
-# No reads, writes, calculations or API contracts consume these mirrored
-# fields today. Existing allocation ledger fields (status, date, quantity,
-# consumed_amount, released_amount) are left untouched \u2014 the mirror is
-# additive only.
+# There is no fallback to ``financial_commitments`` and no mirror. Every
+# commitment — draft included — lives as a single ``resource_allocations``
+# row with ``resource_type='money'`` and a ``financial_commitment_id``.
 # ============================================================================
 
-_FC_MIRROR_KEYS = (
+_COMMITMENT_FIELDS = (
     "title", "description", "amount", "currency",
     "due_date", "original_due_date", "priority", "state",
     "domain_id", "goal_id", "project_id", "task_id",
@@ -665,85 +692,19 @@ _FC_MIRROR_KEYS = (
 )
 
 
-async def _mirror_fc_to_allocation(db, commitment: dict) -> None:
-    """Copy every Finance-owned field from a ``financial_commitments`` doc
-    onto its linked ``resource_allocations`` row. Safe to call repeatedly.
-
-    * Never invoked on draft commitments (they have no allocation yet).
-    * Idempotent \u2014 same input always produces the same allocation row
-      state, with ``fc_mirrored_at`` refreshed each call.
-    * Does not touch ledger-only fields on the allocation row.
-    """
-    alloc_id = commitment.get("resource_allocation_id")
-    if not alloc_id:
-        return
-    payload = {k: commitment.get(k) for k in _FC_MIRROR_KEYS}
-    payload["financial_commitment_id"] = commitment.get("id")
-    payload["fc_mirrored_at"] = _now()
-    await db.resource_allocations.update_one(
-        {"id": alloc_id}, {"$set": payload},
-    )
-
-
-async def backfill_fc_mirror_on_allocations(database) -> int:
-    """One-shot idempotent backfill: for every existing financial_commitment
-    that already has a ``resource_allocation_id``, copy all Finance-owned
-    fields onto that allocation. Called at startup after indexes are built.
-    Returns the number of rows touched."""
-    count = 0
-    cursor = database.financial_commitments.find(
-        {"resource_allocation_id": {"$ne": None}}, {"_id": 0},
-    )
-    async for doc in cursor:
-        await _mirror_fc_to_allocation(database, doc)
-        count += 1
-    return count
-
-
-async def _refresh_and_mirror(db, commitment_id: str) -> None:
-    """Re-read a financial_commitment after any mutation and mirror the
-    resulting Finance-owned fields onto its linked allocation. All the
-    Finance mutation endpoints call this so the allocation row is always
-    in lock-step with the commitment doc it represents."""
-    fresh = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
-    if fresh:
-        await _mirror_fc_to_allocation(db, fresh)
-
-
-# ============================================================================
-# Read model \u2014 resource_allocations is the source of truth for reads.
-#
-# Every write path still targets ``financial_commitments`` (and mirrors onto
-# the allocation via ``_mirror_fc_to_allocation``). Every read path below
-# projects a "financial commitment view" out of ``resource_allocations`` so
-# a later switchover can simply delete the mirror step.
-#
-# Drafts have no allocation row (writes only create one on reservation), so
-# ``_read_all_commitments`` unions the allocation-mirrored rows with any
-# draft rows read directly from ``financial_commitments``. Every other Finance
-# read (reserved totals, forecasts, reviews, reconciliation, decision
-# assessment, rebalance) concerns only Reserved / Expired / Completed /
-# Cancelled commitments \u2014 all of which are guaranteed to have an
-# allocation \u2014 so those reads use the allocation read model directly.
-# ============================================================================
-
 def _alloc_to_commitment_view(a: dict) -> Optional[dict]:
-    """Reshape a ``resource_allocations`` row that carries a mirrored
-    financial commitment into the same shape existing code expects when it
-    reads ``financial_commitments``. Returns None if the row is not a
-    commitment mirror (missing ``financial_commitment_id``).
+    """Reshape a ``resource_allocations`` row into the commitment view
+    consumed by the existing API contract. Returns None if the row is not a
+    commitment (missing ``financial_commitment_id``).
 
-    Only the mirrored Finance-owned fields are kept in the view — ledger-only
-    fields on the allocation (``quantity``, ``status``, ``date``, ``unit``,
+    Ledger-only fields (``quantity``, ``status``, ``date``, ``unit``,
     ``consumed_amount``, ``released_amount``, ``allocation_mode``, …) are
     dropped so downstream JSON serialization never sees stray ``Decimal128``
     values that don't belong to the commitment surface.
     """
     if not a.get("financial_commitment_id"):
         return None
-    # Whitelist keeps the view stable regardless of new ledger fields being
-    # added to allocations in the future.
-    KEEP = _FC_MIRROR_KEYS + ("created_at", "updated_at", "user_id")
+    KEEP = _COMMITMENT_FIELDS + ("created_at", "updated_at", "user_id")
     view: dict = {k: a.get(k) for k in KEEP if k in a}
     view["id"] = a["financial_commitment_id"]
     view["resource_allocation_id"] = a.get("id")
@@ -751,7 +712,7 @@ def _alloc_to_commitment_view(a: dict) -> Optional[dict]:
 
 
 async def _find_commitment_allocations(db, extras: Optional[dict] = None) -> List[dict]:
-    """Return commitment views projected from the allocation read model."""
+    """Return commitment views from ``resource_allocations``."""
     q: dict = {"resource_type": "money", "financial_commitment_id": {"$ne": None}}
     if extras:
         q.update(extras)
@@ -771,59 +732,28 @@ async def _read_all_commitments(
     include_terminal: bool = True,
     task_id: Optional[str] = None,
 ) -> List[dict]:
-    """Full commitment list: allocation-mirrored rows plus drafts.
-
-    Drafts live only in ``financial_commitments`` (they have no reservation
-    ledger row). Every other state is sourced from the allocation read model.
-    """
+    """Full commitment list — every state, sourced exclusively from
+    ``resource_allocations``."""
     extras: dict = {"user_id": user_id}
     if currency:
         extras["currency"] = currency
     if task_id:
         extras["task_id"] = task_id
-    if state and state != "draft":
+    if state:
         extras["state"] = state
-    if not include_terminal and not state:
+    elif not include_terminal:
         extras["state"] = {"$in": ["draft", "reserved", "expired"]}
-
-    allocs = await _find_commitment_allocations(db, extras)
-
-    # Union in the draft rows only when they'd match the caller's filters.
-    # FC records for post-reservation commitments stay frozen at state="draft"
-    # (per the write-migration rule), so we MUST exclude any FC row whose id
-    # already has an allocation — otherwise we'd double-count.
-    include_drafts = state is None or state == "draft"
-    if not include_terminal and state is None:
-        include_drafts = True
-    drafts: List[dict] = []
-    if include_drafts:
-        reserved_fc_ids = {
-            a.get("id") for a in allocs if a.get("id")  # allocation view exposes financial_commitment_id as "id"
-        }
-        draft_q: dict = {"user_id": user_id, "state": "draft"}
-        if currency:
-            draft_q["currency"] = currency
-        if task_id:
-            draft_q["task_id"] = task_id
-        if reserved_fc_ids:
-            draft_q["id"] = {"$nin": list(reserved_fc_ids)}
-        drafts = await db.financial_commitments.find(draft_q, {"_id": 0}).to_list(length=1000)
-    return allocs + drafts
+    return await _find_commitment_allocations(db, extras)
 
 
 async def _read_commitment_by_id(db, user_id: str, commitment_id: str) -> Optional[dict]:
-    """Fetch a single commitment, preferring the allocation read model and
-    falling back to ``financial_commitments`` for drafts."""
+    """Fetch a single commitment from ``resource_allocations``. Returns None
+    if the commitment does not exist."""
     row = await db.resource_allocations.find_one(
         {"user_id": user_id, "resource_type": "money", "financial_commitment_id": commitment_id},
         {"_id": 0},
     )
-    view = _alloc_to_commitment_view(row) if row else None
-    if view:
-        return view
-    return await db.financial_commitments.find_one(
-        {"id": commitment_id, "user_id": user_id}, {"_id": 0},
-    )
+    return _alloc_to_commitment_view(row) if row else None
 
 
 async def _consume_reservation(
@@ -893,7 +823,9 @@ async def create_commitment(
     current_user: dict = Depends(get_current_user),
 ):
     """Create a Financial Commitment. Always begins in ``draft`` — the client
-    must call ``/reserve`` after presenting the decision assessment."""
+    must call ``/reserve`` after presenting the decision assessment. Every
+    commitment — draft included — is stored as a single row in
+    ``resource_allocations``. ``financial_commitments`` is never written to."""
     db = get_db()
     _require(body.title.strip(), "title is required")
     _require_currency(body.currency, "currency")
@@ -905,7 +837,6 @@ async def create_commitment(
 
     task_id: Optional[str] = None
     if body.create_task:
-        # Task created up-front so the commitment can carry the link.
         task_id = _uuid()
 
     doc = {
@@ -918,26 +849,19 @@ async def create_commitment(
         "due_date": body.due_date,
         "original_due_date": body.due_date,
         "priority": body.priority,
-        "state": "draft",
         "domain_id": body.domain_id,
         "goal_id": body.goal_id,
         "project_id": body.project_id,
         "task_id": task_id,
-        "resource_allocation_id": None,
-        "actual_amount": None,
-        "variance": None,
-        "unused_reservation": None,
-        "overrun_amount": None,
-        "completed_at": None,
-        "cancelled_at": None,
-        "postpone_count": 0,
-        "last_reviewed_at": None,
-        "next_review_date": None,
         "source": "manual",
-        "created_at": now,
-        "updated_at": now,
     }
-    await db.financial_commitments.insert_one(doc)
+    # Insert the draft into resource_allocations. Ledger status="proposed"
+    # keeps this row out of the reserved-money aggregates until /reserve
+    # promotes it.
+    await _insert_commitment_allocation(
+        db, current_user["id"], commitment_id,
+        fc_state="draft", alloc_status="proposed", doc=doc,
+    )
 
     if body.create_task and task_id:
         await db.tasks.insert_one({
@@ -964,26 +888,25 @@ async def create_commitment(
                    "currency": body.currency, "due_date": body.due_date,
                    "priority": body.priority, "task_id": task_id},
     )
-    return _project_commitment(doc)
+    fresh = await _read_commitment_by_id(db, current_user["id"], commitment_id)
+    return _project_commitment(fresh or {})
 
 
 @finance_router.post("/commitments/{commitment_id}/reserve", response_model=FinancialCommitmentResponse)
 async def reserve_commitment(commitment_id: str, current_user: dict = Depends(get_current_user)):
-    """Confirm a Draft commitment — creates the reservation ledger row and
-    transitions state to ``reserved``. This is the only path from draft."""
+    """Confirm a Draft commitment — transitions state=draft→reserved on the
+    existing allocation row (no new row is created)."""
     db = get_db()
-    c = await db.financial_commitments.find_one({"id": commitment_id, "user_id": current_user["id"]}, {"_id": 0})
+    c = await _read_commitment_by_id(db, current_user["id"], commitment_id)
     if not c:
         raise HTTPException(status_code=404, detail="Financial Commitment not found")
     _require(c.get("state") == "draft", f"Cannot reserve a commitment in state '{c.get('state')}'")
 
-    alloc_id = await _create_reservation(db, current_user["id"], c)
+    alloc_id = await _promote_draft_to_reserved(db, current_user["id"], commitment_id)
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "reservation_created",
         source="manual", new_value={"state": "reserved", "allocation_id": alloc_id},
     )
-    # financial_commitments stays as draft; the allocation is now the canonical
-    # source for state=reserved and all subsequent lifecycle writes.
     doc = await _read_commitment_by_id(db, current_user["id"], commitment_id)
     return _project_commitment(doc or {})
 
@@ -1000,9 +923,8 @@ async def list_commitments(
         _require_in(state, COMMITMENT_STATES, "state")
     if currency:
         _require_currency(currency, "currency")
-    # Auto-expire reserved commitments whose due date has passed — the write
-    # now targets the allocation row exclusively (financial_commitments is
-    # frozen at draft).
+    # Auto-expire reserved commitments whose due date has passed — writes
+    # target ``resource_allocations``, the single source of truth.
     today = _today_iso()
     await db.resource_allocations.update_many(
         {"user_id": current_user["id"], "resource_type": "money",
@@ -1036,16 +958,10 @@ async def get_commitment(commitment_id: str, current_user: dict = Depends(get_cu
 
 @finance_router.put("/commitments/{commitment_id}", response_model=FinancialCommitmentResponse)
 async def update_commitment(commitment_id: str, body: FinancialCommitmentUpdate, current_user: dict = Depends(get_current_user)):
-    """Edit a Draft or Reserved commitment.
-
-    * Draft edits still target ``financial_commitments`` — that record is the
-      only source before a reservation exists.
-    * Reserved edits are lifecycle updates and target the allocation row
-      exclusively; ``financial_commitments`` is not touched.
-    * Terminal states (completed/cancelled/expired) are frozen.
-    """
+    """Edit a Draft or Reserved commitment. Terminal states (completed/
+    cancelled/expired) are frozen. Every edit — draft included — writes
+    to ``resource_allocations``."""
     db = get_db()
-    # Read from the canonical read model — allocation for reserved, FC for drafts.
     c = await _read_commitment_by_id(db, current_user["id"], commitment_id)
     if not c:
         raise HTTPException(status_code=404, detail="Financial Commitment not found")
@@ -1076,21 +992,14 @@ async def update_commitment(commitment_id: str, body: FinancialCommitmentUpdate,
     if not update:
         return _project_commitment(c)
 
-    if c.get("state") == "draft":
-        # Draft-only write — financial_commitments is still owner.
-        update["updated_at"] = _now()
-        await db.financial_commitments.update_one(
-            {"id": commitment_id, "user_id": current_user["id"]}, {"$set": update},
-        )
-    else:
-        # Reserved lifecycle edit — allocation is the sole owner.
-        alloc_update = dict(update)
-        # Keep the ledger money/date fields in sync with the mirrored fields.
-        if "amount" in alloc_update:
-            alloc_update["quantity"] = alloc_update["amount"]
-        if "due_date" in alloc_update:
-            alloc_update["date"] = alloc_update["due_date"]
-        await _update_lifecycle(db, commitment_id, alloc_update)
+    # Keep the ledger fields (quantity, date, currency) in sync with the
+    # commitment fields written on the same row.
+    alloc_update = dict(update)
+    if "amount" in alloc_update:
+        alloc_update["quantity"] = alloc_update["amount"]
+    if "due_date" in alloc_update:
+        alloc_update["date"] = alloc_update["due_date"]
+    await _update_lifecycle(db, commitment_id, alloc_update)
 
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "updated",
@@ -1207,13 +1116,12 @@ async def complete_commitment(
 
 @finance_router.post("/commitments/{commitment_id}/cancel", response_model=FinancialCommitmentResponse)
 async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get_current_user)):
-    """Cancel a Draft/Reserved/Expired commitment.
+    """Cancel a Draft/Reserved/Expired commitment. All cancellations write
+    to ``resource_allocations`` — the single owner of the commitment row.
 
-    * Draft cancellations still target ``financial_commitments`` — no
-      reservation exists yet, so the FC row is the only source.
-    * Reserved/Expired cancellations release the reservation and write the
-      new lifecycle state onto the allocation row exclusively; the FC row
-      (frozen at draft) is not touched.
+    * Draft cancellations skip reservation release (nothing was reserved) but
+      still flip lifecycle ``state`` to cancelled on the allocation row.
+    * Reserved/Expired cancellations release the reservation first.
     """
     db = get_db()
     c = await _read_commitment_by_id(db, current_user["id"], commitment_id)
@@ -1225,30 +1133,18 @@ async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get
     )
     now = _now()
     released_amt = _money_from_stored(c.get("amount"))
+    alloc_id = c.get("resource_allocation_id")
 
-    if c.get("state") == "draft":
-        # Draft-only write — allocation doesn't exist yet.
-        await db.financial_commitments.update_one(
-            {"id": commitment_id, "user_id": current_user["id"]},
-            {"$set": {
-                "state": "cancelled",
-                "cancelled_at": now,
-                "updated_at": now,
-                "next_review_date": None,
-            }},
-        )
-    else:
-        # Post-reservation cancel — allocation is the sole owner.
-        alloc_id = c.get("resource_allocation_id")
-        if alloc_id:
-            released = _decimal_from_stored(c.get("amount"))
-            await _release_reservation(db, current_user["id"], alloc_id, released)
-        await _update_lifecycle(db, commitment_id, {
-            "state": "cancelled",
-            "status": "cancelled",
-            "cancelled_at": now,
-            "next_review_date": None,
-        })
+    if c.get("state") in ("reserved", "expired") and alloc_id:
+        released = _decimal_from_stored(c.get("amount"))
+        await _release_reservation(db, current_user["id"], alloc_id, released)
+
+    await _update_lifecycle(db, commitment_id, {
+        "state": "cancelled",
+        "status": "cancelled",
+        "cancelled_at": now,
+        "next_review_date": None,
+    })
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "cancelled",
         source="manual",
@@ -1888,8 +1784,8 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
     """
     db = get_db()
     user_id = current_user["id"]
-    # Auto-expire before we compute anything downstream — write to the
-    # allocation model exclusively (financial_commitments is frozen at draft).
+    # Auto-expire before we compute anything downstream — writes target
+    # ``resource_allocations``, the single source of truth.
     today = _today_iso()
     await db.resource_allocations.update_many(
         {"user_id": user_id, "resource_type": "money",
@@ -1951,6 +1847,9 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
 # ============================================================================
 
 async def ensure_finance_indexes(database) -> None:
+    # ``financial_commitments`` is intentionally left intact — no writes go to
+    # it anymore; the collection is retained solely for migration verification
+    # of legacy rows. Indexes are preserved to keep verification queries fast.
     await database.financial_commitments.create_index("id", unique=True)
     await database.financial_commitments.create_index("user_id")
     await database.financial_commitments.create_index([("user_id", 1), ("state", 1)])
@@ -1968,3 +1867,82 @@ async def ensure_finance_indexes(database) -> None:
 
     await database.financial_dedupe_candidates.create_index("id", unique=True)
     await database.financial_dedupe_candidates.create_index([("user_id", 1), ("status", 1)])
+
+
+# ============================================================================
+# One-time backfill — migrate legacy ``financial_commitments`` rows into
+# ``resource_allocations``. Idempotent: only creates allocation rows for FC
+# records that don't already have one. Runs at server startup.
+# ============================================================================
+
+async def backfill_fc_into_allocations(database) -> int:
+    """Backfill every ``financial_commitments`` row into
+    ``resource_allocations`` if a matching allocation does not exist.
+    Returns the number of allocation rows inserted.
+    """
+    existing_ids = await database.resource_allocations.distinct(
+        "financial_commitment_id", {"resource_type": "money"},
+    )
+    existing_set = {i for i in (existing_ids or []) if i}
+    inserted = 0
+    async for doc in database.financial_commitments.find({}, {"_id": 0}):
+        cid = doc.get("id")
+        if not cid or cid in existing_set:
+            continue
+        state = doc.get("state") or "draft"
+        if state == "draft":
+            alloc_status = "proposed"
+        elif state == "cancelled":
+            alloc_status = "cancelled"
+        elif state == "reserved" or state == "expired":
+            alloc_status = "reserved"
+        elif state == "completed":
+            alloc_status = "consumed"
+        else:
+            alloc_status = "proposed"
+        alloc_id = _uuid()
+        now = _now()
+        await database.resource_allocations.insert_one({
+            "id": alloc_id,
+            "user_id": doc.get("user_id"),
+            "resource_type": "money",
+            "owner_type": "task" if doc.get("task_id") else "standalone",
+            "owner_id": doc.get("task_id"),
+            "allocation_mode": "one_time",
+            "date": doc.get("due_date"),
+            "day_of_week": None,
+            "start_time": None,
+            "end_time": None,
+            "quantity": doc.get("amount"),
+            "unit": "currency",
+            "currency": doc.get("currency"),
+            "status": alloc_status,
+            "fixed_or_flexible": "fixed",
+            "financial_commitment_id": cid,
+            "state": state,
+            "title": doc.get("title"),
+            "description": doc.get("description") or "",
+            "amount": doc.get("amount"),
+            "due_date": doc.get("due_date"),
+            "original_due_date": doc.get("original_due_date") or doc.get("due_date"),
+            "priority": doc.get("priority"),
+            "domain_id": doc.get("domain_id"),
+            "goal_id": doc.get("goal_id"),
+            "project_id": doc.get("project_id"),
+            "task_id": doc.get("task_id"),
+            "resource_allocation_id": alloc_id,
+            "actual_amount": doc.get("actual_amount"),
+            "variance": doc.get("variance"),
+            "unused_reservation": doc.get("unused_reservation"),
+            "overrun_amount": doc.get("overrun_amount"),
+            "completed_at": doc.get("completed_at"),
+            "cancelled_at": doc.get("cancelled_at"),
+            "postpone_count": doc.get("postpone_count") or 0,
+            "last_reviewed_at": doc.get("last_reviewed_at"),
+            "next_review_date": doc.get("next_review_date"),
+            "source": doc.get("source") or "manual",
+            "created_at": doc.get("created_at") or now,
+            "updated_at": now,
+        })
+        inserted += 1
+    return inserted

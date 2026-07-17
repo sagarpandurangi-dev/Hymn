@@ -2515,7 +2515,7 @@ from portfolio_manager import portfolio_router, ensure_portfolio_indexes  # noqa
 from finance_manager import (
     finance_router,
     ensure_finance_indexes,
-    backfill_fc_mirror_on_allocations,
+    backfill_fc_into_allocations,
 )  # noqa: E402
 from finance_advanced import advanced_router as finance_advanced_router, ensure_finance_advanced_indexes  # noqa: E402
 
@@ -2550,11 +2550,11 @@ async def startup_indexes():
     await ensure_finance_indexes(db)
     await ensure_finance_advanced_indexes(db)
     try:
-        touched = await backfill_fc_mirror_on_allocations(db)
+        touched = await backfill_fc_into_allocations(db)
         if touched:
-            logger.info("finance schema-prep: mirrored %d financial_commitments onto their allocations", touched)
+            logger.info("finance migration: backfilled %d financial_commitments into resource_allocations", touched)
     except Exception as _bfx:  # pragma: no cover — never fail startup
-        logger.warning("finance schema-prep backfill skipped: %s", _bfx)
+        logger.warning("finance backfill skipped: %s", _bfx)
 
 
 @app.on_event("shutdown")
