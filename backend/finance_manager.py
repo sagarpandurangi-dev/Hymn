@@ -665,6 +665,114 @@ async def _refresh_and_mirror(db, commitment_id: str) -> None:
         await _mirror_fc_to_allocation(db, fresh)
 
 
+# ============================================================================
+# Read model \u2014 resource_allocations is the source of truth for reads.
+#
+# Every write path still targets ``financial_commitments`` (and mirrors onto
+# the allocation via ``_mirror_fc_to_allocation``). Every read path below
+# projects a "financial commitment view" out of ``resource_allocations`` so
+# a later switchover can simply delete the mirror step.
+#
+# Drafts have no allocation row (writes only create one on reservation), so
+# ``_read_all_commitments`` unions the allocation-mirrored rows with any
+# draft rows read directly from ``financial_commitments``. Every other Finance
+# read (reserved totals, forecasts, reviews, reconciliation, decision
+# assessment, rebalance) concerns only Reserved / Expired / Completed /
+# Cancelled commitments \u2014 all of which are guaranteed to have an
+# allocation \u2014 so those reads use the allocation read model directly.
+# ============================================================================
+
+def _alloc_to_commitment_view(a: dict) -> Optional[dict]:
+    """Reshape a ``resource_allocations`` row that carries a mirrored
+    financial commitment into the same shape existing code expects when it
+    reads ``financial_commitments``. Returns None if the row is not a
+    commitment mirror (missing ``financial_commitment_id``).
+
+    Only the mirrored Finance-owned fields are kept in the view — ledger-only
+    fields on the allocation (``quantity``, ``status``, ``date``, ``unit``,
+    ``consumed_amount``, ``released_amount``, ``allocation_mode``, …) are
+    dropped so downstream JSON serialization never sees stray ``Decimal128``
+    values that don't belong to the commitment surface.
+    """
+    if not a.get("financial_commitment_id"):
+        return None
+    # Whitelist keeps the view stable regardless of new ledger fields being
+    # added to allocations in the future.
+    KEEP = _FC_MIRROR_KEYS + ("created_at", "updated_at", "user_id")
+    view: dict = {k: a.get(k) for k in KEEP if k in a}
+    view["id"] = a["financial_commitment_id"]
+    view["resource_allocation_id"] = a.get("id")
+    return view
+
+
+async def _find_commitment_allocations(db, extras: Optional[dict] = None) -> List[dict]:
+    """Return commitment views projected from the allocation read model."""
+    q: dict = {"resource_type": "money", "financial_commitment_id": {"$ne": None}}
+    if extras:
+        q.update(extras)
+    rows = await db.resource_allocations.find(q, {"_id": 0}).to_list(length=5000)
+    out: List[dict] = []
+    for a in rows:
+        v = _alloc_to_commitment_view(a)
+        if v is not None:
+            out.append(v)
+    return out
+
+
+async def _read_all_commitments(
+    db, user_id: str,
+    state: Optional[str] = None,
+    currency: Optional[str] = None,
+    include_terminal: bool = True,
+    task_id: Optional[str] = None,
+) -> List[dict]:
+    """Full commitment list: allocation-mirrored rows plus drafts.
+
+    Drafts live only in ``financial_commitments`` (they have no reservation
+    ledger row). Every other state is sourced from the allocation read model.
+    """
+    extras: dict = {"user_id": user_id}
+    if currency:
+        extras["currency"] = currency
+    if task_id:
+        extras["task_id"] = task_id
+    if state and state != "draft":
+        extras["state"] = state
+    if not include_terminal and not state:
+        extras["state"] = {"$in": ["draft", "reserved", "expired"]}
+
+    allocs = await _find_commitment_allocations(db, extras)
+
+    # Union in the draft rows only when they'd match the caller's filters.
+    include_drafts = state is None or state == "draft"
+    if not include_terminal and state is None:
+        include_drafts = True
+    drafts: List[dict] = []
+    if include_drafts:
+        draft_q: dict = {"user_id": user_id, "state": "draft"}
+        if currency:
+            draft_q["currency"] = currency
+        if task_id:
+            draft_q["task_id"] = task_id
+        drafts = await db.financial_commitments.find(draft_q, {"_id": 0}).to_list(length=1000)
+    return allocs + drafts
+
+
+async def _read_commitment_by_id(db, user_id: str, commitment_id: str) -> Optional[dict]:
+    """Fetch a single commitment, preferring the allocation read model and
+    falling back to ``financial_commitments`` for drafts."""
+    row = await db.resource_allocations.find_one(
+        {"user_id": user_id, "resource_type": "money", "financial_commitment_id": commitment_id},
+        {"_id": 0},
+    )
+    view = _alloc_to_commitment_view(row) if row else None
+    if view:
+        return view
+    return await db.financial_commitments.find_one(
+        {"id": commitment_id, "user_id": user_id}, {"_id": 0},
+    )
+
+
 async def _consume_reservation(
     db, user_id: str, allocation_id: str, consumed_amount: Decimal, released_amount: Decimal,
 ) -> None:
@@ -846,32 +954,32 @@ async def list_commitments(
     current_user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    q: dict = {"user_id": current_user["id"]}
     if state:
         _require_in(state, COMMITMENT_STATES, "state")
-        q["state"] = state
     if currency:
         _require_currency(currency, "currency")
-        q["currency"] = currency
-    if not include_terminal:
-        q["state"] = {"$in": ["draft", "reserved", "expired"]}
     # Auto-expire reserved commitments whose due date has passed and no user
-    # decision has been recorded. Expiration is *not* a release — it just
-    # flips the state so the UI can prompt the user (§10).
+    # decision has been recorded. The candidate list is READ from the
+    # allocation read model; the write still goes to financial_commitments
+    # and mirrors back onto the allocation row.
     today = _today_iso()
-    expired_ids = [d["id"] for d in await db.financial_commitments.find(
-        {"user_id": current_user["id"], "state": "reserved", "due_date": {"$lt": today}},
-        {"_id": 0, "id": 1},
-    ).to_list(length=5000)]
+    to_expire = await db.resource_allocations.find(
+        {"user_id": current_user["id"], "resource_type": "money",
+         "financial_commitment_id": {"$ne": None},
+         "state": "reserved", "due_date": {"$lt": today}},
+        {"_id": 0, "financial_commitment_id": 1},
+    ).to_list(length=5000)
+    expired_ids = [r["financial_commitment_id"] for r in to_expire if r.get("financial_commitment_id")]
     if expired_ids:
         await db.financial_commitments.update_many(
             {"id": {"$in": expired_ids}},
             {"$set": {"state": "expired", "updated_at": _now()}},
         )
-        # Schema-prep mirror for every row we just expired.
         for _cid in expired_ids:
             await _refresh_and_mirror(db, _cid)
-    docs = await db.financial_commitments.find(q, {"_id": 0}).to_list(length=5000)
+    docs = await _read_all_commitments(
+        db, current_user["id"], state=state, currency=currency, include_terminal=include_terminal,
+    )
     docs.sort(key=lambda d: (d.get("due_date") or "", d.get("created_at") or ""))
     return [_project_commitment(d) for d in docs]
 
@@ -879,7 +987,7 @@ async def list_commitments(
 @finance_router.get("/commitments/{commitment_id}", response_model=FinancialCommitmentResponse)
 async def get_commitment(commitment_id: str, current_user: dict = Depends(get_current_user)):
     db = get_db()
-    doc = await db.financial_commitments.find_one({"id": commitment_id, "user_id": current_user["id"]}, {"_id": 0})
+    doc = await _read_commitment_by_id(db, current_user["id"], commitment_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Financial Commitment not found")
     # Lazy auto-expiration on read too.
@@ -892,7 +1000,9 @@ async def get_commitment(commitment_id: str, current_user: dict = Depends(get_cu
             source="system", new_value={"state": "expired"},
         )
         doc["state"] = "expired"
-        await _mirror_fc_to_allocation(db, doc)
+        # Refresh the mirror (source-of-truth for reads).
+        await _refresh_and_mirror(db, commitment_id)
+        doc = await _read_commitment_by_id(db, current_user["id"], commitment_id) or doc
     return _project_commitment(doc)
 
 
@@ -1224,9 +1334,11 @@ async def review_commitment(
 async def commitments_due_for_review(current_user: dict = Depends(get_current_user)):
     db = get_db()
     today = _today_iso()
-    docs = await db.financial_commitments.find(
+    rows = await db.resource_allocations.find(
         {
             "user_id": current_user["id"],
+            "resource_type": "money",
+            "financial_commitment_id": {"$ne": None},
             "state": "reserved",
             "$or": [
                 {"next_review_date": None},
@@ -1234,7 +1346,7 @@ async def commitments_due_for_review(current_user: dict = Depends(get_current_us
             ],
         }, {"_id": 0},
     ).to_list(length=1000)
-    return [_project_commitment(d) for d in docs]
+    return [_project_commitment(_alloc_to_commitment_view(a) or {}) for a in rows]
 
 
 # ============================================================================
@@ -1243,14 +1355,20 @@ async def commitments_due_for_review(current_user: dict = Depends(get_current_us
 
 async def _reserved_totals(db, user_id: str) -> dict:
     """Return per-currency reserved-money totals and the commitments causing
-    the lien. Only ``state='reserved'`` counts (Draft doesn't reserve;
-    completed/cancelled have already released). Expired still reserves per §10."""
-    docs = await db.financial_commitments.find(
-        {"user_id": user_id, "state": {"$in": ["reserved", "expired"]}},
+    the lien. Reads from the allocation read model — only ``state='reserved'``
+    or ``'expired'`` count (Draft doesn't reserve; completed/cancelled have
+    already released)."""
+    rows = await db.resource_allocations.find(
+        {"user_id": user_id, "resource_type": "money",
+         "financial_commitment_id": {"$ne": None},
+         "state": {"$in": ["reserved", "expired"]}},
         {"_id": 0},
     ).to_list(length=5000)
     per_currency: dict = {}
-    for d in docs:
+    for a in rows:
+        d = _alloc_to_commitment_view(a)
+        if not d:
+            continue
         cur = d.get("currency") or ""
         b = per_currency.setdefault(cur, {"reserved": Decimal(0), "items": []})
         b["reserved"] += _decimal_from_stored(d.get("amount"))
@@ -1342,11 +1460,10 @@ async def _forecast_12_months(db, user_id: str) -> dict:
     assets_by_cur = {c["currency"]: _decimal_from_stored(c["total_assets"]) for c in pos["currencies"]}
     liab_by_cur = {c["currency"]: _decimal_from_stored(c["total_liabilities"]) for c in pos["currencies"]}
 
-    # Reserved commitments per (currency, due_month)
-    reserved_docs = await db.financial_commitments.find(
-        {"user_id": user_id, "state": {"$in": ["reserved", "expired"]}},
-        {"_id": 0},
-    ).to_list(length=5000)
+    # Reserved commitments per (currency, due_month) — read from allocation model
+    reserved_docs = await _find_commitment_allocations(
+        db, {"user_id": user_id, "state": {"$in": ["reserved", "expired"]}},
+    )
 
     current_month = _today_iso()[:7]
     months = [current_month]
@@ -1712,12 +1829,10 @@ async def resolve_dedupe(
 @finance_router.get("/task-linked-commitment/{task_id}", response_model=Optional[FinancialCommitmentResponse])
 async def get_task_linked_commitment(task_id: str, current_user: dict = Depends(get_current_user)):
     db = get_db()
-    doc = await db.financial_commitments.find_one(
-        {"user_id": current_user["id"], "task_id": task_id}, {"_id": 0},
-    )
-    if not doc:
+    matches = await _read_all_commitments(db, current_user["id"], task_id=task_id)
+    if not matches:
         return None
-    return _project_commitment(doc)
+    return _project_commitment(matches[0])
 
 
 # ============================================================================
@@ -1768,10 +1883,9 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         monthly_windows.append({"currency": cur, "months": window})
     forecast = await _forecast_12_months(db, user_id)
     events = await _recent_events(db, user_id, 20)
-    # Commitments (active + terminal, capped) — client can drill into detail.
-    all_commitments = await db.financial_commitments.find(
-        {"user_id": user_id}, {"_id": 0},
-    ).sort("due_date", 1).to_list(length=500)
+    # Commitments (active + terminal, capped) — read from allocation model + drafts.
+    all_commitments = await _read_all_commitments(db, user_id)
+    all_commitments.sort(key=lambda d: (d.get("due_date") or "", d.get("created_at") or ""))
     active_commitments = [
         _project_commitment(d) for d in all_commitments
         if d.get("state") in ("draft", "reserved", "expired")

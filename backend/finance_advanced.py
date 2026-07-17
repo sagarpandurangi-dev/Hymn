@@ -33,6 +33,7 @@ from finance_manager import (
     _audit,
     _current_position,
     _decimal_from_stored,
+    _find_commitment_allocations,
     _money_from_stored,
     _money_to_stored,
     _monthly_summary,
@@ -267,10 +268,10 @@ async def _score_matches(db, user_id: str, event: dict) -> list:
 
     Score is a heuristic 0-100. Strong match => score >= 70 AND uniquely top.
     """
-    commitments = await db.financial_commitments.find(
-        {"user_id": user_id, "state": {"$in": ["reserved", "expired"]},
-         "currency": event.get("currency")}, {"_id": 0},
-    ).to_list(length=500)
+    commitments = await _find_commitment_allocations(
+        db, {"user_id": user_id, "state": {"$in": ["reserved", "expired"]},
+             "currency": event.get("currency")},
+    )
     ev_amt = _decimal_from_stored(event.get("amount"))
     try:
         ev_date = _parse_date(event.get("event_date"))
@@ -421,10 +422,10 @@ async def _twin_forecasts(db, user_id: str) -> dict:
     assets_by_cur = {c["currency"]: _decimal_from_stored(c["total_assets"]) for c in pos["currencies"]}
     liab_by_cur = {c["currency"]: _decimal_from_stored(c["total_liabilities"]) for c in pos["currencies"]}
 
-    # Reserved commitments per (currency, due_month)
-    reserved_docs = await db.financial_commitments.find(
-        {"user_id": user_id, "state": {"$in": ["reserved", "expired"]}}, {"_id": 0},
-    ).to_list(length=5000)
+    # Reserved commitments per (currency, due_month) — read from allocation model
+    reserved_docs = await _find_commitment_allocations(
+        db, {"user_id": user_id, "state": {"$in": ["reserved", "expired"]}},
+    )
     # Expected income (per included_in_forecast)
     expected_docs = await db.expected_incomes.find(
         {"user_id": user_id, "included_in_forecast": True, "received": False}, {"_id": 0},
@@ -696,11 +697,10 @@ async def decision_assessment(
         if row["month"] == _today_iso()[:7]:
             projected_close_current = rolling
 
-    # Load existing commitments to find those the proposal might displace.
-    all_commit = await db.financial_commitments.find(
-        {"user_id": current_user["id"], "state": "reserved", "currency": body.currency},
-        {"_id": 0},
-    ).to_list(length=1000)
+    # Load existing commitments to find those the proposal might displace — allocation read model.
+    all_commit = await _find_commitment_allocations(
+        db, {"user_id": current_user["id"], "state": "reserved", "currency": body.currency},
+    )
     higher_priority_displaced = [
         _project_commitment(c) for c in all_commit
         if _priority_rank(c.get("priority", "medium")) > prop_prio and (c.get("due_date") or "") >= body.due_date
@@ -833,10 +833,10 @@ async def rebalance_candidates(
     when tied. The user picks candidates; nothing is auto-rebalanced."""
     db = get_db()
     _require_currency(currency, "currency")
-    q = {"user_id": current_user["id"], "state": "reserved", "currency": currency}
+    extras: dict = {"user_id": current_user["id"], "state": "reserved", "currency": currency}
     if exclude_id:
-        q["id"] = {"$ne": exclude_id}
-    docs = await db.financial_commitments.find(q, {"_id": 0}).to_list(length=1000)
+        extras["financial_commitment_id"] = {"$ne": exclude_id, "$exists": True}
+    docs = await _find_commitment_allocations(db, extras)
 
     def _key(c: dict):
         return (
