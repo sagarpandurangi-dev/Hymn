@@ -595,6 +595,76 @@ async def _create_reservation(db, user_id: str, commitment: dict) -> str:
     return alloc_id
 
 
+# ============================================================================
+# Schema preparation \u2014 mirror Finance-owned fields onto resource_allocations.
+#
+# The plan is to let `resource_allocations` become the canonical Financial
+# Commitment model in a later iteration. This helper stages every FC field
+# on the linked allocation row so a future switch has zero data migration.
+#
+# No reads, writes, calculations or API contracts consume these mirrored
+# fields today. Existing allocation ledger fields (status, date, quantity,
+# consumed_amount, released_amount) are left untouched \u2014 the mirror is
+# additive only.
+# ============================================================================
+
+_FC_MIRROR_KEYS = (
+    "title", "description", "amount", "currency",
+    "due_date", "original_due_date", "priority", "state",
+    "domain_id", "goal_id", "project_id", "task_id",
+    "resource_allocation_id",
+    "actual_amount", "variance", "unused_reservation", "overrun_amount",
+    "completed_at", "cancelled_at",
+    "postpone_count", "last_reviewed_at", "next_review_date",
+    "source",
+)
+
+
+async def _mirror_fc_to_allocation(db, commitment: dict) -> None:
+    """Copy every Finance-owned field from a ``financial_commitments`` doc
+    onto its linked ``resource_allocations`` row. Safe to call repeatedly.
+
+    * Never invoked on draft commitments (they have no allocation yet).
+    * Idempotent \u2014 same input always produces the same allocation row
+      state, with ``fc_mirrored_at`` refreshed each call.
+    * Does not touch ledger-only fields on the allocation row.
+    """
+    alloc_id = commitment.get("resource_allocation_id")
+    if not alloc_id:
+        return
+    payload = {k: commitment.get(k) for k in _FC_MIRROR_KEYS}
+    payload["financial_commitment_id"] = commitment.get("id")
+    payload["fc_mirrored_at"] = _now()
+    await db.resource_allocations.update_one(
+        {"id": alloc_id}, {"$set": payload},
+    )
+
+
+async def backfill_fc_mirror_on_allocations(database) -> int:
+    """One-shot idempotent backfill: for every existing financial_commitment
+    that already has a ``resource_allocation_id``, copy all Finance-owned
+    fields onto that allocation. Called at startup after indexes are built.
+    Returns the number of rows touched."""
+    count = 0
+    cursor = database.financial_commitments.find(
+        {"resource_allocation_id": {"$ne": None}}, {"_id": 0},
+    )
+    async for doc in cursor:
+        await _mirror_fc_to_allocation(database, doc)
+        count += 1
+    return count
+
+
+async def _refresh_and_mirror(db, commitment_id: str) -> None:
+    """Re-read a financial_commitment after any mutation and mirror the
+    resulting Finance-owned fields onto its linked allocation. All the
+    Finance mutation endpoints call this so the allocation row is always
+    in lock-step with the commitment doc it represents."""
+    fresh = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    if fresh:
+        await _mirror_fc_to_allocation(db, fresh)
+
+
 async def _consume_reservation(
     db, user_id: str, allocation_id: str, consumed_amount: Decimal, released_amount: Decimal,
 ) -> None:
@@ -763,6 +833,8 @@ async def reserve_commitment(commitment_id: str, current_user: dict = Depends(ge
         source="manual", new_value={"state": "reserved", "allocation_id": alloc_id},
     )
     doc = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    # Schema-prep mirror onto the new allocation row.
+    await _mirror_fc_to_allocation(db, doc or {})
     return _project_commitment(doc)
 
 
@@ -787,10 +859,18 @@ async def list_commitments(
     # decision has been recorded. Expiration is *not* a release — it just
     # flips the state so the UI can prompt the user (§10).
     today = _today_iso()
-    await db.financial_commitments.update_many(
+    expired_ids = [d["id"] for d in await db.financial_commitments.find(
         {"user_id": current_user["id"], "state": "reserved", "due_date": {"$lt": today}},
-        {"$set": {"state": "expired", "updated_at": _now()}},
-    )
+        {"_id": 0, "id": 1},
+    ).to_list(length=5000)]
+    if expired_ids:
+        await db.financial_commitments.update_many(
+            {"id": {"$in": expired_ids}},
+            {"$set": {"state": "expired", "updated_at": _now()}},
+        )
+        # Schema-prep mirror for every row we just expired.
+        for _cid in expired_ids:
+            await _refresh_and_mirror(db, _cid)
     docs = await db.financial_commitments.find(q, {"_id": 0}).to_list(length=5000)
     docs.sort(key=lambda d: (d.get("due_date") or "", d.get("created_at") or ""))
     return [_project_commitment(d) for d in docs]
@@ -812,6 +892,7 @@ async def get_commitment(commitment_id: str, current_user: dict = Depends(get_cu
             source="system", new_value={"state": "expired"},
         )
         doc["state"] = "expired"
+        await _mirror_fc_to_allocation(db, doc)
     return _project_commitment(doc)
 
 
@@ -874,6 +955,7 @@ async def update_commitment(commitment_id: str, body: FinancialCommitmentUpdate,
         source="manual", previous_value=prev, new_value={k: (v if not isinstance(v, Decimal128) else _money_from_stored(v)) for k, v in update.items()},
     )
     doc = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    await _mirror_fc_to_allocation(db, doc or {})
     return _project_commitment(doc)
 
 
@@ -960,7 +1042,9 @@ async def _apply_complete(
                    "linked_event_id": linked_event["id"] if linked_event else None},
         related_event_id=linked_event["id"] if linked_event else None,
     )
-    return await db.financial_commitments.find_one({"id": c["id"]}, {"_id": 0})
+    fresh = await db.financial_commitments.find_one({"id": c["id"]}, {"_id": 0})
+    await _mirror_fc_to_allocation(db, fresh or {})
+    return fresh
 
 
 @finance_router.post("/commitments/{commitment_id}/complete", response_model=FinancialCommitmentResponse)
@@ -1018,6 +1102,7 @@ async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get
                    "released_amount": _money_from_stored(c.get("amount"))},
     )
     doc = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    await _mirror_fc_to_allocation(db, doc or {})
     return _project_commitment(doc)
 
 
@@ -1060,6 +1145,7 @@ async def postpone_commitment(
         new_value={"due_date": body.new_due_date},
     )
     doc = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    await _mirror_fc_to_allocation(db, doc or {})
     return _project_commitment(doc)
 
 
@@ -1087,6 +1173,7 @@ async def keep_active_commitment(commitment_id: str, current_user: dict = Depend
         source="manual", new_value={"state": "expired"},
     )
     doc = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    await _mirror_fc_to_allocation(db, doc or {})
     return _project_commitment(doc)
 
 
@@ -1129,6 +1216,7 @@ async def review_commitment(
             commitment_id, PostponePayload(new_due_date=body.new_due_date or ""), current_user=current_user,
         )
     doc = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    await _mirror_fc_to_allocation(db, doc or {})
     return _project_commitment(doc)
 
 

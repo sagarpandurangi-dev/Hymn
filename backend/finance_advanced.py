@@ -1160,6 +1160,10 @@ async def shared_expense_i_owe(body: SharedExpenseIOwe, current_user: dict = Dep
         {"$set": {"state": "reserved", "resource_allocation_id": alloc_id,
                   "next_review_date": _today_iso(), "updated_at": _now()}},
     )
+    # Schema-prep mirror \u2014 keep the new allocation in lock-step with the FC.
+    from finance_manager import _mirror_fc_to_allocation as _mirror  # noqa: WPS433
+    fresh = await db.financial_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    await _mirror(db, fresh or {})
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "created",
         source="manual",
