@@ -46,15 +46,18 @@ export function usePostCreationDecomposition() {
   // Single-flight lock so simultaneous callers reuse the same Promise.
   const activePromiseRef = useRef<Promise<void> | null>(null);
   const resolveRef = useRef<(() => void) | null>(null);
+  // Synchronous re-entry guard for handleChoose — set BEFORE
+  // setPendingChoice() so a rapid double-tap cannot slip past the React
+  // state update.
+  const processingRef = useRef<boolean>(false);
 
   const finishFlow = useCallback(() => {
     const r = resolveRef.current;
     resolveRef.current = null;
     activePromiseRef.current = null;
+    processingRef.current = false;
     setSession(null);
     setPendingChoice(null);
-    // Keep the error visible briefly for the caller if it wants to observe;
-    // errors that surfaced inside the modal are cleared on the next session.
     if (r) r();
   }, []);
 
@@ -74,46 +77,44 @@ export function usePostCreationDecomposition() {
 
   const handleChoose = useCallback(
     async (choice: DecompositionChoice) => {
-      // Guard against duplicate presses — the modal disables both buttons +
-      // the checkbox as soon as pendingChoice is set, but a synchronous
-      // double-fire could still slip through in edge cases.
-      if (pendingChoice !== null) return;
+      // Synchronous re-entry guard — runs before any React state update
+      // so a rapid double-tap cannot enter the flow twice.
+      if (processingRef.current) return;
+      processingRef.current = true;
       setPendingChoice(choice);
 
       const currentSession = session;
-      if (!currentSession) return;
+      if (!currentSession) {
+        processingRef.current = false;
+        return;
+      }
 
       const targetPref: PostCreationDecompositionPreference =
         choice === "decompose" ? "always_decompose" : "always_skip";
 
-      let saveFailed = false;
       if (remember) {
         try {
           await setPostCreationDecompositionPreference(targetPref);
         } catch {
-          saveFailed = true;
+          // Show the message inside the still-visible modal for ~1.2s so
+          // it is actually visible, then continue with navigation. Session
+          // is NOT cleared and navigation does NOT start before this
+          // interval completes.
           setErrorMessage("Your preference could not be saved.");
+          await new Promise<void>((resolve) => setTimeout(resolve, 1200));
         }
       }
 
-      // Navigate — this is the point where the caller's Promise is allowed
-      // to unblock.
+      // Navigate — this is the point where the caller's Promise unblocks.
       if (choice === "decompose") {
         goPlanning(currentSession.args.targetType, currentSession.args.targetId);
       } else {
         goDetail(currentSession.args.detailRoute);
       }
 
-      // If the save failed we surface the message but still resolve the
-      // outer Promise so the creation form no longer stays busy.
-      // (The error was shown inside the modal above.)
-      // eslint-disable-next-line no-unused-expressions
-      saveFailed;
-
       finishFlow();
     },
     [
-      pendingChoice,
       session,
       remember,
       setPostCreationDecompositionPreference,
@@ -153,7 +154,8 @@ export function usePostCreationDecomposition() {
       // always_ask — mount the modal and hold the promise open.
       const promise = new Promise<void>((resolve) => {
         resolveRef.current = resolve;
-        // Fresh session — reset checkbox / processing / error.
+        // Fresh session — reset checkbox / processing / error / re-entry ref.
+        processingRef.current = false;
         setRemember(false);
         setPendingChoice(null);
         setErrorMessage(null);
