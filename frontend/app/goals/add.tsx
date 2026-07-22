@@ -5,6 +5,7 @@ import { useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing, GOAL_STATUSES } from "@/src/lib/theme";
 import DateTimeField from "@/src/components/DateTimeField";
+import { usePostCreationDecomposition } from "@/src/lib/usePostCreationDecomposition";
 
 type Domain = { id: string; name: string };
 
@@ -164,18 +165,26 @@ export function GoalForm({ initial, onSubmit, headerTitle, submitLabel, testIDPr
 }
 
 export default function AddGoalScreen() {
-  const router = useRouter();
+  const { handleCreatedPlannableObject, element } = usePostCreationDecomposition();
   return (
-    <GoalForm
-      mode="add"
-      headerTitle="New Goal"
-      submitLabel="Create goal"
-      testIDPrefix="add-goal"
-      onSubmit={async (payload) => {
-        await api.createGoal(payload);
-        router.back();
-      }}
-    />
+    <>
+      <GoalForm
+        mode="add"
+        headerTitle="New Goal"
+        submitLabel="Create goal"
+        testIDPrefix="add-goal"
+        onSubmit={async (payload) => {
+          const created = await api.createGoal(payload);
+          await handleCreatedPlannableObject({
+            targetType: "goal",
+            targetId: created.id,
+            objectLabel: "Goal",
+            detailRoute: `/goals/${created.id}`,
+          });
+        }}
+      />
+      {element}
+    </>
   );
 }
 

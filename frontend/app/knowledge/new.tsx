@@ -17,6 +17,7 @@ import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing, CheckinCadence } from "@/src/lib/theme";
 import DateTimeField from "@/src/components/DateTimeField";
 import ConfirmModal from "@/src/components/ConfirmModal";
+import { usePostCreationDecomposition } from "@/src/lib/usePostCreationDecomposition";
 
 type JourneyType = "professional_qualification" | "skill" | "course" | "subject" | "book" | "custom";
 
@@ -85,6 +86,7 @@ function isStepValid(step: number, s: WizardState): boolean {
 
 export default function KnowledgeWizardScreen() {
   const router = useRouter();
+  const { handleCreatedPlannableObject, element: postCreationModal } = usePostCreationDecomposition();
   const [step, setStep] = useState(1);
   const [state, setState] = useState<WizardState>(initial);
   const [busy, setBusy] = useState(false);
@@ -161,7 +163,12 @@ export default function KnowledgeWizardScreen() {
         },
         checkin_cadence: state.cadence,
       });
-      router.replace(`/knowledge/${created.id}`);
+      await handleCreatedPlannableObject({
+        targetType: "journey",
+        targetId: created.id,
+        objectLabel: "Learning Journey",
+        detailRoute: `/knowledge/${created.id}`,
+      });
     } catch (e: any) {
       setError(e?.message || "Could not create journey. Please retry.");
     } finally {
@@ -432,6 +439,7 @@ export default function KnowledgeWizardScreen() {
         onConfirm={() => { setCancelOpen(false); router.back(); }}
         testID="wizard-cancel-confirm"
       />
+      {postCreationModal}
     </SafeAreaView>
   );
 }

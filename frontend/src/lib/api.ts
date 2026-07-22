@@ -44,25 +44,45 @@ async function request<T>(
   return data as T;
 }
 
+export type PostCreationDecompositionPreference =
+  | "always_ask"
+  | "always_decompose"
+  | "always_skip";
+
+export type UserResponse = {
+  id: string;
+  email: string;
+  portfolio_setup_completed_at?: string | null;
+  portfolio_reporting_currency?: string | null;
+  post_creation_decomposition_preference?: PostCreationDecompositionPreference;
+};
+
 export const api = {
   signup: (payload: {
     email: string;
     password: string;
     security_question: string;
     security_answer: string;
-  }) => request<{ access_token: string; user: { id: string; email: string } }>("/auth/signup", { method: "POST", body: payload }),
+  }) => request<{ access_token: string; user: UserResponse }>("/auth/signup", { method: "POST", body: payload }),
 
   login: (payload: { email: string; password: string }) =>
-    request<{ access_token: string; user: { id: string; email: string } }>("/auth/login", { method: "POST", body: payload }),
+    request<{ access_token: string; user: UserResponse }>("/auth/login", { method: "POST", body: payload }),
 
-  me: () => request<{ id: string; email: string }>("/auth/me", { auth: true }),
+  me: () => request<UserResponse>("/auth/me", { auth: true }),
 
   logout: () => request<{ detail: string }>("/auth/logout", { method: "POST", auth: true }),
 
   googleSession: (session_token: string) =>
-    request<{ access_token: string; user: { id: string; email: string } }>("/auth/google-session", {
+    request<{ access_token: string; user: UserResponse }>("/auth/google-session", {
       method: "POST",
       body: { session_token },
+    }),
+
+  updatePostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) =>
+    request<UserResponse>("/auth/preferences/post-creation-decomposition", {
+      method: "PATCH",
+      body: { preference },
+      auth: true,
     }),
 
   getSecurityQuestion: (email: string) =>

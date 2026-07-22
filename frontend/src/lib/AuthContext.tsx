@@ -8,11 +8,17 @@ import {
   startGoogleAuth,
 } from "./googleAuth";
 
+export type PostCreationDecompositionPreference =
+  | "always_ask"
+  | "always_decompose"
+  | "always_skip";
+
 export type User = {
   id: string;
   email: string;
   portfolio_setup_completed_at?: string | null;
   portfolio_reporting_currency?: string | null;
+  post_creation_decomposition_preference?: PostCreationDecompositionPreference;
 };
 
 type AuthState = {
@@ -23,6 +29,7 @@ type AuthState = {
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  setPostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) => Promise<User>;
 };
 
 const AuthContext = createContext<AuthState | undefined>(undefined);
@@ -114,8 +121,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
+  const setPostCreationDecompositionPreference = useCallback(
+    async (preference: PostCreationDecompositionPreference): Promise<User> => {
+      const updated = await api.updatePostCreationDecompositionPreference(preference);
+      setUser(updated);
+      return updated;
+    },
+    [],
+  );
+
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signInWithGoogle, signOut, refreshUser }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ user, loading, signIn, signUp, signInWithGoogle, signOut, refreshUser, setPostCreationDecompositionPreference }}>{children}</AuthContext.Provider>
   );
 };
 

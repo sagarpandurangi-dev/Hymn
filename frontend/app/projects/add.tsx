@@ -6,6 +6,7 @@ import { api } from "@/src/lib/api";
 import { colors, PROJECT_STATUSES, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
+import { usePostCreationDecomposition } from "@/src/lib/usePostCreationDecomposition";
 
 type Props = {
   initial?: { title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string } | null;
@@ -90,13 +91,24 @@ export function ProjectForm({ initial, headerTitle, submitLabel, testIDPrefix, o
 }
 
 export default function AddProjectScreen() {
-  const router = useRouter();
+  const { handleCreatedPlannableObject, element } = usePostCreationDecomposition();
   return (
-    <ProjectForm
-      headerTitle="New Project"
-      submitLabel="Create project"
-      testIDPrefix="add-project"
-      onSubmit={async (payload) => { await api.createProject(payload); router.back(); }}
-    />
+    <>
+      <ProjectForm
+        headerTitle="New Project"
+        submitLabel="Create project"
+        testIDPrefix="add-project"
+        onSubmit={async (payload) => {
+          const created = await api.createProject(payload);
+          await handleCreatedPlannableObject({
+            targetType: "project",
+            targetId: created.id,
+            objectLabel: "Project",
+            detailRoute: `/projects/${created.id}`,
+          });
+        }}
+      />
+      {element}
+    </>
   );
 }

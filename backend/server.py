@@ -63,11 +63,19 @@ class SecurityQuestionResponse(BaseModel):
     security_question: str
 
 
+POST_CREATION_DECOMPOSITION_PREFERENCES = ("always_ask", "always_decompose", "always_skip")
+
+
 class UserResponse(BaseModel):
     id: str
     email: EmailStr
     portfolio_setup_completed_at: Optional[str] = None
     portfolio_reporting_currency: Optional[str] = None
+    post_creation_decomposition_preference: str = "always_ask"
+
+
+class PostCreationDecompositionPreferenceUpdate(BaseModel):
+    preference: str
 
 
 class TokenResponse(BaseModel):
@@ -486,6 +494,9 @@ def user_to_response(u: dict) -> UserResponse:
         email=u["email"],
         portfolio_setup_completed_at=u.get("portfolio_setup_completed_at"),
         portfolio_reporting_currency=u.get("portfolio_reporting_currency"),
+        post_creation_decomposition_preference=u.get(
+            "post_creation_decomposition_preference", "always_ask",
+        ),
     )
 
 
@@ -720,6 +731,30 @@ async def forgot_password(body: ForgotPasswordRequest):
 @api_router.get("/auth/me", response_model=UserResponse)
 async def me(current_user: dict = Depends(get_current_user)):
     return user_to_response(current_user)
+
+
+@api_router.patch("/auth/preferences/post-creation-decomposition", response_model=UserResponse)
+async def update_post_creation_decomposition_preference(
+    body: PostCreationDecompositionPreferenceUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    if body.preference not in POST_CREATION_DECOMPOSITION_PREFERENCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"preference must be one of {list(POST_CREATION_DECOMPOSITION_PREFERENCES)}",
+        )
+    now = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$set": {
+            "post_creation_decomposition_preference": body.preference,
+            "updated_at": now,
+        }},
+    )
+    updated = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user_to_response(updated)
 
 
 @api_router.post("/auth/logout")

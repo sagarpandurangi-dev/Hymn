@@ -433,6 +433,15 @@ export default function KnowledgeJourneyDetail() {
           </View>
         </View>
 
+        <Pressable
+          onPress={() => router.push(`/planning/journey/${journey.id}` as any)}
+          testID="kj-plan-btn"
+          style={styles.planBtn}
+        >
+          <Ionicons name="git-network-outline" size={18} color={colors.onBrandPrimary} />
+          <Text style={styles.planBtnText}>Plan with Hymn</Text>
+        </Pressable>
+
         {journey.notes ? (
           <View style={styles.block}>
             <Text style={styles.sectionLabel}>WHY THIS MATTERS</Text>
@@ -661,6 +670,13 @@ const styles = StyleSheet.create({
   leafTitle: { fontSize: 14, color: colors.onSurface, fontWeight: "500" },
   leafMeta: { fontSize: 11, color: colors.onSurfaceTertiary, marginTop: 2 },
   checkinDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.brandPrimary },
+  planBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: spacing.sm, backgroundColor: colors.brandPrimary,
+    paddingVertical: spacing.md, paddingHorizontal: spacing.lg,
+    borderRadius: radius.md, marginTop: spacing.lg,
+  },
+  planBtnText: { color: colors.onBrandPrimary, fontWeight: "600", fontSize: 14 },
 });
 
 const sheetStyles = StyleSheet.create({

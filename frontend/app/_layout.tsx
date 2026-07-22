@@ -83,6 +83,7 @@ export default function RootLayout() {
           <Stack.Screen name="expected-outcomes/add" options={{ presentation: "modal" }} />
           <Stack.Screen name="expected-outcomes/edit/[id]" options={{ presentation: "modal" }} />
           <Stack.Screen name="settings/overlay" />
+          <Stack.Screen name="settings/decomposition" />
           <Stack.Screen name="me" />
           <Stack.Screen name="knowledge/new" options={{ presentation: "modal", gestureEnabled: false }} />
           <Stack.Screen name="knowledge/[id]" />
