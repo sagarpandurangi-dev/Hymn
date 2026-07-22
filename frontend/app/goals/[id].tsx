@@ -188,6 +188,15 @@ export default function GoalDetailScreen() {
             </View>
           ) : null}
 
+          <Pressable
+            onPress={() => router.push(`/planning/goal/${goal.id}`)}
+            testID="goal-detail-plan-btn"
+            style={styles.planBtn}
+          >
+            <Ionicons name="git-network-outline" size={18} color={colors.onBrandPrimary} />
+            <Text style={styles.planBtnText}>Plan with Hymn</Text>
+          </Pressable>
+
           {/* ── EXPECTED OUTCOMES ── */}
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
@@ -364,4 +373,11 @@ const styles = StyleSheet.create({
   eoTitle: { fontSize: 14, color: colors.onSurface, fontWeight: "500" },
   eoMeta: { fontSize: 11, color: colors.onSurfaceTertiary, marginTop: 2 },
   iconBtn: { padding: 4 },
+  planBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: spacing.sm, backgroundColor: colors.brandPrimary,
+    paddingVertical: spacing.md, paddingHorizontal: spacing.lg,
+    borderRadius: radius.md, marginTop: spacing.lg,
+  },
+  planBtnText: { color: colors.onBrandPrimary, fontFamily: fonts.displayBold, fontSize: 14 },
 });

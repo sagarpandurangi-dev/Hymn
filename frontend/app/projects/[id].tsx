@@ -66,6 +66,15 @@ export default function ProjectDetailScreen() {
             </Text>
           ) : null}
           {p.notes ? <Text style={styles.notes} testID="project-detail-notes">{p.notes}</Text> : null}
+
+          <Pressable
+            onPress={() => router.push(`/planning/project/${p.id}`)}
+            testID="project-detail-plan-btn"
+            style={styles.planBtn}
+          >
+            <Ionicons name="git-network-outline" size={18} color={colors.onBrandPrimary} />
+            <Text style={styles.planBtnText}>Plan with Hymn</Text>
+          </Pressable>
         </ScrollView>
       ) : null}
 
@@ -93,5 +102,12 @@ const styles = StyleSheet.create({
   desc: { fontSize: 15, color: colors.onSurfaceSecondary, marginTop: spacing.md },
   dates: { color: colors.onSurfaceSecondary, fontSize: 13, marginTop: spacing.md },
   notes: { fontSize: 15, color: colors.onSurface, marginTop: spacing.lg, lineHeight: 24 },
+  planBtn: {
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: spacing.sm, backgroundColor: colors.brandPrimary,
+    paddingVertical: spacing.md, paddingHorizontal: spacing.lg,
+    borderRadius: radius.md, marginTop: spacing.lg,
+  },
+  planBtnText: { color: colors.onBrandPrimary, fontFamily: fonts.displayBold, fontSize: 14 },
   _u: { borderRadius: radius.pill },
 });

@@ -438,4 +438,29 @@ export const api = {
     request<any>("/finance/shared-expenses/i-owe", { method: "POST", body: payload, auth: true }),
   sharedExpenseIPaid: (payload: { total_amount: string | number; currency: string; participants: string[]; event_date: string; description?: string; prepare_repayment_message?: boolean }) =>
     request<any>("/finance/shared-expenses/i-paid", { method: "POST", body: payload, auth: true }),
+
+  // -- Planning Engine --
+  planningAnalyze: (payload: { target_type: "goal" | "project" | "journey"; target_id: string }) =>
+    request<any>("/planning/analyze", { method: "POST", body: payload, auth: true }),
+  planningGetProposal: (id: string) =>
+    request<any>(`/planning/proposals/${id}`, { auth: true }),
+  planningListProposals: (target_type?: string, target_id?: string) => {
+    const params = new URLSearchParams();
+    if (target_type) params.append("target_type", target_type);
+    if (target_id) params.append("target_id", target_id);
+    const qs = params.toString() ? `?${params.toString()}` : "";
+    return request<any[]>(`/planning/proposals${qs}`, { auth: true });
+  },
+  planningConfirm: (
+    id: string,
+    confirmations: Array<{ field: string; action: "confirm" | "edit" | "reject" | "mark_unknown"; value?: any; note?: string }>,
+  ) => request<any>(`/planning/proposals/${id}/confirm`, { method: "POST", body: { confirmations }, auth: true }),
+  planningApprove: (id: string) =>
+    request<any>(`/planning/proposals/${id}/approve`, { method: "POST", auth: true }),
+  planningReject: (id: string) =>
+    request<any>(`/planning/proposals/${id}/reject`, { method: "POST", auth: true }),
+  planningPause: (id: string, future_allocations: "retain" | "reduce" | "release") =>
+    request<any>(`/planning/proposals/${id}/pause`, { method: "POST", body: { future_allocations }, auth: true }),
+  planningReassess: (payload: { target_type: "goal" | "project" | "journey"; target_id: string }) =>
+    request<any>("/planning/reassess", { method: "POST", body: payload, auth: true }),
 };
