@@ -6,13 +6,27 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { Stack, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import { colors, spacing, radius, fonts } from "@/src/lib/theme";
+
+type FactAction = "confirm" | "edit" | "reject" | "mark_unknown";
+
+type Fact = {
+  evidence_id: string;
+  field: string;
+  value: any;
+  evidence: string;
+  confidence: string;
+  source?: string;
+  note?: string;
+  blocking?: boolean;
+};
 
 type Proposal = {
   id: string;
@@ -22,16 +36,10 @@ type Proposal = {
   version: number;
   snapshot_hash: string;
   objective_summary?: string;
-  measurable_success_criteria?: string;
-  current_state: Array<{
-    field: string;
-    value: any;
-    evidence: string;
-    confidence: string;
-    source?: string;
-    note?: string;
-  }>;
-  confirmation_items: any[];
+  measurable_success_criteria?: string | null;
+  current_state: Fact[];
+  confirmations: Record<string, { action: FactAction; value?: any; note?: string; recorded_at?: string }>;
+  ready_to_generate?: boolean;
   blocking_questions: Array<{ field: string; question: string; why_blocking?: string }>;
   proposed_outcomes: any[];
   proposed_tasks: any[];
@@ -39,27 +47,28 @@ type Proposal = {
   visual_phases: Array<{ label: string; tasks: string[] }>;
   resource_requirements: any[];
   portfolio_conflicts: any[];
-  assumptions: string[];
+  assumptions: any[];
   external_estimates: any[];
-  risks: string[];
-  feasibility: { status: string; reasons: string[]; tradeoffs: string[]; alternatives: any[] };
+  risks: any[];
+  feasibility: {
+    status: string;
+    reasons: string[];
+    tradeoffs?: any[];
+    alternatives?: any[];
+    selected_tradeoff_id?: string | null;
+  };
   approval_actions: any[];
-  evidence_map: any[];
   validation_errors: string[];
-  created_at: string;
+  selected_tradeoff_id?: string | null;
+  commit_phase?: string | null;
   approved_at?: string;
   rejected_at?: string;
 };
 
-const confidenceStyle: Record<string, any> = {
-  high: { backgroundColor: colors.brandTertiary, color: colors.onBrandTertiary },
-  medium: { backgroundColor: "#F5E6C7", color: "#7A5C1C" },
-  low: { backgroundColor: "#F4D1CB", color: "#7A2B1E" },
-};
-
 const statusLabels: Record<string, string> = {
-  confirmation_required: "Awaiting confirmation",
+  confirmation_required: "Confirm current state",
   blocking_input_required: "Needs your input",
+  generating: "Generating proposal…",
   proposal_ready: "Ready to approve",
   infeasible: "Not currently feasible",
   approved: "Approved",
@@ -73,17 +82,22 @@ export default function PlanningScreen() {
   const params = useLocalSearchParams<{ targetType?: string; targetId?: string }>();
   const targetType = params.targetType as "goal" | "project" | "journey";
   const targetId = params.targetId!;
-  const router = useRouter();
 
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Batched decisions the user made in-session for the current view.
+  const [pending, setPending] = useState<
+    Record<string, { action: FactAction; value?: any }>
+  >({});
+
   const runAnalyze = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
+      setPending({});
       const p = await api.planningAnalyze({ target_type: targetType, target_id: targetId });
       setProposal(p);
     } catch (e: any) {
@@ -94,7 +108,6 @@ export default function PlanningScreen() {
   }, [targetType, targetId]);
 
   useEffect(() => {
-    // Try to load the latest existing proposal first; if none, analyze fresh.
     let cancelled = false;
     (async () => {
       try {
@@ -118,14 +131,54 @@ export default function PlanningScreen() {
     return () => { cancelled = true; };
   }, [runAnalyze, targetType, targetId]);
 
-  const confirmField = async (field: string, action: "confirm" | "reject" | "mark_unknown") => {
+  const setDecision = (field: string, action: FactAction, value?: any) => {
+    setPending((prev) => ({ ...prev, [field]: { action, value } }));
+  };
+
+  const submitAllConfirmations = async () => {
     if (!proposal) return;
+    const entries = Object.entries(pending).map(([field, v]) => ({
+      field,
+      action: v.action,
+      value: v.value,
+    }));
+    if (entries.length === 0) {
+      Alert.alert("Nothing to submit", "Confirm, edit, mark-unknown or reject at least one field.");
+      return;
+    }
     try {
-      setBusy(`confirm-${field}`);
-      const p = await api.planningConfirm(proposal.id, [{ field, action }]);
+      setBusy("confirm");
+      const p = await api.planningConfirm(proposal.id, entries);
       setProposal(p);
+      setPending({});
     } catch (e: any) {
       Alert.alert("Confirm failed", e.message || "Please try again");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const generate = async () => {
+    if (!proposal) return;
+    try {
+      setBusy("generate");
+      const p = await api.planningGenerate(proposal.id);
+      setProposal(p);
+    } catch (e: any) {
+      Alert.alert("Generate failed", e.message || "Please try again");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const selectTradeoff = async (id: string) => {
+    if (!proposal) return;
+    try {
+      setBusy("tradeoff");
+      const p = await api.planningSelectTradeoff(proposal.id, id);
+      setProposal(p);
+    } catch (e: any) {
+      Alert.alert("Trade-off selection failed", e.message || "Please try again");
     } finally {
       setBusy(null);
     }
@@ -135,18 +188,16 @@ export default function PlanningScreen() {
     if (!proposal) return;
     Alert.alert(
       "Approve proposal?",
-      "This will create the proposed outcomes, tasks, and reservations in your portfolio. It cannot be undone from here.",
+      "This will create the proposed outcomes, tasks, and reservations in your portfolio.",
       [
         { text: "Cancel", style: "cancel" },
         {
           text: "Approve",
-          style: "default",
           onPress: async () => {
             try {
               setBusy("approve");
               const res = await api.planningApprove(proposal.id);
               Alert.alert("Approved", `Committed ${res.committed_actions} action(s).`);
-              // Reload latest proposal to reflect new status.
               const p = await api.planningGetProposal(proposal.id);
               setProposal(p);
             } catch (e: any) {
@@ -188,6 +239,24 @@ export default function PlanningScreen() {
     ]);
   };
 
+  const feasibility = proposal?.feasibility?.status ?? "unknown";
+  const needsTradeoff = feasibility === "feasible_with_tradeoffs";
+  const canApprove = useMemo(() => {
+    if (!proposal) return false;
+    if (proposal.status !== "proposal_ready") return false;
+    if (proposal.validation_errors.length > 0) return false;
+    if (feasibility === "not_currently_feasible" || feasibility === "unknown") return false;
+    if (needsTradeoff && !proposal.selected_tradeoff_id) return false;
+    return true;
+  }, [proposal, feasibility, needsTradeoff]);
+
+  const stillBlocking = useMemo(() => (proposal?.current_state || []).some((f) => f.blocking), [proposal]);
+  const canGenerate = useMemo(() => {
+    if (!proposal) return false;
+    if (["approved", "rejected", "abandoned"].includes(proposal.status)) return false;
+    return !stillBlocking && (proposal.proposed_tasks?.length ?? 0) === 0;
+  }, [proposal, stillBlocking]);
+
   if (loading) {
     return (
       <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
@@ -217,10 +286,7 @@ export default function PlanningScreen() {
   if (!proposal) return null;
 
   const isTerminal = ["approved", "rejected", "abandoned"].includes(proposal.status);
-  const canApprove =
-    !isTerminal &&
-    proposal.validation_errors.length === 0 &&
-    ["feasible", "feasible_with_tradeoffs"].includes(proposal.feasibility.status);
+  const showConfirmForm = proposal.status === "confirmation_required" && (proposal.proposed_tasks?.length ?? 0) === 0;
 
   return (
     <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
@@ -232,46 +298,89 @@ export default function PlanningScreen() {
           <Text style={styles.title}>{proposal.objective_summary || "Objective"}</Text>
           <View style={styles.row}>
             <StatusPill status={proposal.status} />
-            <FeasibilityPill status={proposal.feasibility.status} />
+            <FeasibilityPill status={feasibility} />
           </View>
-          <Text style={styles.subtitle}>
-            {proposal.measurable_success_criteria || "Success criteria: unknown"}
-          </Text>
-          <Pressable onPress={runAnalyze} style={styles.reanalyzeBtn} disabled={busy === "analyze"}>
+          {proposal.measurable_success_criteria ? (
+            <Text style={styles.subtitle}>{proposal.measurable_success_criteria}</Text>
+          ) : null}
+          <Pressable onPress={runAnalyze} style={styles.reanalyzeBtn} disabled={!!busy}>
             <Ionicons name="refresh" size={16} color={colors.onSurfaceSecondary} />
             <Text style={styles.reanalyzeText}>Re-analyze from live portfolio</Text>
           </Pressable>
         </View>
 
-        {/* Current state */}
-        <Section title="Current state (from your portfolio)">
-          {proposal.current_state.map((f, i) => (
-            <View key={i} style={styles.factRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.factField}>{prettyField(f.field)}</Text>
-                <Text style={styles.factValue}>{prettyValue(f.value)}</Text>
-                {f.note ? <Text style={styles.factNote}>{f.note}</Text> : null}
-                <View style={styles.row}>
-                  <ConfidencePill confidence={f.confidence} />
-                  <Text style={styles.evidenceText}>via {f.evidence}</Text>
+        {/* Confirmation form */}
+        {showConfirmForm && (
+          <Section title="Confirm current state">
+            {proposal.current_state.map((f) => (
+              <ConfirmRow
+                key={f.evidence_id}
+                fact={f}
+                pending={pending[f.field]}
+                onDecision={setDecision}
+              />
+            ))}
+            <View style={styles.actionsCard}>
+              <Pressable
+                onPress={submitAllConfirmations}
+                disabled={!!busy}
+                style={[styles.primaryBtn, !!busy && styles.btnDisabled]}
+              >
+                {busy === "confirm" ? (
+                  <ActivityIndicator color={colors.onBrandPrimary} />
+                ) : (
+                  <Text style={styles.primaryBtnText}>Submit confirmations</Text>
+                )}
+              </Pressable>
+              <Text style={styles.helperText}>
+                All your decisions are submitted together in one request. No LLM call is made here.
+              </Text>
+            </View>
+          </Section>
+        )}
+
+        {/* Generate button */}
+        {!isTerminal && canGenerate && (
+          <View style={[styles.card, { marginTop: spacing.md }]}>
+            <Text style={styles.sectionTitle}>Ready to generate</Text>
+            <Text style={styles.helperText}>
+              All required fields are resolved. Generating will make one LLM call using only your confirmed context.
+            </Text>
+            <Pressable
+              onPress={generate}
+              disabled={!!busy}
+              style={[styles.primaryBtn, { marginTop: spacing.sm }, !!busy && styles.btnDisabled]}
+            >
+              {busy === "generate" ? (
+                <ActivityIndicator color={colors.onBrandPrimary} />
+              ) : (
+                <Text style={styles.primaryBtnText}>Generate proposal</Text>
+              )}
+            </Pressable>
+          </View>
+        )}
+
+        {/* Current state readout (post-confirm view) */}
+        {!showConfirmForm && (
+          <Section title="Current state">
+            {proposal.current_state.map((f) => (
+              <View key={f.evidence_id} style={styles.factRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.factField}>{prettyField(f.field)}</Text>
+                  <Text style={styles.factValue}>{prettyValue(f.value)}</Text>
+                  {f.note ? <Text style={styles.factNote}>{f.note}</Text> : null}
+                  <View style={styles.row}>
+                    <ConfidencePill confidence={f.confidence} />
+                    <Text style={styles.evidenceText}>via {f.evidence}</Text>
+                    {f.blocking ? (
+                      <Text style={[styles.evidenceText, { color: colors.error }]}>· blocking</Text>
+                    ) : null}
+                  </View>
                 </View>
               </View>
-              {!isTerminal && (
-                <View style={styles.factActions}>
-                  <Pressable onPress={() => confirmField(f.field, "confirm")} disabled={!!busy}>
-                    <Ionicons name="checkmark-circle" size={22} color={colors.success} />
-                  </Pressable>
-                  <Pressable onPress={() => confirmField(f.field, "mark_unknown")} disabled={!!busy}>
-                    <Ionicons name="help-circle" size={22} color={colors.warning} />
-                  </Pressable>
-                  <Pressable onPress={() => confirmField(f.field, "reject")} disabled={!!busy}>
-                    <Ionicons name="close-circle" size={22} color={colors.error} />
-                  </Pressable>
-                </View>
-              )}
-            </View>
-          ))}
-        </Section>
+            ))}
+          </Section>
+        )}
 
         {/* Blocking questions */}
         {proposal.blocking_questions.length > 0 && (
@@ -297,9 +406,7 @@ export default function PlanningScreen() {
                 {o.measurable_end_state ? (
                   <Text style={styles.itemDetail}>End state: {o.measurable_end_state}</Text>
                 ) : null}
-                {o.target_date && o.target_date !== "unknown" ? (
-                  <Text style={styles.itemDetail}>Target: {o.target_date}</Text>
-                ) : null}
+                {o.target_date ? <Text style={styles.itemDetail}>Target: {o.target_date}</Text> : null}
               </View>
             ))}
           </Section>
@@ -315,31 +422,19 @@ export default function PlanningScreen() {
                   <Text style={styles.itemDetail}>Done when: {t.completion_condition}</Text>
                 ) : null}
                 <View style={styles.metaRow}>
-                  {t.target_date && t.target_date !== "unknown" ? (
-                    <Text style={styles.itemMeta}>Due {t.target_date}</Text>
-                  ) : null}
+                  {t.target_date ? <Text style={styles.itemMeta}>Due {t.target_date}</Text> : null}
                   {t.required_resources?.time_minutes ? (
                     <Text style={styles.itemMeta}>{t.required_resources.time_minutes} min</Text>
                   ) : null}
                   {t.required_resources?.money?.amount ? (
                     <Text style={styles.itemMeta}>
-                      {t.required_resources.money.currency || ""} {t.required_resources.money.amount}
+                      {t.required_resources.money.currency} {t.required_resources.money.amount}
                     </Text>
                   ) : null}
+                  {t.reuse_existing_task_id ? (
+                    <Text style={[styles.itemMeta, { color: colors.brandSecondary }]}>reuse</Text>
+                  ) : null}
                 </View>
-                <ConfidencePill confidence={t.confidence || "low"} />
-              </View>
-            ))}
-          </Section>
-        )}
-
-        {/* Visual phases */}
-        {proposal.visual_phases.length > 0 && (
-          <Section title="Visual phases (display only)">
-            {proposal.visual_phases.map((p, i) => (
-              <View key={i} style={styles.phaseCard}>
-                <Text style={styles.phaseLabel}>{p.label}</Text>
-                <Text style={styles.itemDetail}>{p.tasks.length} task{p.tasks.length === 1 ? "" : "s"}</Text>
               </View>
             ))}
           </Section>
@@ -351,65 +446,86 @@ export default function PlanningScreen() {
             {proposal.portfolio_conflicts.map((c, i) => (
               <View key={i} style={styles.conflictCard}>
                 <Text style={styles.conflictKind}>{prettyField(c.kind)}</Text>
-                <Text style={styles.itemDetail}>{JSON.stringify(c.detail ?? c)}</Text>
+                <Text style={styles.itemDetail}>{JSON.stringify(c)}</Text>
               </View>
             ))}
           </Section>
         )}
 
-        {/* Feasibility reasons */}
-        {(proposal.feasibility.reasons.length > 0 || proposal.feasibility.alternatives.length > 0) && (
+        {/* Assumptions */}
+        {proposal.assumptions.length > 0 && (
+          <Section title="Assumptions (require your confirmation)">
+            {proposal.assumptions.map((a, i) => (
+              <View key={i} style={styles.itemCard}>
+                <Text style={styles.itemTitle}>{a.statement}</Text>
+                {a.range ? <Text style={styles.itemDetail}>Range: {a.range}</Text> : null}
+              </View>
+            ))}
+          </Section>
+        )}
+
+        {/* Feasibility + trade-offs */}
+        {feasibility !== "unknown" && (
           <Section title="Feasibility">
             {proposal.feasibility.reasons.map((r, i) => (
               <Text key={i} style={styles.reasonText}>• {prettyField(r)}</Text>
             ))}
-            {proposal.feasibility.alternatives.map((a: any, i: number) => (
-              <View key={i} style={styles.altCard}>
-                <Text style={styles.itemMeta}>{prettyField(a.conflict?.kind || "alternative")}</Text>
-                {(a.options || []).map((o: any, j: number) => (
-                  <Text key={j} style={styles.itemDetail}>→ {o.action}: {o.rationale}</Text>
+            {needsTradeoff && (
+              <View style={{ marginTop: spacing.sm }}>
+                <Text style={styles.helperText}>
+                  Select a trade-off before you can approve.
+                </Text>
+                {(proposal.feasibility.alternatives || []).map((alt: any, i: number) => (
+                  <View key={i}>
+                    <Text style={styles.itemMeta}>{prettyField(alt.kind || "alternative")}</Text>
+                    {(alt.options || []).map((opt: any) => {
+                      const selected = proposal.selected_tradeoff_id === opt.id;
+                      return (
+                        <Pressable
+                          key={opt.id}
+                          onPress={() => selectTradeoff(opt.id)}
+                          disabled={!!busy}
+                          style={[styles.tradeoffBtn, selected && styles.tradeoffBtnSelected]}
+                        >
+                          <Ionicons
+                            name={selected ? "radio-button-on" : "radio-button-off"}
+                            size={18}
+                            color={selected ? colors.brandPrimary : colors.onSurfaceSecondary}
+                          />
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.tradeoffTitle}>{prettyField(opt.action)}</Text>
+                            <Text style={styles.itemDetail}>{opt.rationale}</Text>
+                          </View>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
                 ))}
               </View>
-            ))}
+            )}
           </Section>
         )}
 
-        {/* Assumptions / risks */}
-        {proposal.assumptions.length > 0 && (
-          <Section title="Assumptions">
-            {proposal.assumptions.map((a, i) => (
-              <Text key={i} style={styles.reasonText}>• {a}</Text>
-            ))}
-          </Section>
-        )}
+        {/* Risks */}
         {proposal.risks.length > 0 && (
           <Section title="Risks">
             {proposal.risks.map((r, i) => (
-              <Text key={i} style={styles.reasonText}>• {r}</Text>
+              <Text key={i} style={styles.reasonText}>• {r.description}</Text>
             ))}
           </Section>
         )}
 
         {/* Validation errors */}
         {proposal.validation_errors.length > 0 && (
-          <Section title="Validation errors">
+          <Section title="Validation errors (approval blocked)">
             {proposal.validation_errors.map((e, i) => (
               <Text key={i} style={[styles.reasonText, { color: colors.error }]}>• {e}</Text>
             ))}
           </Section>
         )}
 
-        {/* Actions to approve */}
-        {!isTerminal && (
-          <Section title={`Actions if you approve (${proposal.approval_actions.length})`}>
-            {proposal.approval_actions.slice(0, 12).map((a, i) => (
-              <Text key={i} style={styles.itemDetail}>• {prettyField(a.action)}: {a.payload?.title || ""}</Text>
-            ))}
-          </Section>
-        )}
-
         {/* Approve / reject */}
-        {!isTerminal && (
+        {!isTerminal && (proposal.proposed_tasks?.length ?? 0) > 0 && (
           <View style={styles.actionsCard}>
             <Pressable
               onPress={approve}
@@ -428,7 +544,9 @@ export default function PlanningScreen() {
             <Text style={styles.helperText}>
               {canApprove
                 ? "Nothing is written until you approve."
-                : "Approval is blocked while the plan has validation errors, unknown feasibility, or open blocking questions."}
+                : needsTradeoff && !proposal.selected_tradeoff_id
+                  ? "Select a trade-off above before approving."
+                  : "Approval blocked while the plan has validation errors, unknown feasibility, or unresolved blockers."}
             </Text>
           </View>
         )}
@@ -436,6 +554,99 @@ export default function PlanningScreen() {
     </SafeAreaView>
   );
 }
+
+// ==========================================================================
+// Row for a single fact — supports confirm / edit / mark_unknown / reject.
+// ==========================================================================
+
+function ConfirmRow({
+  fact,
+  pending,
+  onDecision,
+}: {
+  fact: Fact;
+  pending?: { action: FactAction; value?: any };
+  onDecision: (field: string, action: FactAction, value?: any) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState<string>(
+    typeof fact.value === "string" ? fact.value : "",
+  );
+  const active = pending?.action;
+  return (
+    <View style={styles.factRow}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.factField}>{prettyField(fact.field)}</Text>
+        {editing ? (
+          <TextInput
+            value={editValue}
+            onChangeText={setEditValue}
+            onBlur={() => {
+              onDecision(fact.field, "edit", editValue);
+              setEditing(false);
+            }}
+            style={styles.editInput}
+            placeholder="Enter value"
+            placeholderTextColor={colors.onSurfaceTertiary}
+            autoFocus
+          />
+        ) : (
+          <Text style={styles.factValue}>{prettyValue(pending?.value ?? fact.value)}</Text>
+        )}
+        {fact.note ? <Text style={styles.factNote}>{fact.note}</Text> : null}
+        <View style={styles.row}>
+          <ConfidencePill confidence={fact.confidence} />
+          <Text style={styles.evidenceText}>via {fact.evidence}</Text>
+          {fact.blocking ? (
+            <Text style={[styles.evidenceText, { color: colors.error }]}>· blocking</Text>
+          ) : null}
+        </View>
+        {active ? (
+          <Text style={[styles.evidenceText, { color: colors.brandSecondary, marginTop: 4 }]}>
+            Pending: {active}
+          </Text>
+        ) : null}
+      </View>
+      <View style={styles.factActions}>
+        <Pressable
+          onPress={() => onDecision(fact.field, "confirm")}
+          hitSlop={8}
+        >
+          <Ionicons
+            name="checkmark-circle"
+            size={22}
+            color={active === "confirm" ? colors.success : colors.onSurfaceTertiary}
+          />
+        </Pressable>
+        <Pressable onPress={() => setEditing(true)} hitSlop={8}>
+          <Ionicons
+            name="create-outline"
+            size={22}
+            color={active === "edit" ? colors.brandPrimary : colors.onSurfaceTertiary}
+          />
+        </Pressable>
+        <Pressable onPress={() => onDecision(fact.field, "mark_unknown")} hitSlop={8}>
+          <Ionicons
+            name="help-circle"
+            size={22}
+            color={active === "mark_unknown" ? colors.warning : colors.onSurfaceTertiary}
+          />
+        </Pressable>
+        <Pressable onPress={() => onDecision(fact.field, "reject")} hitSlop={8}>
+          <Ionicons
+            name="close-circle"
+            size={22}
+            color={active === "reject" ? colors.error : colors.onSurfaceTertiary}
+          />
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+// ==========================================================================
+// Small components
+// ==========================================================================
 
 function StatusPill({ status }: { status: string }) {
   return (
@@ -461,10 +672,15 @@ function FeasibilityPill({ status }: { status: string }) {
 }
 
 function ConfidencePill({ confidence }: { confidence: string }) {
-  const c = confidenceStyle[confidence] || confidenceStyle.low;
+  const cmap: Record<string, { bg: string; fg: string }> = {
+    high: { bg: colors.brandTertiary, fg: colors.onBrandTertiary },
+    medium: { bg: "#F5E6C7", fg: "#7A5C1C" },
+    low: { bg: "#F4D1CB", fg: "#7A2B1E" },
+  };
+  const c = cmap[confidence] || cmap.low;
   return (
-    <View style={[styles.pillSmall, { backgroundColor: c.backgroundColor }]}>
-      <Text style={[styles.pillTextSmall, { color: c.color }]}>{confidence}</Text>
+    <View style={[styles.pillSmall, { backgroundColor: c.bg }]}>
+      <Text style={[styles.pillTextSmall, { color: c.fg }]}>{confidence}</Text>
     </View>
   );
 }
@@ -479,7 +695,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function prettyField(f: string) {
-  return f.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return String(f).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function prettyValue(v: any): string {
@@ -511,6 +727,7 @@ const styles = StyleSheet.create({
   factNote: { fontFamily: fonts.body, fontSize: 12, color: colors.onSurfaceTertiary, marginTop: 2, fontStyle: "italic" },
   factActions: { flexDirection: "row", gap: spacing.sm, paddingLeft: spacing.sm },
   evidenceText: { fontFamily: fonts.body, fontSize: 11, color: colors.onSurfaceTertiary },
+  editInput: { fontFamily: fonts.body, fontSize: 13, color: colors.onSurface, borderBottomWidth: 1, borderBottomColor: colors.borderStrong, paddingVertical: 4, marginTop: 4 },
   blockerCard: { paddingVertical: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   blockerField: { fontFamily: fonts.body, fontSize: 12, color: colors.brandSecondary, textTransform: "uppercase" },
   blockerQuestion: { fontFamily: fonts.displayBold, fontSize: 14, color: colors.onSurface, marginTop: 2 },
@@ -520,12 +737,12 @@ const styles = StyleSheet.create({
   itemDetail: { fontFamily: fonts.body, fontSize: 12, color: colors.onSurfaceSecondary, marginTop: 2 },
   itemMeta: { fontFamily: fonts.body, fontSize: 11, color: colors.onSurfaceTertiary },
   metaRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, marginTop: spacing.xs },
-  phaseCard: { paddingVertical: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  phaseLabel: { fontFamily: fonts.displayBold, fontSize: 13, color: colors.onSurface },
   conflictCard: { paddingVertical: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
   conflictKind: { fontFamily: fonts.displayBold, fontSize: 13, color: colors.error },
   reasonText: { fontFamily: fonts.body, fontSize: 13, color: colors.onSurfaceSecondary, marginTop: 2 },
-  altCard: { paddingVertical: spacing.sm },
+  tradeoffBtn: { flexDirection: "row", gap: spacing.sm, paddingVertical: spacing.sm, borderRadius: radius.md, alignItems: "flex-start" },
+  tradeoffBtnSelected: { backgroundColor: colors.surfaceTertiary },
+  tradeoffTitle: { fontFamily: fonts.displayBold, fontSize: 13, color: colors.onSurface },
   actionsCard: { marginTop: spacing.lg, gap: spacing.sm },
   primaryBtn: { backgroundColor: colors.brandPrimary, paddingVertical: spacing.md, borderRadius: radius.md, alignItems: "center" },
   primaryBtnText: { color: colors.onBrandPrimary, fontFamily: fonts.displayBold, fontSize: 15 },

@@ -455,6 +455,10 @@ export const api = {
     id: string,
     confirmations: Array<{ field: string; action: "confirm" | "edit" | "reject" | "mark_unknown"; value?: any; note?: string }>,
   ) => request<any>(`/planning/proposals/${id}/confirm`, { method: "POST", body: { confirmations }, auth: true }),
+  planningGenerate: (id: string) =>
+    request<any>(`/planning/proposals/${id}/generate`, { method: "POST", auth: true }),
+  planningSelectTradeoff: (id: string, tradeoff_id: string) =>
+    request<any>(`/planning/proposals/${id}/select-tradeoff`, { method: "POST", body: { tradeoff_id }, auth: true }),
   planningApprove: (id: string) =>
     request<any>(`/planning/proposals/${id}/approve`, { method: "POST", auth: true }),
   planningReject: (id: string) =>
