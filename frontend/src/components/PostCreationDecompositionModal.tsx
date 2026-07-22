@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import {
   Modal,
   Pressable,
@@ -14,24 +14,29 @@ export type DecompositionChoice = "decompose" | "skip";
 export type PostCreationDecompositionModalProps = {
   visible: boolean;
   objectLabel: string;
-  onChoose: (choice: DecompositionChoice, remember: boolean) => void;
+  /** Externally-controlled remember flag. */
+  remember: boolean;
+  /** Toggle handler for the checkbox. */
+  onRememberChange: (next: boolean) => void;
+  /** Selection handler. Both buttons + the checkbox are disabled until the
+   * parent hook completes the flow. */
+  onChoose: (choice: DecompositionChoice) => void;
+  /** Which choice, if any, has been picked in the current session. */
+  pendingChoice: DecompositionChoice | null;
+  /** Non-blocking error surfaced when preference saving fails. */
+  errorMessage?: string | null;
 };
 
 export function PostCreationDecompositionModal({
   visible,
   objectLabel,
+  remember,
+  onRememberChange,
   onChoose,
+  pendingChoice,
+  errorMessage,
 }: PostCreationDecompositionModalProps) {
-  const [remember, setRemember] = useState(false);
-  const [pending, setPending] = useState<DecompositionChoice | null>(null);
-
-  const disabled = pending !== null;
-
-  const handle = (choice: DecompositionChoice) => {
-    if (disabled) return;
-    setPending(choice);
-    onChoose(choice, remember);
-  };
+  const disabled = pendingChoice !== null;
 
   return (
     <Modal
@@ -39,7 +44,7 @@ export function PostCreationDecompositionModal({
       transparent
       animationType="fade"
       onRequestClose={() => {
-        // No-op — this modal must not be dismissed without a decision.
+        // No-op — the modal must not be dismissed without a decision.
       }}
     >
       <View style={styles.backdrop}>
@@ -50,9 +55,13 @@ export function PostCreationDecompositionModal({
           </Text>
 
           <Pressable
-            onPress={() => setRemember((v) => !v)}
-            style={styles.rememberRow}
+            onPress={() => {
+              if (disabled) return;
+              onRememberChange(!remember);
+            }}
+            style={[styles.rememberRow, disabled && styles.btnDisabled]}
             hitSlop={4}
+            disabled={disabled}
             testID="pcdm-remember"
           >
             <Ionicons
@@ -60,12 +69,12 @@ export function PostCreationDecompositionModal({
               size={20}
               color={remember ? colors.brandPrimary : colors.onSurfaceSecondary}
             />
-            <Text style={styles.rememberText}>Remember my choice</Text>
+            <Text style={styles.rememberText}>Remember this choice</Text>
           </Pressable>
 
           <View style={styles.actionsRow}>
             <Pressable
-              onPress={() => handle("skip")}
+              onPress={() => onChoose("skip")}
               disabled={disabled}
               style={[styles.secondaryBtn, disabled && styles.btnDisabled]}
               testID="pcdm-skip"
@@ -73,14 +82,20 @@ export function PostCreationDecompositionModal({
               <Text style={styles.secondaryBtnText}>Skip for now</Text>
             </Pressable>
             <Pressable
-              onPress={() => handle("decompose")}
+              onPress={() => onChoose("decompose")}
               disabled={disabled}
               style={[styles.primaryBtn, disabled && styles.btnDisabled]}
               testID="pcdm-decompose"
             >
-              <Text style={styles.primaryBtnText}>Decompose now</Text>
+              <Text style={styles.primaryBtnText}>Break it down now</Text>
             </Pressable>
           </View>
+
+          {errorMessage ? (
+            <Text style={styles.errorText} testID="pcdm-error">
+              {errorMessage}
+            </Text>
+          ) : null}
         </View>
       </View>
     </Modal>
@@ -126,4 +141,11 @@ const styles = StyleSheet.create({
   },
   secondaryBtnText: { color: colors.onSurface, fontFamily: fonts.body, fontSize: 14 },
   btnDisabled: { opacity: 0.5 },
+  errorText: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    color: colors.error,
+    marginTop: spacing.xs,
+    textAlign: "center",
+  },
 });
