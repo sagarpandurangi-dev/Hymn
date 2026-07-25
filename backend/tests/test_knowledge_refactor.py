@@ -14,7 +14,7 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://personal-os-app-8.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 API = f"{BASE_URL}/api"
 
 

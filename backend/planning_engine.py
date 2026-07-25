@@ -1,4 +1,4 @@
-"""Hymn Planning Engine — deterministic → confirm → generate → approve.
+"""Hymn Planning Engine — analyze → confirm → generate → approve.
 
 Pipeline (§1 of the spec):
 
@@ -9,15 +9,15 @@ Pipeline (§1 of the spec):
 * **B. Confirm** — batched. Persists and merges confirmations for every
   field in one request. Never discards a prior confirmation. Builds the
   ``resolved_context`` used downstream.
-* **C. Generate** — single LLM call with the compact resolved context,
-  deterministic capacity summaries, and evidence IDs. Deterministic code
-  computes capacity, conflicts, duplicates, dependency validity, dates,
-  and feasibility after the LLM returns.
+* **C. Generate** — provider-neutral generation from the compact resolved
+  context, deterministic capacity summaries, and evidence IDs. The Foundation
+  implementation is local-only and never invents tasks or calls a remote
+  service.
 * **D. Approve** — only when status = ``proposal_ready``. Snapshot drift
   triggers 409. Uses a durable state machine (preparing → applying →
   committed / failed) so partial commits are rolled back.
 
-The LLM is constrained by strict Pydantic response models with
+Generated plans are constrained by strict Pydantic response models with
 ``extra='forbid'`` and enum + date validation. No hard-coded fallback
 estimates. No invented sources. External estimates are always empty.
 """
@@ -27,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
@@ -35,14 +34,12 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 from bson.decimal128 import Decimal128
-from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field
 
 from deps import get_current_user, get_db
 from portfolio_manager import compute_time_union_and_overlap
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
 planning_router = APIRouter(prefix="/planning", tags=["planning"])
@@ -713,8 +710,8 @@ def _apply_confirmations(current_state: List[dict], confirmations: Dict[str, dic
 
 
 def _resolved_context(current_state: List[dict]) -> Dict[str, Any]:
-    """Build the compact context handed to the LLM: field → confirmed value.
-    Blocking / unknown fields carry ``value=None`` so the LLM cannot invent."""
+    """Build the compact generator context: field → confirmed value.
+    Blocking / unknown fields carry ``value=None`` so generation cannot invent."""
     return {f["field"]: {
         "value": f.get("value"),
         "evidence_id": f.get("evidence_id"),
@@ -729,7 +726,7 @@ def _blocking_fields(current_state: List[dict]) -> List[str]:
 
 
 # ============================================================================
-# Compact LLM context — never send the raw full portfolio (§1C).
+# Compact generator context — never expose the raw full portfolio (§1C).
 # ============================================================================
 
 def _compact_llm_context(
@@ -792,7 +789,7 @@ def _compact_llm_context(
 
 
 # ============================================================================
-# Strict Pydantic LLM output contract (§5).
+# Strict Pydantic generated-plan contract (§5).
 # ============================================================================
 
 class LLMResourceMoney(BaseModel):
@@ -1008,40 +1005,61 @@ def _extract_json(text: str) -> Optional[dict]:
         return None
 
 
-async def _llm_call(compact_ctx: Dict[str, Any], target_type: str, target_id: str) -> Tuple[Optional[LLMResponse], List[str]]:
-    """Single LLM call. Returns (parsed_response, errors). ``errors`` is the
-    list of validation problems raised by the strict schema — the caller
-    surfaces them in the proposal's validation_errors so the user can see
-    why generation failed."""
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
-    if not api_key:
-        return None, ["LLM key not configured — proposal cannot be generated."]
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage  # noqa: WPS433
-    except Exception as exc:  # pragma: no cover
-        return None, [f"LLM library unavailable: {type(exc).__name__}: {exc}"]
+def _generate_plan_locally(
+    compact_ctx: Dict[str, Any],
+    target_type: str,
+    target_id: str,
+) -> LLMResponse:
+    """Return a deterministic Foundation plan without network access.
 
-    chat = LlmChat(
-        api_key=api_key,
-        session_id=f"planning-{target_type}-{target_id}-{_now()}",
-        system_message=_LLM_SYSTEM,
-    ).with_model("anthropic", "claude-sonnet-4-6")
+    The local generator preserves the response contract and useful confirmed
+    context, but deliberately refuses to invent outcomes, tasks, estimates,
+    or dependencies. A blocking question makes that limitation explicit and
+    prevents approval of an empty plan.
+    """
+    del target_id  # The target remains represented in compact_ctx.
+    resolved = compact_ctx.get("resolved_context") or {}
+    target_summary = compact_ctx.get("target_summary") or {}
+    objective = (resolved.get("objective") or {}).get("value")
+    success = (resolved.get("success_criteria") or {}).get("value")
+    risks: List[LLMRisk] = []
 
-    prompt = _LLM_INSTRUCTIONS + "\n\nCONTEXT:\n" + _stable_json(compact_ctx)
-    try:
-        response = await chat.send_message(UserMessage(text=prompt))
-    except Exception as exc:  # pragma: no cover
-        return None, [f"LLM call failed: {type(exc).__name__}: {exc}"]
+    time_capacity = ((compact_ctx.get("capacity") or {}).get("time") or {})
+    if time_capacity.get("status") != "known":
+        risks.append(
+            LLMRisk(
+                description=(
+                    "Time capacity is unknown because the local portfolio "
+                    "does not contain enough scheduled commitment coverage."
+                ),
+            )
+        )
+    money_capacity = ((compact_ctx.get("capacity") or {}).get("money") or {})
+    if money_capacity.get("has_unknown_due_dates"):
+        risks.append(
+            LLMRisk(
+                description=(
+                    "Some money reservations have unknown due dates, so "
+                    "monthly feasibility cannot be determined."
+                ),
+            )
+        )
 
-    text = response if isinstance(response, str) else str(response)
-    parsed = _extract_json(text)
-    if not parsed:
-        return None, ["LLM returned unparseable output."]
-
-    try:
-        return LLMResponse(**parsed), []
-    except ValidationError as exc:
-        return None, [f"LLM output failed contract: {exc.errors()[:3]}"]
+    return LLMResponse(
+        objective_summary=str(objective or target_summary.get("title") or target_type.title()),
+        measurable_success_criteria=str(success) if success is not None else None,
+        blocking_questions=[
+            LLMBlockingQuestion(
+                field="plan_items",
+                question="Add or confirm concrete outcomes and tasks before approval.",
+                why_blocking=(
+                    "Foundation generation is local and deterministic; it "
+                    "does not invent plan items or estimates."
+                ),
+            )
+        ],
+        risks=risks,
+    )
 
 
 # ============================================================================
@@ -1523,9 +1541,13 @@ async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[st
     money_capacity = _money_capacity_summary(snapshot)
 
     compact = _compact_llm_context(snapshot, resolved, time_capacity, money_capacity)
-    llm_out, llm_errors = await _llm_call(compact, snapshot["target_type"], snapshot["target_id"])
+    llm_out = _generate_plan_locally(
+        compact,
+        snapshot["target_type"],
+        snapshot["target_id"],
+    )
 
-    validation_errors: List[str] = list(llm_errors)
+    validation_errors: List[str] = []
     portfolio_conflicts: List[dict] = []
     approval_actions: List[dict] = []
 
@@ -1559,9 +1581,12 @@ async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[st
             llm_out, snapshot["target_type"], snapshot["target_id"],
             (snapshot.get("linked_goal") or {}).get("id"),
         )
-    feasibility = (_feasibility(llm_out, time_capacity, money_capacity, portfolio_conflicts)
-                   if llm_out else {"status": "unknown", "reasons": ["llm_output_invalid"],
-                                     "tradeoffs": [], "alternatives": []})
+    feasibility = _feasibility(
+        llm_out,
+        time_capacity,
+        money_capacity,
+        portfolio_conflicts,
+    )
 
     # Roll-ups
     resource_requirements: List[dict] = []
@@ -1616,6 +1641,8 @@ async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[st
     # Status determination
     if validation_errors:
         proposal["status"] = "blocking_input_required" if proposal["blocking_questions"] else "infeasible"
+    elif proposal["blocking_questions"]:
+        proposal["status"] = "blocking_input_required"
     elif feasibility["status"] == "not_currently_feasible":
         proposal["status"] = "infeasible"
     elif feasibility["status"] == "unknown":
@@ -1776,8 +1803,10 @@ async def confirm_proposal(
 
 @planning_router.post("/proposals/{proposal_id}/generate")
 async def generate_proposal(proposal_id: str, current_user: dict = Depends(get_current_user)):
-    """Single LLM call + deterministic validation (§1C). Only permitted once
-    all current-state blockers are resolved."""
+    """Generate locally with deterministic validation (§1C).
+
+    Only permitted once all current-state blockers are resolved.
+    """
     db = get_db()
     proposal = await _load_proposal(db, current_user["id"], proposal_id)
     _require(

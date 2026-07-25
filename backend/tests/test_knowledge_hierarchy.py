@@ -19,14 +19,7 @@ import uuid
 import pytest
 import requests
 
-BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "").rstrip("/")
-if not BASE_URL:
-    # Fall back to the value in frontend/.env so pytest can be run stand-alone.
-    with open("/app/frontend/.env") as f:
-        for line in f:
-            if line.startswith("EXPO_PUBLIC_BACKEND_URL="):
-                BASE_URL = line.split("=", 1)[1].strip().rstrip("/")
-                break
+BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 API = f"{BASE_URL}/api"
 
 

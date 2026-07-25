@@ -49,7 +49,6 @@ export default function DateTimeField({ mode, value, onChange, placeholder, clea
     // Rendered via createElement to avoid RN-Web warning about unknown DOM props.
     return (
       <View style={styles.wrap} testID={testID}>
-        {/* @ts-expect-error web-only element */}
         <input
           type={mode === "date" ? "date" : "time"}
           value={value}

@@ -4,9 +4,10 @@ Uses a minimal goal so the LLM's proposed_tasks return specific dates. We
 manually verify approval writes live data through the existing endpoints.
 """
 import asyncio, httpx, os, sys
+from pathlib import Path
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
-load_dotenv('/app/backend/.env')
+load_dotenv(Path(__file__).resolve().parents[1] / "backend" / ".env.test")
 
 BASE = "http://localhost:8001/api"
 

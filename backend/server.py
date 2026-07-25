@@ -11,9 +11,9 @@ from pathlib import Path
 from pydantic import BaseModel, EmailStr, Field
 from typing import Any, List, Optional
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-import httpx
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -21,10 +21,52 @@ load_dotenv(ROOT_DIR / ".env")
 # ---------- Config ----------
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
-JWT_SECRET = os.environ.get("JWT_SECRET", "hymn-dev-secret-change-in-prod")
+RUNTIME_MODE = os.environ.get("HYMN_RUNTIME_MODE", "production").strip().lower()
 JWT_ALG = "HS256"
 # Long-lived token; client-side logout controls session end.
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 days
+_TEST_JWT_SECRET = "hymn-foundation-deterministic-test-secret"
+_LOCAL_CORS_DEFAULTS = (
+    "http://127.0.0.1:8081",
+    "http://localhost:8081",
+    "http://127.0.0.1:19006",
+    "http://localhost:19006",
+)
+
+
+def _resolve_jwt_secret(runtime_mode: str, configured: Optional[str]) -> str:
+    if configured and configured.strip():
+        return configured.strip()
+    if runtime_mode == "test":
+        return _TEST_JWT_SECRET
+    raise RuntimeError("JWT_SECRET is required outside HYMN_RUNTIME_MODE=test")
+
+
+def _resolve_cors_allowed_origins(
+    runtime_mode: str,
+    configured: Optional[str],
+) -> List[str]:
+    if configured and configured.strip():
+        origins = [item.strip().rstrip("/") for item in configured.split(",") if item.strip()]
+    elif runtime_mode in {"local", "test"}:
+        origins = list(_LOCAL_CORS_DEFAULTS)
+    else:
+        raise RuntimeError("CORS_ALLOWED_ORIGINS is required outside local/test mode")
+
+    if not origins or "*" in origins:
+        raise RuntimeError("CORS_ALLOWED_ORIGINS must list explicit origins; '*' is not allowed")
+    for origin in origins:
+        parsed = urlparse(origin)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path not in {"", "/"}:
+            raise RuntimeError(f"Invalid CORS origin: {origin}")
+    return origins
+
+
+JWT_SECRET = _resolve_jwt_secret(RUNTIME_MODE, os.environ.get("JWT_SECRET"))
+CORS_ALLOWED_ORIGINS = _resolve_cors_allowed_origins(
+    RUNTIME_MODE,
+    os.environ.get("CORS_ALLOWED_ORIGINS"),
+)
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -53,10 +95,6 @@ class ForgotPasswordRequest(BaseModel):
     email: EmailStr
     security_answer: str
     new_password: str = Field(min_length=6)
-
-
-class GoogleSessionRequest(BaseModel):
-    session_token: str
 
 
 class SecurityQuestionResponse(BaseModel):
@@ -462,19 +500,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         detail="Invalid or expired token",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    # Try session_token (Google) first — cheap DB lookup.
-    session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
-    if session:
-        expires_at = session.get("expires_at")
-        if isinstance(expires_at, datetime):
-            exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
-            if exp < datetime.now(timezone.utc):
-                raise credentials_exc
-        user = await db.users.find_one({"id": session["user_id"]})
-        if not user:
-            raise credentials_exc
-        return user
-    # Fallback: JWT (email/password flow).
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
         user_id: str = payload.get("sub")
@@ -692,7 +717,12 @@ async def signup(body: SignUpRequest):
 async def login(body: LoginRequest):
     email = body.email.lower().strip()
     user = await db.users.find_one({"email": email})
-    if not user or not verify_password(body.password, user["hashed_password"]):
+    if not user:
+        raise HTTPException(status_code=400, detail="Incorrect email or password")
+    password_hash = user.get("hashed_password")
+    if not isinstance(password_hash, str) or not password_hash:
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    if not verify_password(body.password, password_hash):
         raise HTTPException(status_code=400, detail="Incorrect email or password")
     token = create_access_token(user["id"])
     return TokenResponse(access_token=token, user=user_to_response(user))
@@ -758,68 +788,9 @@ async def update_post_creation_decomposition_preference(
 
 
 @api_router.post("/auth/logout")
-async def logout(current_user: dict = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
-    # Stateless JWT for email/password users. For Google users, delete their session row.
-    await db.user_sessions.delete_one({"session_token": token})
+async def logout(current_user: dict = Depends(get_current_user)):
+    # JWTs are stateless. The client completes logout by deleting its token.
     return {"detail": "Logged out"}
-
-
-@api_router.post("/auth/google-session", response_model=TokenResponse)
-async def google_session(body: GoogleSessionRequest):
-    """Verify session_token with Emergent auth service, upsert user, persist session."""
-    session_token = body.session_token.strip()
-    if not session_token:
-        raise HTTPException(status_code=400, detail="Missing session token")
-    async with httpx.AsyncClient(timeout=10.0) as http_client:
-        try:
-            resp = await http_client.get(
-                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-                headers={"X-Session-ID": session_token},
-            )
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"Auth service unreachable: {e}")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid Google session")
-    data = resp.json()
-    email = (data.get("email") or "").lower().strip()
-    if not email:
-        raise HTTPException(status_code=401, detail="Google session missing email")
-    verified_token = data.get("session_token") or session_token
-
-    now = datetime.now(timezone.utc)
-    existing = await db.users.find_one({"email": email})
-    if existing:
-        user_id = existing["id"]
-        await db.users.update_one(
-            {"id": user_id},
-            {"$set": {"updated_at": now.isoformat(), "google_name": data.get("name"), "google_picture": data.get("picture")}},
-        )
-    else:
-        user_id = str(uuid.uuid4())
-        await db.users.insert_one({
-            "id": user_id,
-            "email": email,
-            "hashed_password": None,
-            "security_question": None,
-            "hashed_security_answer": None,
-            "auth_provider": "google",
-            "google_name": data.get("name"),
-            "google_picture": data.get("picture"),
-            "created_at": now.isoformat(),
-            "updated_at": now.isoformat(),
-        })
-
-    await db.user_sessions.update_one(
-        {"session_token": verified_token},
-        {"$set": {
-            "session_token": verified_token,
-            "user_id": user_id,
-            "expires_at": now + timedelta(days=7),
-            "created_at": now,
-        }},
-        upsert=True,
-    )
-    return TokenResponse(access_token=verified_token, user=UserResponse(id=user_id, email=email))
 
 
 # ---------- Domain Routes ----------
@@ -2564,7 +2535,7 @@ app.include_router(api_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2580,9 +2551,6 @@ logger = logging.getLogger(__name__)
 async def startup_indexes():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
-    await db.user_sessions.create_index("session_token", unique=True)
-    await db.user_sessions.create_index("user_id")
-    await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
     await ensure_portfolio_indexes(db)
     await ensure_finance_indexes(db)
     await ensure_finance_advanced_indexes(db)

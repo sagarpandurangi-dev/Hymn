@@ -25,7 +25,7 @@ function loadRules() {
   try {
     const parsed = JSON.parse(fs.readFileSync(RULES_PATH, "utf8"));
     if (isFlatList(parsed)) return { list: parsed, source: "injected" };
-  } catch (e) {
+  } catch (_error) {
     // missing or malformed -> baked default
   }
   return { list: DEFAULT_LIST, source: "baked" };

@@ -1,0 +1,22 @@
+name: hymn-local
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: hymn-local-mongodb
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - hymn_mongodb_data:/data/db
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/01-hymn-databases.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  hymn_mongodb_data:
+    name: hymn-local-mongodb-data

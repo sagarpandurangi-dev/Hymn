@@ -1,12 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { api } from "./api";
 import { clearToken, getToken, saveToken } from "./tokenStorage";
-import {
-  clearWebSessionIdFromUrl,
-  extractSessionIdFromWebUrl,
-  getInitialSessionIdMobile,
-  startGoogleAuth,
-} from "./googleAuth";
 
 export type PostCreationDecompositionPreference =
   | "always_ask"
@@ -26,7 +20,6 @@ type AuthState = {
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, securityQuestion: string, securityAnswer: string) => Promise<void>;
-  signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
   setPostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) => Promise<User>;
@@ -41,22 +34,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     (async () => {
       try {
-        // 1) Process a redirected Google session_id first (web on-load or mobile cold-start).
-        const webSid = extractSessionIdFromWebUrl();
-        const mobileSid = webSid ? null : await getInitialSessionIdMobile();
-        const sid = webSid || mobileSid;
-        if (sid) {
-          try {
-            const res = await api.googleSession(sid);
-            await saveToken(res.access_token);
-            setUser(res.user);
-            clearWebSessionIdFromUrl();
-            return;
-          } catch {
-            clearWebSessionIdFromUrl();
-            // fall through to normal token check
-          }
-        }
         const token = await getToken();
         if (!token) {
           setUser(null);
@@ -103,15 +80,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
   }, []);
 
-  const signInWithGoogle = useCallback(async () => {
-    const sid = await startGoogleAuth();
-    // On web, the browser has already navigated away; nothing more to do here.
-    if (!sid) return;
-    const res = await api.googleSession(sid);
-    await saveToken(res.access_token);
-    setUser(res.user);
-  }, []);
-
   const refreshUser = useCallback(async () => {
     try {
       const me = await api.me();
@@ -131,7 +99,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signInWithGoogle, signOut, refreshUser, setPostCreationDecompositionPreference }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut, refreshUser, setPostCreationDecompositionPreference }}>{children}</AuthContext.Provider>
   );
 };
 
