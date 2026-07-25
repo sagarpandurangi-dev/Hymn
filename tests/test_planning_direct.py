@@ -6,9 +6,11 @@ Skips the LLM entirely so we can verify:
 - Rollback on partial failure.
 """
 import asyncio, os, sys, httpx, hashlib, json
+from pathlib import Path
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
-load_dotenv('/app/backend/.env')
+ROOT = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT / "backend" / ".env.test")
 
 BASE = "http://localhost:8001/api"
 
@@ -35,7 +37,7 @@ async def run():
         pid_proj = r.json()["id"]
 
     # Compute snapshot hash the same way the engine does.
-    sys.path.insert(0, "/app/backend")
+    sys.path.insert(0, str(ROOT / "backend"))
     from planning_engine import _read_snapshot, _snapshot_hash
 
     snap = await _read_snapshot(mdb, uid, "project", pid_proj)

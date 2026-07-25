@@ -72,12 +72,6 @@ export const api = {
 
   logout: () => request<{ detail: string }>("/auth/logout", { method: "POST", auth: true }),
 
-  googleSession: (session_token: string) =>
-    request<{ access_token: string; user: UserResponse }>("/auth/google-session", {
-      method: "POST",
-      body: { session_token },
-    }),
-
   updatePostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) =>
     request<UserResponse>("/auth/preferences/post-creation-decomposition", {
       method: "PATCH",
@@ -154,7 +148,7 @@ export const api = {
     if (params?.includeCompleted === false) parts.push("include_completed=false");
     const qs = parts.length ? `?${parts.join("&")}` : "";
     return request<
-      { id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }[]
+      { id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; component_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }[]
     >(`/tasks${qs}`, { auth: true });
   },
   createTask: (payload: { title: string; due_date?: string; priority?: string; status?: string; notes?: string; origin: string; expected_outcome_id?: string | null; project_id?: string | null }) =>
@@ -179,7 +173,7 @@ export const api = {
     if (params?.q && params.q.trim()) bits.push(`q=${encodeURIComponent(params.q.trim())}`);
     const qs = bits.length ? `?${bits.join("&")}` : "";
     return request<
-      { id: string; type: string; title: string; date: string; time: string; notes: string; attachment: string; expected_outcome_id: string | null; goal_id: string | null; project_id: string | null; task_id: string | null; follow_up_task_id: string | null; money_spent: string | null; money_currency: string | null }[]
+      { id: string; type: string; title: string; date: string; time: string; notes: string; attachment: string; expected_outcome_id: string | null; goal_id: string | null; project_id: string | null; task_id: string | null; component_id: string | null; follow_up_task_id: string | null; money_spent: string | null; money_currency: string | null }[]
     >(`/checkins${qs}`, { auth: true });
   },
   getSpending: (date: string) =>
@@ -473,7 +467,7 @@ export const api = {
   },
   planningConfirm: (
     id: string,
-    confirmations: Array<{ field: string; action: "confirm" | "edit" | "reject" | "mark_unknown"; value?: any; note?: string }>,
+    confirmations: { field: string; action: "confirm" | "edit" | "reject" | "mark_unknown"; value?: any; note?: string }[],
   ) => request<any>(`/planning/proposals/${id}/confirm`, { method: "POST", body: { confirmations }, auth: true }),
   planningGenerate: (id: string) =>
     request<any>(`/planning/proposals/${id}/generate`, { method: "POST", auth: true }),

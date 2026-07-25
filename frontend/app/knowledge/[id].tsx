@@ -91,7 +91,7 @@ function ComponentSheet({
     } else {
       setName(""); setType(""); setStatus("not_started"); setProgress("0"); setNotes(""); setErr(null);
     }
-  }, [visible, initial?.component?.id, initial?.mode]);
+  }, [visible, initial]);
 
   const save = async (journeyId: string) => {
     setErr(null);

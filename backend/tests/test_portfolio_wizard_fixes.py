@@ -1,8 +1,8 @@
 """Portfolio Onboarding Wizard bug-fix backend verification.
 
-Focus per iteration 15 review request:
-  A) POST /api/portfolio/time-commitments with end_time="24:00" succeeds.
-  B) POST with end_time <= start_time (and end_time != 24:00) -> 400.
+Focus per strict time-validation review:
+  A) POST /api/portfolio/time-commitments with end_time="24:00" is rejected.
+  B) POST with end_time <= start_time -> 400.
   C) Weekly capacity endpoint reflects a newly-created block using
      effective_from = current local Monday.
 """
@@ -62,9 +62,9 @@ def cleanup_ids(auth_headers):
 
 
 # ---------------------------------------------------------------------------
-# A) end_time == "24:00" is a valid sentinel meaning "end of day"
+# A) end_time == "24:00" is outside the accepted 00:00-23:59 range.
 # ---------------------------------------------------------------------------
-def test_end_time_24_00_accepted(auth_headers, cleanup_ids):
+def test_end_time_24_00_rejected_without_persistence(auth_headers):
     monday = _monday_iso()
     payload = {
         "title": f"TEST_sleep_night_{uuid.uuid4().hex[:6]}",
@@ -82,15 +82,18 @@ def test_end_time_24_00_accepted(auth_headers, cleanup_ids):
         json=payload,
         timeout=30,
     )
-    assert r.status_code == 201, f"24:00 sentinel rejected: {r.status_code} {r.text}"
-    body = r.json()
-    assert body["end_time"] == "24:00"
-    assert body["start_time"] == "23:30"
-    cleanup_ids.append(body["id"])
+    assert r.status_code == 400, r.text
+    listed = requests.get(
+        f"{BASE_URL}/api/portfolio/time-commitments",
+        headers=auth_headers,
+        timeout=30,
+    )
+    assert listed.status_code == 200
+    assert not any(row["title"] == payload["title"] for row in listed.json())
 
 
 # ---------------------------------------------------------------------------
-# B) end_time <= start_time (and != 24:00) is rejected 400
+# B) end_time <= start_time is rejected 400
 # ---------------------------------------------------------------------------
 @pytest.mark.parametrize(
     "start,end",
@@ -203,10 +206,9 @@ def test_weekly_capacity_reflects_new_block(auth_headers, cleanup_ids):
 
 
 # ---------------------------------------------------------------------------
-# D) Both records of a split cross-midnight block persist correctly.
-#    (Frontend sends two POSTs — we simulate the same two payloads here.)
+# D) An invalid 24:00 half is rejected; an independently valid half persists.
 # ---------------------------------------------------------------------------
-def test_cross_midnight_split_persists_both_halves(auth_headers, cleanup_ids):
+def test_cross_midnight_split_rejects_invalid_half(auth_headers, cleanup_ids):
     monday = _monday_iso()
     title = f"TEST_cross_{uuid.uuid4().hex[:6]}"
     # First half: Monday 23:30 -> 24:00
@@ -225,8 +227,7 @@ def test_cross_midnight_split_persists_both_halves(auth_headers, cleanup_ids):
         },
         timeout=30,
     )
-    assert r1.status_code == 201, r1.text
-    cleanup_ids.append(r1.json()["id"])
+    assert r1.status_code == 400, r1.text
 
     # Second half: Tuesday 00:00 -> 06:30
     r2 = requests.post(
@@ -247,7 +248,7 @@ def test_cross_midnight_split_persists_both_halves(auth_headers, cleanup_ids):
     assert r2.status_code == 201, r2.text
     cleanup_ids.append(r2.json()["id"])
 
-    # Both should be listed
+    # Only the valid half should be listed.
     r = requests.get(
         f"{BASE_URL}/api/portfolio/time-commitments",
         headers=auth_headers,
@@ -255,16 +256,12 @@ def test_cross_midnight_split_persists_both_halves(auth_headers, cleanup_ids):
     )
     assert r.status_code == 200
     rows = [x for x in r.json() if x["title"] == title]
-    assert len(rows) == 2
-    days = sorted(x["day_of_week"] for x in rows)
-    assert days == ["monday", "tuesday"]
-    for x in rows:
-        if x["day_of_week"] == "monday":
-            assert x["start_time"] == "23:30" and x["end_time"] == "24:00"
-        else:
-            assert x["start_time"] == "00:00" and x["end_time"] == "06:30"
+    assert len(rows) == 1
+    assert rows[0]["day_of_week"] == "tuesday"
+    assert rows[0]["start_time"] == "00:00"
+    assert rows[0]["end_time"] == "06:30"
 
-    # Weekly capacity should count 30 (Mon) + 390 (Tue) minutes for this pair.
+    # Weekly capacity must include only the valid Tuesday record.
     rw = requests.get(
         f"{BASE_URL}/api/portfolio/time-capacity/week",
         headers=auth_headers,
@@ -274,7 +271,6 @@ def test_cross_midnight_split_persists_both_halves(auth_headers, cleanup_ids):
     assert rw.status_code == 200
     mon = next(d for d in rw.json()["days"] if d["day_of_week"] == "monday")
     tue = next(d for d in rw.json()["days"] if d["day_of_week"] == "tuesday")
-    mon_ids = {c["id"] for c in mon["commitments"]}
     tue_ids = {c["id"] for c in tue["commitments"]}
-    assert r1.json()["id"] in mon_ids
+    assert not any(c["title"] == title for c in mon["commitments"])
     assert r2.json()["id"] in tue_ids

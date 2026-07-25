@@ -8,9 +8,10 @@ Verifies:
 5. /approve requires status=proposal_ready.
 """
 import asyncio, httpx, os
+from pathlib import Path
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
-load_dotenv('/app/backend/.env')
+load_dotenv(Path(__file__).resolve().parents[1] / "backend" / ".env.test")
 
 BASE = "http://localhost:8001/api"
 

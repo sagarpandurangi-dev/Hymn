@@ -18,17 +18,7 @@ import requests
 
 
 # Backend URL from frontend env (public endpoint) — never localhost.
-def _load_backend_url() -> str:
-    env_path = "/app/frontend/.env"
-    with open(env_path, "r", encoding="utf-8") as fp:
-        for line in fp:
-            line = line.strip()
-            if line.startswith("EXPO_PUBLIC_BACKEND_URL="):
-                return line.split("=", 1)[1].strip().strip('"').rstrip("/")
-    raise RuntimeError("EXPO_PUBLIC_BACKEND_URL not found")
-
-
-BASE_URL = _load_backend_url()
+BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 API = f"{BASE_URL}/api"
 
 

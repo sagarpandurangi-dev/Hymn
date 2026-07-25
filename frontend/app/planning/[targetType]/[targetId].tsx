@@ -40,11 +40,11 @@ type Proposal = {
   current_state: Fact[];
   confirmations: Record<string, { action: FactAction; value?: any; note?: string; recorded_at?: string }>;
   ready_to_generate?: boolean;
-  blocking_questions: Array<{ field: string; question: string; why_blocking?: string }>;
+  blocking_questions: { field: string; question: string; why_blocking?: string }[];
   proposed_outcomes: any[];
   proposed_tasks: any[];
   proposed_check_ins: any[];
-  visual_phases: Array<{ label: string; tasks: string[] }>;
+  visual_phases: { label: string; tasks: string[] }[];
   resource_requirements: any[];
   portfolio_conflicts: any[];
   assumptions: any[];

@@ -18,11 +18,10 @@ function AuthGate() {
   useEffect(() => {
     if (loading) return;
     const seg0 = segments[0] as string | undefined;
-    const seg1 = segments[1] as string | undefined;
     const inAuthGroup = seg0 === "(auth)";
     // /portfolio/setup is allowed while portfolio setup is incomplete — we
     // must not redirect the user away from the very screen they need to use.
-    const onPortfolioSetup = seg0 === "portfolio" && seg1 === "setup";
+    const onPortfolioSetup = segments.join("/") === "portfolio/setup";
 
     if (!user && !inAuthGroup) {
       router.replace("/(auth)/sign-in");
