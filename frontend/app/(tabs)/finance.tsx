@@ -5,7 +5,7 @@
  * single ``GET /api/finance/dashboard`` and renders what the backend
  * returned — no math on the client.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -17,7 +17,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
@@ -51,7 +51,18 @@ export default function FinanceScreen() {
     }
   }, []);
 
-  useEffect(() => { (async () => { setLoading(true); await load(); setLoading(false); })(); }, [load]);
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      setLoading(true);
+      void load().finally(() => {
+        if (active) setLoading(false);
+      });
+      return () => {
+        active = false;
+      };
+    }, [load]),
+  );
 
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 
