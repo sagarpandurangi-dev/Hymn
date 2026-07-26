@@ -47,20 +47,41 @@ _SLASH_DATE_RE = re.compile(
 )
 _CURRENCY_TOKEN = r"(?:₹|\$|€|£|INR|USD|EUR|GBP)"
 _AMOUNT_CANDIDATE = r"\d[\d,]*(?:\.\d+)?"
+_AMOUNT_END = r"(?![\d,./-])"
+_LABELLED_PRICE_RE = re.compile(
+    rf"\b(?:(?:with\s+)?(?:a\s+)?)?"
+    rf"(?P<label>price|costs?|budget|priced\s+at|costing)\b"
+    rf"(?:\s*(?::|is\b|of\b|at\b))?\s*"
+    rf"(?P<prefix_currency>{_CURRENCY_TOKEN})?\s*"
+    rf"(?P<amount>{_AMOUNT_CANDIDATE}){_AMOUNT_END}"
+    rf"(?:\s*(?P<suffix_currency>INR|USD|EUR|GBP)\b)?"
+    r"(?!\s*(?:installments?|payments?|months?|years?|items?|units?|"
+    r"pieces?|people|persons?|tickets?|seats?)\b)",
+    re.IGNORECASE,
+)
 _PREFIX_AMOUNT_RE = re.compile(
-    rf"(?P<currency>{_CURRENCY_TOKEN})\s*(?P<amount>{_AMOUNT_CANDIDATE})",
+    rf"(?P<currency>{_CURRENCY_TOKEN})\s*"
+    rf"(?P<amount>{_AMOUNT_CANDIDATE}){_AMOUNT_END}",
     re.IGNORECASE,
 )
 _SUFFIX_AMOUNT_RE = re.compile(
-    rf"(?P<amount>{_AMOUNT_CANDIDATE})\s*(?P<currency>INR|USD|EUR|GBP)\b",
+    rf"(?P<amount>{_AMOUNT_CANDIDATE}){_AMOUNT_END}\s*"
+    rf"(?P<currency>INR|USD|EUR|GBP)\b",
     re.IGNORECASE,
 )
 _BARE_PRICE_RE = re.compile(
-    rf"\bfor\s+(?P<amount>{_AMOUNT_CANDIDATE})(?!\s*(?:INR|USD|EUR|GBP)\b)",
+    rf"\bfor\s+(?P<amount>{_AMOUNT_CANDIDATE}){_AMOUNT_END}"
+    r"(?!\s*(?:INR|USD|EUR|GBP)\b)"
+    r"(?!\s*(?:installments?|payments?|months?|years?|items?|units?|"
+    r"pieces?|people|persons?|tickets?|seats?)\b)",
     re.IGNORECASE,
 )
 _STRICT_AMOUNT_RE = re.compile(
-    r"^(?:\d+(?:\.\d{1,2})?|\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?)$"
+    r"^(?:"
+    r"\d+(?:\.\d{1,2})?"
+    r"|\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?"
+    r"|\d{1,2}(?:,\d{2})+,\d{3}(?:\.\d{1,2})?"
+    r")$"
 )
 _SYMBOL_CURRENCY = {"₹": "INR", "$": "USD", "€": "EUR", "£": "GBP"}
 _MONTHS = {
@@ -214,6 +235,28 @@ def _unsupported_classification() -> dict:
 def _extract_price(cleaned: str) -> dict:
     matches: list[dict] = []
     occupied: list[tuple[int, int]] = []
+
+    for match in _LABELLED_PRICE_RE.finditer(cleaned):
+        span = match.span()
+        amount = _money(_parse_amount(match.group("amount"), "expected_price"))
+        raw_currency = (
+            match.group("prefix_currency")
+            or match.group("suffix_currency")
+        )
+        currency = (
+            _SYMBOL_CURRENCY.get(raw_currency, raw_currency.upper())
+            if raw_currency
+            else None
+        )
+        matches.append({
+            "amount": amount,
+            "currency": currency,
+            "start": span[0],
+            "end": span[1],
+            "text": match.group(0),
+        })
+        occupied.append(span)
+
     for pattern in (_PREFIX_AMOUNT_RE, _SUFFIX_AMOUNT_RE):
         for match in pattern.finditer(cleaned):
             span = match.span()
@@ -231,16 +274,19 @@ def _extract_price(cleaned: str) -> dict:
             })
             occupied.append(span)
 
-    if not matches:
-        for match in _BARE_PRICE_RE.finditer(cleaned):
-            amount = _money(_parse_amount(match.group("amount"), "expected_price"))
-            matches.append({
-                "amount": amount,
-                "currency": None,
-                "start": match.start("amount"),
-                "end": match.end("amount"),
-                "text": match.group("amount"),
-            })
+    for match in _BARE_PRICE_RE.finditer(cleaned):
+        span = match.span()
+        if any(span[0] < end and span[1] > start for start, end in occupied):
+            continue
+        amount = _money(_parse_amount(match.group("amount"), "expected_price"))
+        matches.append({
+            "amount": amount,
+            "currency": None,
+            "start": span[0],
+            "end": span[1],
+            "text": match.group(0),
+        })
+        occupied.append(span)
 
     if len(matches) != 1:
         return {

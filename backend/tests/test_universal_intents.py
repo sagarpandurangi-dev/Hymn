@@ -155,6 +155,100 @@ def test_parser_extracts_supported_purchase_facts(
     assert parsed["extracted_date"] == desired_date
 
 
+def test_exact_labeled_price_sentence_extracts_item_amount_and_date():
+    parsed = classify_intent(
+        "buy a diamond ring by dec 31 2026 price 200000",
+        "2026-07-26",
+    )
+
+    assert parsed["item"] == "diamond ring"
+    assert parsed["extracted_price"] == "200000.00"
+    assert parsed["extracted_currency"] is None
+    assert parsed["extracted_date"] == "2026-12-31"
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "price 200000",
+        "price: 200000",
+        "price is 200000",
+        "cost 200000",
+        "costs 200000",
+        "costing 200000",
+        "budget 200000",
+        "with a budget of 200000",
+        "priced at 200000",
+    ],
+)
+def test_labeled_amount_forms_are_supported_and_removed_from_item(label):
+    parsed = classify_intent(f"Buy a diamond ring {label}", "2026-07-26")
+
+    assert parsed["item"] == "diamond ring"
+    assert parsed["extracted_price"] == "200000.00"
+    assert parsed["extracted_currency"] is None
+
+
+@pytest.mark.parametrize(
+    ("text", "price", "currency"),
+    [
+        ("Buy a ring price ₹2,00,000", "200000.00", "INR"),
+        ("Buy a ring cost INR 2,00,000", "200000.00", "INR"),
+        ("Buy a ring costs 200,000 USD", "200000.00", "USD"),
+        ("Buy a ring budget $200,000", "200000.00", "USD"),
+        ("Buy a ring price 1,23,45,678 INR", "12345678.00", "INR"),
+        ("Buy a ring cost USD 1,234,567.89", "1234567.89", "USD"),
+    ],
+)
+def test_labeled_amounts_support_currency_and_valid_comma_grouping(
+    text,
+    price,
+    currency,
+):
+    parsed = classify_intent(text, "2026-07-26")
+
+    assert parsed["item"] == "ring"
+    assert parsed["extracted_price"] == price
+    assert parsed["extracted_currency"] == currency
+
+
+def test_multiple_labeled_amounts_are_ambiguous():
+    parsed = classify_intent(
+        "Buy a diamond ring price 200000 or budget 250000",
+        "2026-07-26",
+    )
+
+    assert parsed["extracted_price"] is None
+    assert parsed["extracted_currency"] is None
+    assert "expected_price" in parsed["ambiguities"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Buy an iPhone 16",
+        "Buy a TV model 200000",
+        "Buy two chairs for 12 installments",
+        "Buy chairs cost 12 units",
+        "Buy tickets for 31/12/2026",
+        "Buy a sofa in 2026",
+    ],
+)
+def test_price_parser_avoids_dates_quantities_models_and_installment_counts(text):
+    parsed = classify_intent(text, "2026-07-26")
+    assert parsed["extracted_price"] is None
+
+
+def test_existing_bare_for_amount_behavior_is_preserved():
+    parsed = classify_intent(
+        "Buy a diamond ring for 200000 by December 31 2026",
+        "2026-07-26",
+    )
+    assert parsed["item"] == "diamond ring"
+    assert parsed["extracted_price"] == "200000.00"
+    assert parsed["extracted_date"] == "2026-12-31"
+
+
 def test_relative_date_resolution_is_traceable_and_clamps_month_end():
     parsed = classify_intent(
         "Purchase a laptop next month for GBP 900",
@@ -279,13 +373,72 @@ def test_parser_reports_ambiguity_and_avoids_false_positive_purchase_words():
     [
         "Buy an iPad for ₹80,00",
         "Buy an iPad for $12.345",
-        "Buy an iPad for 1,20,000 INR",
+        "Buy an iPad for 1,2,000 INR",
     ],
 )
 def test_parser_rejects_malformed_amount_language(text):
     with pytest.raises(HTTPException) as exc_info:
         classify_intent(text, "2026-07-26")
     assert exc_info.value.status_code == 400
+
+
+def test_labeled_amount_api_keeps_amount_and_asks_for_missing_currency(context):
+    original = "buy a diamond ring by dec 31 2026 price 200000"
+    response = _analyze(
+        context,
+        {"text": original, "reference_date": "2026-07-26"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["purchase"]["item"] == "diamond ring"
+    assert body["purchase"]["expected_price"] == "200000.00"
+    assert body["purchase"]["currency"] is None
+    assert body["purchase"]["desired_date"] == "2026-12-31"
+    assert "currency" in body["missing_data"]
+    currency_question = next(
+        row for row in body["clarification_questions"]
+        if row["field"] == "currency"
+    )
+    assert "currency" in currency_question["question"].lower()
+
+
+def test_labeled_amount_api_uses_explicit_profile_currency_when_available(context):
+    db = context["db"]
+    user_id = context["primary"]["id"]
+    original = db.users.find_one({"id": user_id}, {"portfolio_reporting_currency": 1})
+    try:
+        db.users.update_one(
+            {"id": user_id},
+            {"$set": {"portfolio_reporting_currency": "INR"}},
+        )
+        response = _analyze(
+            context,
+            {
+                "text": "buy a diamond ring by dec 31 2026 price 200000",
+                "reference_date": "2026-07-26",
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["purchase"]["expected_price"] == "200000.00"
+        assert body["purchase"]["currency"] == "INR"
+        assert body["purchase"]["field_sources"]["currency"] == "known_profile"
+    finally:
+        if original and "portfolio_reporting_currency" in original:
+            db.users.update_one(
+                {"id": user_id},
+                {"$set": {
+                    "portfolio_reporting_currency": original[
+                        "portfolio_reporting_currency"
+                    ],
+                }},
+            )
+        else:
+            db.users.update_one(
+                {"id": user_id},
+                {"$unset": {"portfolio_reporting_currency": ""}},
+            )
 
 
 def test_buy_ipad_without_context_is_honest_and_stateless(context):
