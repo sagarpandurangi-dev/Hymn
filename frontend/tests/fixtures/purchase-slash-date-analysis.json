@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "assessment_version": "purchase-assessment-v2",
+  "original_text": "Buy a hero honda splendor for 95000 on 31/12/2026",
+  "intent_type": "purchase",
+  "classification": {
+    "intent_type": "purchase",
+    "confidence": "deterministic",
+    "item": "hero honda splendor",
+    "extracted_price": "95000.00",
+    "extracted_currency": null,
+    "extracted_date": "2026-12-31",
+    "extracted_timing_text": "31/12/2026",
+    "timing_precision": "exact_date",
+    "timing_resolution": "Parsed as DD/MM/YYYY because the day is greater than 12.",
+    "timing_ambiguity_reason": null,
+    "ambiguities": []
+  },
+  "reference_date": "2026-07-26",
+  "result_status": "needs_input",
+  "supported_intent_types": [
+    "purchase"
+  ],
+  "message": null,
+  "purchase": {
+    "item": "hero honda splendor",
+    "expected_price": "95000.00",
+    "currency": "INR",
+    "desired_date": "2026-12-31",
+    "timing_text": "31/12/2026",
+    "timing_precision": "exact_date",
+    "timing_resolution": "Parsed as DD/MM/YYYY because the day is greater than 12.",
+    "field_sources": {
+      "item": "inferred_from_text",
+      "expected_price": "inferred_from_text",
+      "currency": "known_profile",
+      "desired_date": "inferred_from_text"
+    },
+    "price_unknown": false,
+    "timing_unknown": false,
+    "summary": "Buy hero honda splendor for INR 95000.00 by 2026-12-31."
+  },
+  "missing_data": [
+    "financial_context"
+  ],
+  "clarification_questions": [],
+  "affordability_status": "insufficient_data",
+  "financial_snapshot": {
+    "currency": "INR",
+    "purchase_month": "2026-12",
+    "liquid_assets": null,
+    "planned_income": null,
+    "planned_outflows": null,
+    "planned_savings_and_investments": null,
+    "actual_spending": null,
+    "reserved_commitments_due": null,
+    "available_before_purchase": null,
+    "projected_after_purchase": null,
+    "calculation": null,
+    "has_financial_data": false,
+    "has_liquid_balance": false
+  },
+  "impacted_goals_or_commitments": [],
+  "risks_and_tradeoffs": [],
+  "options": [],
+  "recommended_option_id": null,
+  "recommended_next_action": "Add financial context before deciding.",
+  "evidence": [],
+  "contexts_queried": [
+    "finance"
+  ],
+  "can_confirm": false,
+  "disclaimer": "This is a planning aid, not financial advice."
+}

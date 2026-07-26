@@ -1,4 +1,9 @@
 import { getToken } from "./tokenStorage";
+import type {
+  IntentAnalysis,
+  IntentAnalyzePayload,
+  SavedIntent,
+} from "./intents";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
 
@@ -84,6 +89,27 @@ export const api = {
 
   forgotPassword: (payload: { email: string; security_answer: string; new_password: string }) =>
     request<{ detail: string }>("/auth/forgot-password", { method: "POST", body: payload }),
+
+  analyzeIntent: (payload: IntentAnalyzePayload) =>
+    request<IntentAnalysis>("/intents/analyze", {
+      method: "POST",
+      body: payload,
+      auth: true,
+    }),
+  confirmIntent: (
+    payload: IntentAnalyzePayload & {
+      selected_option_id: string;
+      idempotency_key: string;
+    },
+  ) =>
+    request<SavedIntent>("/intents/confirm", {
+      method: "POST",
+      body: payload,
+      auth: true,
+    }),
+  listIntents: () => request<SavedIntent[]>("/intents", { auth: true }),
+  getIntent: (id: string) =>
+    request<SavedIntent>(`/intents/${encodeURIComponent(id)}`, { auth: true }),
 
   listDomains: () =>
     request<{ id: string; name: string; is_default: boolean; created_at: string }[]>("/domains", { auth: true }),

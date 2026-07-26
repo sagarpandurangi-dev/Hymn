@@ -88,6 +88,8 @@ export default function RootLayout() {
           <Stack.Screen name="knowledge/[id]" />
           <Stack.Screen name="portfolio/setup" options={{ gestureEnabled: false }} />
           <Stack.Screen name="portfolio/index" />
+          <Stack.Screen name="intents/index" />
+          <Stack.Screen name="intents/[id]" />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>
