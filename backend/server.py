@@ -1613,6 +1613,10 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                 "source": "checkin",
                 "source_reference": f"checkin:{doc['id']}",
                 "confirmation_status": "confirmed",
+                # The event is already the canonical actual expense used by
+                # Finance. Reconciliation only decides whether that actual
+                # belongs to a planned commitment or is accepted as unplanned.
+                "reconciliation_status": "awaiting_reconciliation",
                 "checkin_id": doc["id"],
                 "commitment_id": None,
                 "created_at": _fnow(),

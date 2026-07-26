@@ -13,6 +13,10 @@ import type {
   PlanningDraftItem,
   PlanningTargetType,
 } from "./planning";
+import type {
+  ReconciliationSuggestion,
+  UnplannedResolutionResult,
+} from "./reconciliation";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
 
@@ -455,11 +459,17 @@ export const api = {
 
   // -- Finance Advanced (§15–§26) --
   getTwinForecasts: () => request<any>("/finance/forecasts", { auth: true }),
-  reconciliationSuggestions: () => request<any[]>("/finance/reconciliation/suggestions", { auth: true }),
+  reconciliationSuggestions: () =>
+    request<ReconciliationSuggestion[]>("/finance/reconciliation/suggestions", {
+      auth: true,
+    }),
   reconcileConfirm: (eventId: string, payload: { commitment_id: string; actual_amount_override?: string | number }) =>
     request<any>(`/finance/reconciliation/${eventId}/confirm`, { method: "POST", body: payload, auth: true }),
   reconcileReject: (eventId: string) =>
-    request<any>(`/finance/reconciliation/${eventId}/reject`, { method: "POST", auth: true }),
+    request<UnplannedResolutionResult>(
+      `/finance/reconciliation/${eventId}/reject`,
+      { method: "POST", auth: true },
+    ),
 
   listExpectedIncome: () => request<any[]>("/finance/expected-income", { auth: true }),
   createExpectedIncome: (payload: { title: string; amount: string | number; currency: string; expected_date: string; classification: "confirmed" | "expected"; description?: string }) =>

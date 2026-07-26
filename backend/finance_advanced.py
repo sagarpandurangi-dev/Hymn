@@ -26,6 +26,8 @@ from typing import Any, List, Optional
 
 from bson.decimal128 import Decimal128
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel
 
 from deps import get_current_user, get_db
@@ -58,6 +60,12 @@ from finance_manager import (
 
 
 advanced_router = APIRouter(prefix="/finance", tags=["finance-advanced"])
+
+PENDING_RECONCILIATION_STATUSES = (
+    "awaiting_reconciliation",
+    "unmatched",  # legacy unresolved value
+)
+RESOLVED_UNPLANNED = "resolved_unplanned"
 
 
 # ============================================================================
@@ -332,7 +340,7 @@ async def reconciliation_suggestions(current_user: dict = Depends(get_current_us
          "direction": "outflow", "commitment_id": None,
          "$or": [
              {"reconciliation_status": {"$exists": False}},
-             {"reconciliation_status": {"$ne": "matched"}},
+             {"reconciliation_status": {"$in": list(PENDING_RECONCILIATION_STATUSES)}},
          ]},
         {"_id": 0},
     ).sort("event_date", -1).to_list(length=200)
@@ -378,7 +386,13 @@ async def reconcile_confirm(
         await db.financial_events.update_one({"id": event_id}, {"$set": {"amount": stored}})
         ev["amount"] = stored
     await db.financial_events.update_one(
-        {"id": event_id}, {"$set": {"commitment_id": c["id"], "reconciliation_status": "matched"}},
+        {"id": event_id, "user_id": current_user["id"]},
+        {"$set": {
+            "commitment_id": c["id"],
+            "reconciliation_status": "matched",
+            "reconciliation_resolution": "planned_commitment",
+            "resolved_at": _now(),
+        }},
     )
     updated = await _apply_complete(db, current_user["id"], c, None, event_id, ev.get("event_date"))
     await _audit(
@@ -392,20 +406,130 @@ async def reconcile_confirm(
 
 @advanced_router.post("/reconciliation/{event_id}/reject")
 async def reconcile_reject(event_id: str, current_user: dict = Depends(get_current_user)):
-    """User rejects all suggested matches. Event is treated as unplanned;
-    Finance already counted it once via the pipeline (\u00a713)."""
+    """Resolve one canonical actual event as an unplanned expense.
+
+    ``financial_events`` is Hymn's Finance-owned actual ledger. The Check-in
+    remains the source record; this endpoint never creates another money row
+    and never chooses or mutates an asset account. The conditional update plus
+    deterministic audit id makes replays and concurrent clicks idempotent.
+    """
     db = get_db()
-    ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
-    if not ev:
+    user_id = current_user["id"]
+    resolved_at = _now()
+    eligible = {
+        "id": event_id,
+        "user_id": user_id,
+        "confirmation_status": "confirmed",
+        "direction": "outflow",
+        "commitment_id": None,
+        "$or": [
+            {"reconciliation_status": {"$exists": False}},
+            {"reconciliation_status": {"$in": list(PENDING_RECONCILIATION_STATUSES)}},
+        ],
+    }
+    ev = await db.financial_events.find_one_and_update(
+        eligible,
+        {"$set": {
+            "reconciliation_status": RESOLVED_UNPLANNED,
+            "reconciliation_resolution": "unplanned_actual_expense",
+            "resolved_at": resolved_at,
+            # Recording an actual is independent of choosing which account
+            # paid it. Account balances remain untouched until the user makes
+            # that linkage explicitly in a future flow.
+            "balance_adjustment_status": "not_applied_account_unknown",
+        }},
+        projection={"_id": 0},
+        return_document=ReturnDocument.AFTER,
+    )
+    already_resolved = False
+    if ev is None:
+        ev = await db.financial_events.find_one(
+            {"id": event_id, "user_id": user_id},
+            {"_id": 0},
+        )
+    if ev is None:
         raise HTTPException(status_code=404, detail="Event not found")
-    await db.financial_events.update_one(
-        {"id": event_id}, {"$set": {"reconciliation_status": "unmatched"}},
-    )
-    await _audit(
-        db, current_user["id"], "financial_event", event_id, "reconciled",
-        source="reconciliation", new_value={"outcome": "unmatched"},
-    )
-    return {"detail": "marked unmatched"}
+    if ev.get("reconciliation_status") == RESOLVED_UNPLANNED:
+        already_resolved = ev.get("resolved_at") != resolved_at
+    elif ev.get("reconciliation_status") == "matched" or ev.get("commitment_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="This expense is already matched to a planned commitment.",
+        )
+    elif ev.get("confirmation_status") != "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail="Only a confirmed financial event can be accepted as unplanned.",
+        )
+    else:
+        raise HTTPException(
+            status_code=409,
+            detail="This financial event cannot be resolved as unplanned.",
+        )
+
+    # Fill the single final-resolution audit even if an earlier attempt saved
+    # the event but was interrupted before the audit write. Existing legacy
+    # audit rows remain untouched as historical evidence.
+    audit_id = str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"hymn:finance:resolved-unplanned:{user_id}:{event_id}",
+    ))
+    audit_doc = {
+        "id": audit_id,
+        "user_id": user_id,
+        "record_type": "financial_event",
+        "record_id": event_id,
+        "action": "reconciled",
+        "timestamp": ev.get("resolved_at") or resolved_at,
+        "source": "reconciliation",
+        "previous_value": None,
+        "new_value": {"outcome": RESOLVED_UNPLANNED},
+        "related_checkin_id": ev.get("checkin_id"),
+        "related_task_id": None,
+        "related_event_id": event_id,
+        "related_import_id": None,
+        "notes": "Accepted as an unplanned actual expense.",
+    }
+    try:
+        await db.financial_audit.update_one(
+            {"id": audit_id, "user_id": user_id},
+            {"$setOnInsert": audit_doc},
+            upsert=True,
+        )
+    except DuplicateKeyError:  # pragma: no cover - concurrent upsert loser
+        pass
+
+    amount = _money_from_stored(ev.get("amount"))
+    return {
+        "detail": "Recorded as an unplanned actual expense.",
+        "resolution": RESOLVED_UNPLANNED,
+        "already_resolved": already_resolved,
+        "event": {
+            "id": ev["id"],
+            "amount": amount,
+            "currency": ev.get("currency"),
+            "checkin_id": ev.get("checkin_id"),
+            "source_reference": ev.get("source_reference"),
+            "reconciliation_status": RESOLVED_UNPLANNED,
+        },
+        "canonical_actual": {
+            "record_type": "financial_event",
+            "record_id": ev["id"],
+            "source": "checkin" if ev.get("checkin_id") else ev.get("source"),
+        },
+        "balance_adjustment": {
+            "status": "not_applied",
+            "reason": "No paying account was selected, so no account balance was changed.",
+        },
+        "refresh": {
+            "finance_summary_endpoint": "/finance/dashboard",
+            "pending_reconciliation_endpoint": "/finance/reconciliation/suggestions",
+        },
+        "navigation": {
+            "route": "/(tabs)/finance",
+            "label": "Back to Finance",
+        },
+    }
 
 
 # ============================================================================

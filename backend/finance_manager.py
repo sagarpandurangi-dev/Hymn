@@ -74,6 +74,11 @@ EVENT_SOURCES = (
 )
 EVENT_DIRECTIONS = ("outflow", "inflow")
 CONFIRMATION_STATUSES = ("pending", "confirmed", "rejected")
+RECONCILIATION_STATUSES = (
+    "awaiting_reconciliation",
+    "matched",
+    "resolved_unplanned",
+)
 DEDUPE_STATUSES = ("pending", "confirmed_same", "rejected")
 
 # Reserved reasons the backend derives (not user-visible states):
@@ -324,6 +329,10 @@ class FinancialEventResponse(BaseModel):
     confirmation_status: str
     checkin_id: Optional[str] = None
     commitment_id: Optional[str] = None
+    reconciliation_status: Optional[str] = None
+    reconciliation_resolution: Optional[str] = None
+    resolved_at: Optional[str] = None
+    balance_adjustment_status: Optional[str] = None
     created_at: str
 
 
@@ -1861,6 +1870,18 @@ async def ensure_finance_indexes(database) -> None:
     await database.financial_events.create_index("user_id")
     await database.financial_events.create_index([("user_id", 1), ("event_date", 1)])
     await database.financial_events.create_index([("user_id", 1), ("confirmation_status", 1)])
+    # A money-bearing Check-in has exactly one canonical Finance actual event.
+    # This partial unique index does not affect manual/imported events or
+    # historical rows without a Check-in linkage.
+    await database.financial_events.create_index(
+        [("user_id", 1), ("checkin_id", 1)],
+        unique=True,
+        partialFilterExpression={
+            "source": "checkin",
+            "checkin_id": {"$type": "string"},
+        },
+        name="unique_owned_checkin_financial_event",
+    )
 
     await database.financial_audit.create_index("id", unique=True)
     await database.financial_audit.create_index([("user_id", 1), ("record_type", 1), ("record_id", 1)])
