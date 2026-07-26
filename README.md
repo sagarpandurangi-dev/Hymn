@@ -11,15 +11,17 @@ Ask a technical helper to install these standard tools:
 1. Docker Desktop for Windows.
 2. Python 3.12, with the Python launcher and `pip`.
 3. Node.js 22 LTS.
-4. Yarn 1.22.22. Node includes Corepack, which can install the repository's
-   exact declared Yarn version. Open PowerShell and run:
+4. Yarn 1.22.22 for the one-time dependency installation. Node includes
+   Corepack, which can invoke the exact version declared by this repository.
+   Check it from the `frontend` folder:
 
 ```powershell
-corepack enable
-corepack prepare yarn@1.22.22 --activate
+corepack yarn --version
 ```
 
-Check the result with `yarn --version`. It must print `1.22.22`.
+It must print `1.22.22`. If it cannot, ask a technical helper to enable
+Corepack or install Yarn 1.22.22. Starting Hymn after dependencies are
+installed does not require a system-wide `yarn` command.
 
 Then open PowerShell in this repository and run:
 
@@ -28,7 +30,7 @@ Then open PowerShell in this repository and run:
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements-local.txt
 Set-Location frontend
-yarn install --frozen-lockfile
+corepack yarn install --frozen-lockfile
 Set-Location ..
 ```
 
@@ -40,26 +42,44 @@ frontend addresses.
 
 ## Start Hymn
 
-Start Docker Desktop first. In PowerShell:
+Start Docker Desktop, open PowerShell in the Hymn folder, and run one command:
 
 ```powershell
-.\scripts\local.cmd db-start
+.\scripts\local.cmd start
 ```
 
-Open a second PowerShell window:
+Wait until it prints:
+
+> Hymn is ready.
+> Open exactly: http://localhost:8081
+
+Use only `http://localhost:8081` in the browser. Do not switch between
+`localhost` and `127.0.0.1`; browsers treat them as different sign-in storage.
+The helper waits for MongoDB, the backend, the web page, and the real Expo
+bundle before saying Hymn is ready. The backend listens only on
+`127.0.0.1:8001`, and MongoDB is exposed only on `127.0.0.1:27017`.
+
+Preview process IDs and logs are stored under the ignored `.hymn-runtime`
+folder. If startup fails, the command prints the relevant log tail and the
+full logs remain there for a technical helper.
+
+## Check or restart Hymn
+
+To see each component separately:
 
 ```powershell
-.\scripts\local.cmd backend
+.\scripts\local.cmd status
 ```
 
-Open a third PowerShell window:
+If a browser page keeps loading, restart the managed preview:
 
 ```powershell
-.\scripts\local.cmd frontend
+.\scripts\local.cmd restart
 ```
 
-The backend listens only on `127.0.0.1:8001`. MongoDB is exposed only on
-`127.0.0.1:27017`.
+Then open `http://localhost:8081`. If that exact page was already open, press
+Ctrl+Shift+R once. The helper stops only Hymn processes it can verify. It will
+refuse to kill an unrelated program using Hymn's ports.
 
 ## Authentication and planning
 
@@ -76,13 +96,15 @@ provider.
 
 ## Stop Hymn
 
-Press Ctrl+C in the backend and frontend windows. Then run:
+Run:
 
 ```powershell
-.\scripts\local.cmd db-stop
+.\scripts\local.cmd stop
 ```
 
-Your local data remains available for the next start.
+This stops the managed frontend, backend, and MongoDB container. It does not
+delete the MongoDB volume, so all local Hymn data remains available for the
+next start.
 
 ## Tests and checks
 
@@ -114,6 +136,7 @@ database.
 ## Status and reset commands
 
 ```powershell
+.\scripts\local.cmd status
 .\scripts\local.cmd db-status
 .\scripts\local.cmd reset-db
 ```
