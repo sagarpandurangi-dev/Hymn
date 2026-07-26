@@ -5,6 +5,7 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
+import type { AttachedPlanResponse } from "@/src/lib/planning";
 import ConfirmModal from "@/src/components/ConfirmModal";
 
 type Goal = {
@@ -52,6 +53,7 @@ export default function GoalDetailScreen() {
   const [eos, setEos] = useState<EO[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [checkins, setCheckins] = useState<Checkin[]>([]);
+  const [attachedPlan, setAttachedPlan] = useState<AttachedPlanResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -74,6 +76,11 @@ export default function GoalDetailScreen() {
       setEos(list);
       setTasks(taskList as Task[]);
       setCheckins(checkinList as Checkin[]);
+      try {
+        setAttachedPlan(await api.planningGetAttachedPlan("goal", id));
+      } catch {
+        setAttachedPlan(null);
+      }
     } catch (e: any) {
       setError(e?.message || "Could not load");
     } finally { setLoading(false); }
@@ -139,6 +146,9 @@ export default function GoalDetailScreen() {
           </View>
 
           <Text style={styles.title} testID="goal-detail-title">{goal.title}</Text>
+          <Text style={styles.definition}>
+            A goal is the result you want to achieve.
+          </Text>
 
           {/* Journey meta chips: deadline + cadence */}
           {(goal.deadline || goal.checkin_cadence) ? (
@@ -196,6 +206,51 @@ export default function GoalDetailScreen() {
             <Ionicons name="git-network-outline" size={18} color={colors.onBrandPrimary} />
             <Text style={styles.planBtnText}>Plan with Hymn</Text>
           </Pressable>
+
+          <View style={styles.progressActions}>
+            <Pressable
+              onPress={() => router.push(`/checkin/goal?goalId=${goal.id}`)}
+              testID="goal-detail-log-progress"
+              style={styles.secondaryAction}
+            >
+              <Ionicons name="pulse-outline" size={18} color={colors.brandPrimary} />
+              <View style={styles.actionCopy}>
+                <Text style={styles.secondaryActionTitle}>Log progress</Text>
+                <Text style={styles.secondaryActionDetail}>Record what changed today.</Text>
+              </View>
+            </Pressable>
+            <Pressable
+              onPress={() => router.push({
+                pathname: "/checkin-schedule/[targetType]/[targetId]",
+                params: { targetType: "goal", targetId: goal.id },
+              })}
+              testID="goal-detail-set-checkin-schedule"
+              style={styles.secondaryAction}
+            >
+              <Ionicons name="calendar-outline" size={18} color={colors.brandPrimary} />
+              <View style={styles.actionCopy}>
+                <Text style={styles.secondaryActionTitle}>Set check-in schedule</Text>
+                <Text style={styles.secondaryActionDetail}>Choose when Hymn should ask.</Text>
+              </View>
+            </Pressable>
+          </View>
+
+          {attachedPlan?.attached ? (
+            <Pressable
+              onPress={() => router.push(`/planning/goal/${goal.id}`)}
+              style={styles.attachedPlan}
+              testID="goal-detail-attached-plan"
+            >
+              <View style={styles.attachedPlanHeading}>
+                <Ionicons name="checkmark-circle" size={20} color={colors.success} />
+                <Text style={styles.attachedPlanTitle}>Plan attached</Text>
+              </View>
+              <Text style={styles.attachedPlanDetail}>
+                {attachedPlan.items.length} plan items are attached to this goal.
+              </Text>
+              <Text style={styles.attachedPlanLink}>Review plan</Text>
+            </Pressable>
+          ) : null}
 
           {/* ── EXPECTED OUTCOMES ── */}
           <View style={styles.section}>
@@ -283,7 +338,7 @@ export default function GoalDetailScreen() {
             <View style={styles.sectionHeader}>
               <Text style={styles.blockLabel}>CHECK-INS</Text>
               <Pressable
-                onPress={() => router.push("/checkin/goal")}
+                onPress={() => router.push(`/checkin/goal?goalId=${goal.id}`)}
                 testID="goal-detail-add-checkin"
                 hitSlop={8}
               >
@@ -347,6 +402,7 @@ const styles = StyleSheet.create({
   statusDot: { width: 8, height: 8, borderRadius: 4 },
   statusText: { fontSize: 12, color: colors.onSurfaceSecondary, textTransform: "capitalize" },
   title: { fontFamily: fonts.displayBold, fontSize: 28, color: colors.onSurface, fontWeight: "700", marginTop: spacing.sm, lineHeight: 36 },
+  definition: { color: colors.onSurfaceTertiary, fontSize: 12, lineHeight: 18, marginTop: spacing.sm },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, marginTop: spacing.md },
   chip: {
     flexDirection: "row", alignItems: "center", gap: 6,
@@ -380,4 +436,20 @@ const styles = StyleSheet.create({
     borderRadius: radius.md, marginTop: spacing.lg,
   },
   planBtnText: { color: colors.onBrandPrimary, fontFamily: fonts.displayBold, fontSize: 14 },
+  progressActions: { gap: spacing.sm, marginTop: spacing.md },
+  secondaryAction: {
+    alignItems: "center", borderColor: colors.borderStrong, borderRadius: radius.md,
+    borderWidth: 1, flexDirection: "row", gap: spacing.md, padding: spacing.md,
+  },
+  actionCopy: { flex: 1 },
+  secondaryActionTitle: { color: colors.onSurface, fontSize: 14, fontWeight: "600" },
+  secondaryActionDetail: { color: colors.onSurfaceSecondary, fontSize: 12, marginTop: 2 },
+  attachedPlan: {
+    backgroundColor: colors.brandTertiary, borderRadius: radius.md,
+    marginTop: spacing.lg, padding: spacing.lg,
+  },
+  attachedPlanHeading: { alignItems: "center", flexDirection: "row", gap: spacing.sm },
+  attachedPlanTitle: { color: colors.onSurface, fontSize: 15, fontWeight: "600" },
+  attachedPlanDetail: { color: colors.onSurfaceSecondary, fontSize: 13, lineHeight: 19, marginTop: spacing.sm },
+  attachedPlanLink: { color: colors.brandPrimary, fontSize: 13, fontWeight: "600", marginTop: spacing.sm },
 });

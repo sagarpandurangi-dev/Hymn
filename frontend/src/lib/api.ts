@@ -4,6 +4,15 @@ import type {
   IntentAnalyzePayload,
   SavedIntent,
 } from "./intents";
+import type {
+  AttachedPlanResponse,
+  PlanningApplyResult,
+  PlanningContextDecisionAction,
+  PlanningContextResponse,
+  PlanningContextUpdates,
+  PlanningDraftItem,
+  PlanningTargetType,
+} from "./planning";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
 
@@ -163,16 +172,16 @@ export const api = {
 
   listProjects: () =>
     request<
-      { id: string; title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string }[]
+      { id: string; title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string; checkin_cadence: string }[]
     >("/projects", { auth: true }),
-  createProject: (payload: { title: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string }) =>
+  createProject: (payload: { title: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string; checkin_cadence?: string }) =>
     request<{ id: string }>("/projects", { method: "POST", body: payload, auth: true }),
   getProject: (id: string) =>
-    request<{ id: string; title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string }>(
+    request<{ id: string; title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string; checkin_cadence: string }>(
       `/projects/${id}`,
       { auth: true },
     ),
-  updateProject: (id: string, payload: { title?: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string }) =>
+  updateProject: (id: string, payload: { title?: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string; checkin_cadence?: string }) =>
     request<{ id: string }>(`/projects/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteProject: (id: string) =>
     request<{ detail: string }>(`/projects/${id}`, { method: "DELETE", auth: true }),
@@ -488,32 +497,64 @@ export const api = {
   sharedExpenseIPaid: (payload: { total_amount: string | number; currency: string; participants: string[]; event_date: string; description?: string; prepare_repayment_message?: boolean }) =>
     request<any>("/finance/shared-expenses/i-paid", { method: "POST", body: payload, auth: true }),
 
-  // -- Planning Engine --
-  planningAnalyze: (payload: { target_type: "goal" | "project" | "journey"; target_id: string }) =>
-    request<any>("/planning/analyze", { method: "POST", body: payload, auth: true }),
-  planningGetProposal: (id: string) =>
-    request<any>(`/planning/proposals/${id}`, { auth: true }),
-  planningListProposals: (target_type?: string, target_id?: string) => {
-    const params = new URLSearchParams();
-    if (target_type) params.append("target_type", target_type);
-    if (target_id) params.append("target_id", target_id);
-    const qs = params.toString() ? `?${params.toString()}` : "";
-    return request<any[]>(`/planning/proposals${qs}`, { auth: true });
-  },
-  planningConfirm: (
+  // -- Planning context review --
+  planningCreateContextReview: (payload: {
+    target_type: PlanningTargetType;
+    target_id: string;
+  }) =>
+    request<PlanningContextResponse>("/planning/context-reviews", {
+      method: "POST",
+      body: payload,
+      auth: true,
+    }),
+  planningGetContextReview: (id: string) =>
+    request<PlanningContextResponse>(`/planning/context-reviews/${id}`, {
+      auth: true,
+    }),
+  planningUpdateContext: (id: string, updates: PlanningContextUpdates) =>
+    request<PlanningContextResponse>(`/planning/proposals/${id}/context`, {
+      method: "PATCH",
+      body: { updates },
+      auth: true,
+    }),
+  planningDecideContextItem: (
     id: string,
-    confirmations: { field: string; action: "confirm" | "edit" | "reject" | "mark_unknown"; value?: any; note?: string }[],
-  ) => request<any>(`/planning/proposals/${id}/confirm`, { method: "POST", body: { confirmations }, auth: true }),
-  planningGenerate: (id: string) =>
-    request<any>(`/planning/proposals/${id}/generate`, { method: "POST", auth: true }),
-  planningSelectTradeoff: (id: string, tradeoff_id: string) =>
-    request<any>(`/planning/proposals/${id}/select-tradeoff`, { method: "POST", body: { tradeoff_id }, auth: true }),
-  planningApprove: (id: string) =>
-    request<any>(`/planning/proposals/${id}/approve`, { method: "POST", auth: true }),
-  planningReject: (id: string) =>
-    request<any>(`/planning/proposals/${id}/reject`, { method: "POST", auth: true }),
-  planningPause: (id: string, future_allocations: "retain" | "reduce" | "release") =>
-    request<any>(`/planning/proposals/${id}/pause`, { method: "POST", body: { future_allocations }, auth: true }),
-  planningReassess: (payload: { target_type: "goal" | "project" | "journey"; target_id: string }) =>
-    request<any>("/planning/reassess", { method: "POST", body: payload, auth: true }),
+    field: string,
+    action: PlanningContextDecisionAction,
+    value?: string,
+  ) =>
+    request<PlanningContextResponse>(
+      `/planning/proposals/${id}/context/${encodeURIComponent(field)}/decision`,
+      {
+        method: "POST",
+        body: value === undefined ? { action } : { action, value },
+        auth: true,
+      },
+    ),
+  planningAnswerQuestion: (id: string, questionId: string, value: string) =>
+    request<PlanningContextResponse>(
+      `/planning/proposals/${id}/questions/${encodeURIComponent(questionId)}/answer`,
+      { method: "POST", body: { value }, auth: true },
+    ),
+  planningGenerateDraft: (id: string) =>
+    request<PlanningContextResponse>(`/planning/proposals/${id}/draft`, {
+      method: "POST",
+      auth: true,
+    }),
+  planningSaveDraft: (id: string, items: PlanningDraftItem[]) =>
+    request<PlanningContextResponse>(`/planning/proposals/${id}/draft`, {
+      method: "PUT",
+      body: { items },
+      auth: true,
+    }),
+  planningApply: (id: string) =>
+    request<PlanningApplyResult>(`/planning/proposals/${id}/apply`, {
+      method: "POST",
+      auth: true,
+    }),
+  planningGetAttachedPlan: (targetType: PlanningTargetType, targetId: string) =>
+    request<AttachedPlanResponse>(
+      `/planning/targets/${targetType}/${encodeURIComponent(targetId)}/attached-plan`,
+      { auth: true },
+    ),
 };

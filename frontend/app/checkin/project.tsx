@@ -3,7 +3,7 @@ import {
   ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, Switch, Text, TextInput, View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import { useAuth } from "@/src/lib/AuthContext";
 import { colors, spacing } from "@/src/lib/theme";
@@ -21,10 +21,16 @@ type Task = { id: string; title: string };
 export default function ProjectCheckinScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const params = useLocalSearchParams<{ projectId?: string; taskId?: string }>();
+  const preselectedProjectId =
+    typeof params.projectId === "string" && params.projectId ? params.projectId : "";
+  const preselectedTaskId =
+    typeof params.taskId === "string" && params.taskId ? params.taskId : "";
+  const projectLocked = !!preselectedProjectId;
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [projectId, setProjectId] = useState<string>("");
-  const [taskId, setTaskId] = useState<string>("");
+  const [projectId, setProjectId] = useState<string>(preselectedProjectId);
+  const [taskId, setTaskId] = useState<string>(preselectedTaskId);
   const [completeTask, setCompleteTask] = useState<boolean>(false);
   const [title, setTitle] = useState("");
   const [date, setDate] = useState(nowDate());
@@ -46,10 +52,10 @@ export default function ProjectCheckinScreen() {
       try {
         const ps = await api.listProjects();
         setProjects(ps.map((p) => ({ id: p.id, title: p.title })));
-        if (ps.length > 0) setProjectId(ps[0].id);
+        if (!preselectedProjectId && ps.length > 0) setProjectId(ps[0].id);
       } catch { /* ignore */ }
     })();
-  }, []);
+  }, [preselectedProjectId]);
 
   useEffect(() => {
     if (!projectId) { setTasks([]); return; }
@@ -57,11 +63,20 @@ export default function ProjectCheckinScreen() {
       try {
         // Only surface open work — completed tasks don't need another check-in.
         const all = await api.listTasks({ includeCompleted: false });
-        setTasks(all.filter((t) => t.project_id === projectId).map((t) => ({ id: t.id, title: t.title })));
-        setTaskId("");
+        const filtered = all.filter((t) => t.project_id === projectId);
+        setTasks(filtered.map((t) => ({ id: t.id, title: t.title })));
+        setTaskId((current) => {
+          if (filtered.some((task) => task.id === current)) return current;
+          if (preselectedTaskId && filtered.some((task) => task.id === preselectedTaskId)) {
+            return preselectedTaskId;
+          }
+          return "";
+        });
       } catch { setTasks([]); }
     })();
-  }, [projectId]);
+  }, [projectId, preselectedTaskId]);
+
+  const selectedProject = projects.find((project) => project.id === projectId);
 
   const onSave = async () => {
     setError(null);
@@ -100,22 +115,30 @@ export default function ProjectCheckinScreen() {
     <SafeAreaView style={s.safe} edges={["top", "bottom"]}>
       <View style={s.headerRow}>
         <Pressable onPress={() => router.back()} testID="project-checkin-cancel" hitSlop={12}><Text style={s.cancel}>Cancel</Text></Pressable>
-        <Text style={s.headerTitle}>Project Check-in</Text>
+        <Text style={s.headerTitle}>Log project progress</Text>
         <View style={{ width: 56 }} />
       </View>
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={s.flex}>
         <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
           <Text style={s.label}>Project</Text>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
-            {projects.map((p) => {
-              const sel = projectId === p.id;
-              return (
-                <Pressable key={p.id} onPress={() => setProjectId(p.id)} style={[s.chip, sel && s.chipSelected]} testID={`project-checkin-project-chip-${p.id}`}>
-                  <Text style={[s.chipText, sel && s.chipTextSelected]}>{p.title}</Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
+          {projectLocked ? (
+            <View style={s.readonlyRow} testID="project-checkin-project-readonly">
+              <Text style={s.readonlyText} numberOfLines={2}>
+                {selectedProject?.title || "Loading project…"}
+              </Text>
+            </View>
+          ) : (
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
+              {projects.map((p) => {
+                const sel = projectId === p.id;
+                return (
+                  <Pressable key={p.id} onPress={() => setProjectId(p.id)} style={[s.chip, sel && s.chipSelected]} testID={`project-checkin-project-chip-${p.id}`}>
+                    <Text style={[s.chipText, sel && s.chipTextSelected]}>{p.title}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          )}
 
           {tasks.length > 0 && (
             <>
@@ -200,7 +223,7 @@ export default function ProjectCheckinScreen() {
 
         <View style={s.footer}>
           <Pressable style={[s.cta, busy && s.ctaDisabled]} onPress={onSave} disabled={busy} testID="project-checkin-save-button">
-            {busy ? <ActivityIndicator color={colors.onSurfaceInverse} /> : <Text style={s.ctaText}>Save check-in</Text>}
+            {busy ? <ActivityIndicator color={colors.onSurfaceInverse} /> : <Text style={s.ctaText}>Save progress</Text>}
           </Pressable>
         </View>
       </KeyboardAvoidingView>
