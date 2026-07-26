@@ -1,6 +1,6 @@
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("setup-env", "db-start", "db-stop", "db-status", "backend", "backend-test", "frontend", "test", "lint", "reset-db")]
+    [ValidateSet("start", "status", "restart", "stop", "setup-env", "db-start", "db-stop", "db-status", "backend", "backend-test", "frontend", "test", "lint", "reset-db")]
     [string]$Command = "db-status"
 )
 
@@ -9,6 +9,8 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $BackendDir = Join-Path $RepoRoot "backend"
 $FrontendDir = Join-Path $RepoRoot "frontend"
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+$LocalExpo = Join-Path $FrontendDir "node_modules\.bin\expo.cmd"
+$PreviewHelper = Join-Path $PSScriptRoot "local-preview.ps1"
 
 function Assert-LocalUrl([string]$Url) {
     $uri = [Uri]$Url
@@ -47,6 +49,12 @@ function Load-DotEnv([string]$Path) {
 Push-Location $RepoRoot
 try {
     switch ($Command) {
+        { $_ -in @("start", "status", "restart", "stop") } {
+            & $PreviewHelper $Command
+            if (-not $?) {
+                exit 1
+            }
+        }
         "setup-env" {
             foreach ($pair in @(
                 @("backend\.env.example", "backend\.env"),
@@ -80,8 +88,13 @@ try {
         "frontend" {
             Load-DotEnv (Join-Path $FrontendDir ".env")
             Assert-LocalUrl $env:EXPO_PUBLIC_BACKEND_URL
+            if (-not (Test-Path -LiteralPath $LocalExpo)) {
+                throw "Frontend dependencies are missing. Run 'corepack yarn install --frozen-lockfile' inside frontend."
+            }
+            $env:EXPO_PUBLIC_BACKEND_URL = "http://127.0.0.1:8001"
+            $env:EXPO_OFFLINE = "1"
             Push-Location $FrontendDir
-            try { yarn start } finally { Pop-Location }
+            try { & $LocalExpo start --web --localhost --port 8081 } finally { Pop-Location }
         }
         "test" {
             Load-DotEnv (Join-Path $BackendDir ".env.test")
@@ -92,8 +105,11 @@ try {
             & $VenvPython -m pytest backend\tests -p no:cacheprovider
         }
         "lint" {
+            if (-not (Test-Path -LiteralPath $LocalExpo)) {
+                throw "Frontend dependencies are missing. Run 'corepack yarn install --frozen-lockfile' inside frontend."
+            }
             Push-Location $FrontendDir
-            try { yarn lint } finally { Pop-Location }
+            try { & $LocalExpo lint } finally { Pop-Location }
         }
         "reset-db" {
             Write-Warning "This deletes only Docker volume 'hymn-local-mongodb-data'."
