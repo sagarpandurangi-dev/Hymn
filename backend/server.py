@@ -8,7 +8,7 @@ import logging
 import re
 import uuid
 from pathlib import Path
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Any, List, Optional
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -79,11 +79,26 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 # ---------- Models ----------
+def _normalize_display_name(value: str) -> str:
+    normalized = " ".join(value.split())
+    if not normalized:
+        raise ValueError("Name is required")
+    if len(normalized) > 80:
+        raise ValueError("Name must be 80 characters or fewer")
+    return normalized
+
+
 class SignUpRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
     email: EmailStr
     password: str = Field(min_length=6)
     security_question: str = Field(min_length=1)
     security_answer: str = Field(min_length=1)
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str) -> str:
+        return _normalize_display_name(value)
 
 
 class LoginRequest(BaseModel):
@@ -107,9 +122,19 @@ POST_CREATION_DECOMPOSITION_PREFERENCES = ("always_ask", "always_decompose", "al
 class UserResponse(BaseModel):
     id: str
     email: EmailStr
+    display_name: Optional[str] = None
     portfolio_setup_completed_at: Optional[str] = None
     portfolio_reporting_currency: Optional[str] = None
     post_creation_decomposition_preference: str = "always_ask"
+
+
+class UserProfileUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+
+    @field_validator("display_name")
+    @classmethod
+    def validate_display_name(cls, value: str) -> str:
+        return _normalize_display_name(value)
 
 
 class PostCreationDecompositionPreferenceUpdate(BaseModel):
@@ -514,9 +539,16 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 
 
 def user_to_response(u: dict) -> UserResponse:
+    stored_name = u.get("display_name")
+    display_name = (
+        " ".join(stored_name.split())
+        if isinstance(stored_name, str) and stored_name.strip()
+        else None
+    )
     return UserResponse(
         id=u["id"],
         email=u["email"],
+        display_name=display_name,
         portfolio_setup_completed_at=u.get("portfolio_setup_completed_at"),
         portfolio_reporting_currency=u.get("portfolio_reporting_currency"),
         post_creation_decomposition_preference=u.get(
@@ -699,6 +731,7 @@ async def signup(body: SignUpRequest):
     user_doc = {
         "id": user_id,
         "email": email,
+        "display_name": body.display_name,
         "hashed_password": hash_password(body.password),
         "security_question": body.security_question.strip(),
         "hashed_security_answer": hash_password(body.security_answer.strip().lower()),
@@ -709,7 +742,7 @@ async def signup(body: SignUpRequest):
     token = create_access_token(user_id)
     return TokenResponse(
         access_token=token,
-        user=UserResponse(id=user_id, email=email),
+        user=user_to_response(user_doc),
     )
 
 
@@ -761,6 +794,25 @@ async def forgot_password(body: ForgotPasswordRequest):
 @api_router.get("/auth/me", response_model=UserResponse)
 async def me(current_user: dict = Depends(get_current_user)):
     return user_to_response(current_user)
+
+
+@api_router.patch("/auth/me", response_model=UserResponse)
+async def update_me(
+    body: UserProfileUpdate,
+    current_user: dict = Depends(get_current_user),
+):
+    now = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$set": {
+            "display_name": body.display_name,
+            "updated_at": now,
+        }},
+    )
+    updated = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user_to_response(updated)
 
 
 @api_router.patch("/auth/preferences/post-creation-decomposition", response_model=UserResponse)

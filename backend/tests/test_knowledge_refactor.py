@@ -26,6 +26,7 @@ def _unique_email() -> str:
 def fresh_user():
     email = _unique_email()
     r = requests.post(f"{API}/auth/signup", json={
+        "display_name": "Test User",
         "email": email,
         "password": "TestPass123!",
         "security_question": "color?",
@@ -301,6 +302,7 @@ class TestIsolation:
     def test_other_users_journeys_not_leaked(self, fresh_user):
         other_email = _unique_email()
         r = requests.post(f"{API}/auth/signup", json={
+            "display_name": "Other User",
             "email": other_email, "password": "TestPass123!",
             "security_question": "?", "security_answer": "a",
         })

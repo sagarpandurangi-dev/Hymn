@@ -28,6 +28,7 @@ def _signup() -> tuple[str, dict]:
     suffix = uuid.uuid4().hex[:10]
     email = f"TEST_pm_{suffix}@example.com"
     payload = {
+        "display_name": "Test User",
         "email": email,
         "password": "TestPass123!",
         "security_question": "Color?",

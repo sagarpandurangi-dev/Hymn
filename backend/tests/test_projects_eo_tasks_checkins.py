@@ -14,7 +14,7 @@ DEFAULTS = {"Knowledge", "Health", "Money", "Soul"}
 def _signup(email: str, password: str = "TestPass123!") -> str:
     r = requests.post(
         f"{API}/auth/signup",
-        json={"email": email, "password": password, "security_question": "q?", "security_answer": "a"},
+        json={"display_name": "Test User", "email": email, "password": password, "security_question": "q?", "security_answer": "a"},
         timeout=15,
     )
     assert r.status_code == 201, r.text

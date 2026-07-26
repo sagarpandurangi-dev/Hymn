@@ -13,6 +13,7 @@ API = f"{BASE_URL}/api"
 def _signup_user():
     email = f"TEST_p2_{uuid.uuid4().hex[:10]}@hymn.app"
     r = requests.post(f"{API}/auth/signup", json={
+        "display_name": "Test User",
         "email": email, "password": "TestPass123!",
         "security_question": "q?", "security_answer": "a",
     }, timeout=30)

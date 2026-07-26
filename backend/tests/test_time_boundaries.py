@@ -33,6 +33,7 @@ def token() -> str:
     response = requests.post(
         f"{API}/auth/signup",
         json={
+            "display_name": "Test User",
             "email": email,
             "password": "TestPass123!",
             "security_question": "q?",

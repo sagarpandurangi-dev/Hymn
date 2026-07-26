@@ -42,6 +42,7 @@ class TestEmailPasswordJwt:
         response = session.post(
             f"{API}/auth/signup",
             json={
+                "display_name": "  Test   Owner  ",
                 "email": email,
                 "password": PASSWORD,
                 "security_question": "Colour?",
@@ -53,6 +54,7 @@ class TestEmailPasswordJwt:
         body = response.json()
         assert body["token_type"] == "bearer"
         assert body["access_token"]
+        assert body["user"]["display_name"] == "Test Owner"
         assert body["user"]["email"] == email.lower()
         state.update(
             email=email.lower(),
@@ -68,6 +70,14 @@ class TestEmailPasswordJwt:
         )
         assert response.status_code == 200, response.text
         assert response.json()["id"] == state["user_id"]
+        assert response.json()["display_name"] == "Test Owner"
+
+    def test_signup_stores_only_the_normalized_display_name(self, mongo, state):
+        stored = mongo.users.find_one(
+            {"id": state["user_id"]},
+            {"_id": 0, "display_name": 1},
+        )
+        assert stored == {"display_name": "Test Owner"}
 
     def test_login_returns_jwt(self, session, state):
         response = session.post(
@@ -96,6 +106,112 @@ class TestEmailPasswordJwt:
         # The frontend completes JWT logout by deleting its stored token.
         still_valid = session.get(f"{API}/auth/me", headers=headers, timeout=15)
         assert still_valid.status_code == 200
+
+    @pytest.mark.parametrize(
+        ("display_name", "expected_status"),
+        [
+            ("", 422),
+            ("   ", 422),
+            ("A" * 81, 422),
+        ],
+    )
+    def test_signup_rejects_invalid_display_names(
+        self,
+        session,
+        display_name,
+        expected_status,
+    ):
+        response = session.post(
+            f"{API}/auth/signup",
+            json={
+                "display_name": display_name,
+                "email": f"TEST_invalid_name_{time.time_ns()}@hymn.app",
+                "password": PASSWORD,
+                "security_question": "Colour?",
+                "security_answer": "Blue",
+            },
+            timeout=15,
+        )
+        assert response.status_code == expected_status, response.text
+
+    def test_profile_name_update_is_owned_normalized_and_immediate(
+        self,
+        session,
+        mongo,
+        state,
+    ):
+        other_email = f"TEST_auth_other_{time.time_ns()}@hymn.app"
+        other = session.post(
+            f"{API}/auth/signup",
+            json={
+                "display_name": "Other Person",
+                "email": other_email,
+                "password": PASSWORD,
+                "security_question": "Colour?",
+                "security_answer": "Blue",
+            },
+            timeout=15,
+        )
+        assert other.status_code == 201, other.text
+        other_id = other.json()["user"]["id"]
+        try:
+            headers = {"Authorization": f"Bearer {state['token']}"}
+            updated = session.patch(
+                f"{API}/auth/me",
+                json={"display_name": "  Sagar   Pandurangi  "},
+                headers=headers,
+                timeout=15,
+            )
+            assert updated.status_code == 200, updated.text
+            assert updated.json()["display_name"] == "Sagar Pandurangi"
+            assert mongo.users.find_one({"id": state["user_id"]})["display_name"] == (
+                "Sagar Pandurangi"
+            )
+            assert mongo.users.find_one({"id": other_id})["display_name"] == (
+                "Other Person"
+            )
+        finally:
+            mongo.users.delete_one({"id": other_id})
+
+    @pytest.mark.parametrize("display_name", ["", "   ", "A" * 81])
+    def test_profile_update_rejects_invalid_names(
+        self,
+        session,
+        state,
+        display_name,
+    ):
+        response = session.patch(
+            f"{API}/auth/me",
+            json={"display_name": display_name},
+            headers={"Authorization": f"Bearer {state['token']}"},
+            timeout=15,
+        )
+        assert response.status_code == 422, response.text
+
+    def test_existing_user_without_name_remains_explicitly_unnamed(
+        self,
+        session,
+        mongo,
+        state,
+    ):
+        mongo.users.update_one(
+            {"id": state["user_id"]},
+            {"$unset": {"display_name": ""}},
+        )
+        headers = {"Authorization": f"Bearer {state['token']}"}
+        unnamed = session.get(f"{API}/auth/me", headers=headers, timeout=15)
+        assert unnamed.status_code == 200, unnamed.text
+        assert unnamed.json()["display_name"] is None
+        assert unnamed.json()["email"] == state["email"]
+
+        restored = session.patch(
+            f"{API}/auth/me",
+            json={"display_name": "Test Owner"},
+            headers=headers,
+            timeout=15,
+        )
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["display_name"] == "Test Owner"
 
 
 class TestPasswordRecovery:
