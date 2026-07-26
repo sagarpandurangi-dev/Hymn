@@ -180,6 +180,28 @@ export default function TodayScreen() {
           <HeaderAvatar />
         </View>
 
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Tell Hymn what you want to do"
+          onPress={() => router.push("/intents")}
+          style={({ pressed }) => [
+            styles.intentEntry,
+            pressed && styles.intentEntryPressed,
+          ]}
+          testID="universal-intent-entry"
+        >
+          <View style={styles.intentEntryIcon}>
+            <Ionicons name="sparkles-outline" size={22} color={colors.brandPrimary} />
+          </View>
+          <View style={styles.intentEntryCopy}>
+            <Text style={styles.intentEntryTitle}>I want to…</Text>
+            <Text style={styles.intentEntryBody}>
+              Turn a decision into a clear, reviewable plan.
+            </Text>
+          </View>
+          <Ionicons name="arrow-forward" size={20} color={colors.brandPrimary} />
+        </Pressable>
+
         <View style={styles.stack}>
           <Card
             testID="card-check-ins"
@@ -304,6 +326,32 @@ const styles = StyleSheet.create({
   hello: { fontSize: 14, color: colors.onSurfaceSecondary, letterSpacing: 0.5 },
   subhead: { fontFamily: fonts.displayBold, fontSize: 36, color: colors.onSurface, fontWeight: "700", marginTop: spacing.xs, marginBottom: spacing.xl },
   headerRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: spacing.md },
+  intentEntry: {
+    backgroundColor: colors.brandTertiary,
+    borderRadius: radius.md,
+    padding: spacing.lg,
+    marginBottom: spacing.lg,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+  },
+  intentEntryPressed: { opacity: 0.82 },
+  intentEntryIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+  },
+  intentEntryCopy: { flex: 1, gap: spacing.xs },
+  intentEntryTitle: {
+    fontFamily: fonts.displayBold,
+    fontSize: 20,
+    color: colors.onSurface,
+    fontWeight: "700",
+  },
+  intentEntryBody: { fontSize: 13, color: colors.onSurfaceSecondary, lineHeight: 18 },
   stack: { gap: spacing.lg },
   card: {
     backgroundColor: colors.surfaceSecondary,

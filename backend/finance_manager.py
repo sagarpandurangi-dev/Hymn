@@ -57,7 +57,7 @@ COMMITMENT_STATES = ("draft", "reserved", "completed", "cancelled", "expired")
 PRIORITIES = ("low", "medium", "high", "critical")
 CHANGE_SOURCES = (
     "manual", "checkin", "sms", "bank_statement", "credit_card_statement",
-    "bank_connection", "system", "reconciliation",
+    "bank_connection", "system", "reconciliation", "universal_intent",
 )
 AUDIT_ACTIONS = (
     "created", "updated", "cancelled", "completed", "expired", "postponed",
@@ -101,6 +101,7 @@ _ISO_4217 = frozenset({
     "USD", "UYU", "UZS", "VES", "VND", "VUV", "WST", "XAF", "XCD", "XOF",
     "XPF", "YER", "ZAR", "ZMW", "ZWG",
 })
+ISO_4217_CURRENCIES = _ISO_4217
 
 _MONEY_OUT_Q = Decimal("0.01")
 
