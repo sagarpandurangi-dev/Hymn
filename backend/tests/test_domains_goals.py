@@ -16,6 +16,7 @@ def _signup(email: str, password: str = "TestPass123!") -> str:
     r = requests.post(
         f"{API}/auth/signup",
         json={
+            "display_name": "Test User",
             "email": email,
             "password": password,
             "security_question": "q?",

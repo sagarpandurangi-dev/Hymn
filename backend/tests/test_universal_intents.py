@@ -25,6 +25,7 @@ def _signup(label: str) -> dict:
     response = requests.post(
         f"{API}/auth/signup",
         json={
+            "display_name": f"Intent {label}",
             "email": f"TEST_intent_{label}_{time.time_ns()}@hymn.app",
             "password": "TestPass123!",
             "security_question": "Question?",

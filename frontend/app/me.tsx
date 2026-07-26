@@ -1,20 +1,56 @@
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useState } from "react";
 import { useRouter } from "expo-router";
 import { useAuth } from "@/src/lib/AuthContext";
+import {
+  displayNameInitials,
+  displayNameValidationError,
+  normalizeDisplayName,
+} from "@/src/lib/profile";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
 export default function MeScreen() {
   const router = useRouter();
-  const { user, signOut } = useAuth();
+  const { user, signOut, updateDisplayName } = useAuth();
   const [busy, setBusy] = useState(false);
+  const [editingName, setEditingName] = useState(false);
+  const [nameValue, setNameValue] = useState(user?.display_name || "");
+  const [nameError, setNameError] = useState<string | null>(null);
+  const initials = displayNameInitials(user?.display_name);
 
   const onLogout = async () => {
     setBusy(true);
     try {
       await signOut();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveName = async () => {
+    const validationError = displayNameValidationError(nameValue);
+    if (validationError) {
+      setNameError(validationError);
+      return;
+    }
+    setBusy(true);
+    setNameError(null);
+    try {
+      const updated = await updateDisplayName(normalizeDisplayName(nameValue));
+      setNameValue(updated.display_name || "");
+      setEditingName(false);
+    } catch (error: any) {
+      setNameError(error?.message || "Hymn could not save your name.");
     } finally {
       setBusy(false);
     }
@@ -33,9 +69,76 @@ export default function MeScreen() {
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.profile}>
           <View style={styles.avatar}>
-            <Ionicons name="person" size={32} color={colors.onBrandPrimary} />
+            {initials ? (
+              <Text style={styles.avatarText}>{initials}</Text>
+            ) : (
+              <Ionicons name="person" size={32} color={colors.onBrandPrimary} />
+            )}
           </View>
-          <Text style={styles.email} testID="me-email">{user?.email || ""}</Text>
+          {editingName ? (
+            <View style={styles.nameEditor}>
+              <Text style={styles.fieldLabel}>Your name</Text>
+              <TextInput
+                value={nameValue}
+                onChangeText={setNameValue}
+                style={styles.nameInput}
+                placeholder="How should Hymn address you?"
+                placeholderTextColor={colors.onSurfaceTertiary}
+                autoCapitalize="words"
+                autoFocus
+                maxLength={80}
+                editable={!busy}
+                testID="me-name-input"
+              />
+              {nameError ? <Text style={styles.errorText}>{nameError}</Text> : null}
+              <View style={styles.nameActions}>
+                <Pressable
+                  onPress={saveName}
+                  disabled={busy}
+                  style={[styles.saveNameButton, busy && styles.disabled]}
+                  testID="me-name-save"
+                >
+                  {busy ? (
+                    <ActivityIndicator color={colors.onBrandPrimary} />
+                  ) : (
+                    <Text style={styles.saveNameText}>Save name</Text>
+                  )}
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    setNameValue(user?.display_name || "");
+                    setNameError(null);
+                    setEditingName(false);
+                  }}
+                  disabled={busy}
+                  style={styles.cancelNameButton}
+                >
+                  <Text style={styles.cancelNameText}>Cancel</Text>
+                </Pressable>
+              </View>
+            </View>
+          ) : (
+            <>
+              <Text style={styles.displayName} testID="me-display-name">
+                {user?.display_name || "Your profile"}
+              </Text>
+              <Pressable
+                onPress={() => {
+                  setNameValue(user?.display_name || "");
+                  setEditingName(true);
+                }}
+                testID={user?.display_name ? "me-edit-name" : "me-add-name"}
+              >
+                <Text style={styles.nameLink}>
+                  {user?.display_name ? "Edit your name" : "Add your name"}
+                </Text>
+              </Pressable>
+            </>
+          )}
+          <View style={styles.emailBlock}>
+            <Text style={styles.fieldLabel}>Email</Text>
+            <Text style={styles.email} testID="me-email">{user?.email || ""}</Text>
+          </View>
         </View>
 
         <View style={styles.section}>
@@ -122,6 +225,40 @@ const styles = StyleSheet.create({
     width: 72, height: 72, borderRadius: 36, backgroundColor: colors.brandPrimary,
     alignItems: "center", justifyContent: "center",
   },
+  avatarText: { color: colors.onBrandPrimary, fontSize: 24, fontWeight: "700" },
+  displayName: { fontSize: 22, color: colors.onSurface, fontWeight: "600" },
+  nameLink: { color: colors.brandPrimary, fontSize: 14, fontWeight: "600" },
+  nameEditor: { width: "100%", gap: spacing.sm },
+  fieldLabel: { color: colors.onSurfaceSecondary, fontSize: 12, letterSpacing: 0.4 },
+  nameInput: {
+    width: "100%",
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    color: colors.onSurface,
+    fontSize: 16,
+  },
+  nameActions: { flexDirection: "row", gap: spacing.sm },
+  saveNameButton: {
+    flex: 1,
+    alignItems: "center",
+    backgroundColor: colors.brandPrimary,
+    borderRadius: radius.pill,
+    paddingVertical: spacing.md,
+  },
+  saveNameText: { color: colors.onBrandPrimary, fontWeight: "600" },
+  cancelNameButton: {
+    flex: 1,
+    alignItems: "center",
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: radius.pill,
+    paddingVertical: spacing.md,
+  },
+  cancelNameText: { color: colors.onSurface, fontWeight: "600" },
+  disabled: { opacity: 0.55 },
+  errorText: { color: colors.error, fontSize: 13 },
+  emailBlock: { alignItems: "center", gap: spacing.xs, marginTop: spacing.sm },
   email: { fontSize: 16, color: colors.onSurface, fontWeight: "500" },
   section: { paddingHorizontal: spacing.xl, marginTop: spacing.lg, gap: spacing.sm },
   row: {

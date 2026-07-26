@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { api } from "./api";
+import { api, type UserResponse } from "./api";
 import { clearToken, getToken, saveToken } from "./tokenStorage";
 
 export type PostCreationDecompositionPreference =
@@ -7,21 +7,22 @@ export type PostCreationDecompositionPreference =
   | "always_decompose"
   | "always_skip";
 
-export type User = {
-  id: string;
-  email: string;
-  portfolio_setup_completed_at?: string | null;
-  portfolio_reporting_currency?: string | null;
-  post_creation_decomposition_preference?: PostCreationDecompositionPreference;
-};
+export type User = UserResponse;
 
 type AuthState = {
   user: User | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string, securityQuestion: string, securityAnswer: string) => Promise<void>;
+  signUp: (
+    displayName: string,
+    email: string,
+    password: string,
+    securityQuestion: string,
+    securityAnswer: string,
+  ) => Promise<void>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  updateDisplayName: (displayName: string) => Promise<User>;
   setPostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) => Promise<User>;
 };
 
@@ -57,8 +58,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const signUp = useCallback(
-    async (email: string, password: string, securityQuestion: string, securityAnswer: string) => {
+    async (
+      displayName: string,
+      email: string,
+      password: string,
+      securityQuestion: string,
+      securityAnswer: string,
+    ) => {
       const res = await api.signup({
+        display_name: displayName,
         email,
         password,
         security_question: securityQuestion,
@@ -89,6 +97,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
+  const updateDisplayName = useCallback(async (displayName: string): Promise<User> => {
+    const updated = await api.updateMe({ display_name: displayName });
+    setUser(updated);
+    return updated;
+  }, []);
+
   const setPostCreationDecompositionPreference = useCallback(
     async (preference: PostCreationDecompositionPreference): Promise<User> => {
       const updated = await api.updatePostCreationDecompositionPreference(preference);
@@ -99,7 +113,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut, refreshUser, setPostCreationDecompositionPreference }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{
+      user,
+      loading,
+      signIn,
+      signUp,
+      signOut,
+      refreshUser,
+      updateDisplayName,
+      setPostCreationDecompositionPreference,
+    }}>
+      {children}
+    </AuthContext.Provider>
   );
 };
 

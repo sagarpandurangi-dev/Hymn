@@ -13,10 +13,15 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Link } from "expo-router";
 import { useAuth } from "@/src/lib/AuthContext";
+import {
+  displayNameValidationError,
+  normalizeDisplayName,
+} from "@/src/lib/profile";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
 export default function SignUpScreen() {
   const { signUp } = useAuth();
+  const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [question, setQuestion] = useState("");
@@ -26,6 +31,11 @@ export default function SignUpScreen() {
 
   const onSubmit = async () => {
     setError(null);
+    const nameError = displayNameValidationError(displayName);
+    if (nameError) {
+      setError(nameError);
+      return;
+    }
     if (!email || !password || !question || !answer) {
       setError("All fields are required.");
       return;
@@ -36,7 +46,13 @@ export default function SignUpScreen() {
     }
     setBusy(true);
     try {
-      await signUp(email.trim().toLowerCase(), password, question.trim(), answer.trim());
+      await signUp(
+        normalizeDisplayName(displayName),
+        email.trim().toLowerCase(),
+        password,
+        question.trim(),
+        answer.trim(),
+      );
     } catch (e: any) {
       setError(e?.message || "Sign up failed");
     } finally {
@@ -52,6 +68,19 @@ export default function SignUpScreen() {
             <Text style={styles.brand}>Hymn.</Text>
             <Text style={styles.tagline}>Begin your record.</Text>
           </View>
+
+          <Text style={styles.label}>Your name</Text>
+          <TextInput
+            style={styles.input}
+            value={displayName}
+            onChangeText={setDisplayName}
+            placeholder="How should Hymn address you?"
+            placeholderTextColor={colors.onSurfaceTertiary}
+            autoCapitalize="words"
+            autoCorrect={false}
+            maxLength={80}
+            testID="sign-up-display-name-input"
+          />
 
           <Text style={styles.label}>Email</Text>
           <TextInput

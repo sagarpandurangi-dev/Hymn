@@ -83,6 +83,7 @@ def test_generate_endpoint_returns_controlled_local_result():
     signup = requests.post(
         f"{API}/auth/signup",
         json={
+            "display_name": "Test Planner",
             "email": email,
             "password": "TestPass123!",
             "security_question": "q?",

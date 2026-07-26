@@ -57,6 +57,7 @@ export type PostCreationDecompositionPreference =
 export type UserResponse = {
   id: string;
   email: string;
+  display_name?: string | null;
   portfolio_setup_completed_at?: string | null;
   portfolio_reporting_currency?: string | null;
   post_creation_decomposition_preference?: PostCreationDecompositionPreference;
@@ -64,6 +65,7 @@ export type UserResponse = {
 
 export const api = {
   signup: (payload: {
+    display_name: string;
     email: string;
     password: string;
     security_question: string;
@@ -74,6 +76,13 @@ export const api = {
     request<{ access_token: string; user: UserResponse }>("/auth/login", { method: "POST", body: payload }),
 
   me: () => request<UserResponse>("/auth/me", { auth: true }),
+
+  updateMe: (payload: { display_name: string }) =>
+    request<UserResponse>("/auth/me", {
+      method: "PATCH",
+      body: payload,
+      auth: true,
+    }),
 
   logout: () => request<{ detail: string }>("/auth/logout", { method: "POST", auth: true }),
 
