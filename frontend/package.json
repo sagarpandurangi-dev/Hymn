@@ -12,6 +12,7 @@
     "lint": "expo lint",
     "test:intent-contract": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types ./tests/intent-contract.test.mjs",
     "test:profile-contract": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types ./tests/profile-contract.test.mjs",
+    "test:planning-contract": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types ./tests/planning-contract.test.mjs",
     "test:reconciliation-contract": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types ./tests/reconciliation-contract.test.mjs"
   },
   "dependencies": {

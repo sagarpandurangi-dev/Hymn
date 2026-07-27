@@ -4,7 +4,7 @@ Pipeline (§1 of the spec):
 
 * **A. Analyze** — deterministic only. Reads the relevant Hymn slice, infers
   current-state facts, attaches stable ``evidence_id`` values, stores a
-  compact portfolio snapshot + hash. Never calls the LLM. Returns
+  compact portfolio snapshot + hash. Never calls a remote generator. Returns
   ``confirmation_required`` with no outcomes / tasks / feasibility.
 * **B. Confirm** — batched. Persists and merges confirmations for every
   field in one request. Never discards a prior confirmation. Builds the
@@ -38,6 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from deps import get_current_user, get_db
+from finance_manager import ASSET_ACCOUNT_TYPES
 from portfolio_manager import compute_time_union_and_overlap
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ EVIDENCE_TYPES = (
     "current_activity_checkin",
     "inference",
     "external_estimate",
-    "llm_estimate",
+    "provider_estimate",
     "none",
 )
 EVIDENCE_PRECEDENCE: Tuple[str, ...] = EVIDENCE_TYPES  # already ordered
@@ -149,7 +150,7 @@ def _decimal_from_stored(v: Any) -> Decimal:
 
 
 def _stable_json(obj: Any) -> str:
-    """Deterministic JSON — used for snapshot hashing and LLM context."""
+    """Deterministic JSON — used for snapshot hashing and generation context."""
     def default(o: Any) -> Any:
         if isinstance(o, Decimal128):
             return str(o.to_decimal())
@@ -180,7 +181,7 @@ def _fact(field: str, value: Any, evidence: str, confidence: str,
     _require_in(evidence, EVIDENCE_TYPES, "evidence")
     _require_in(confidence, CONFIDENCE_LEVELS, "confidence")
     return {
-        "evidence_id": _uuid(),  # stable identifier used by the LLM contract
+        "evidence_id": _uuid(),  # stable identifier used by the local generator contract
         "field": field,
         "value": value,
         "evidence": evidence,
@@ -576,7 +577,7 @@ def _time_capacity_summary(
         "days": days_seen,
         "total_free_minutes": total_free if coverage_ok else None,
         "reason": None if coverage_ok else "no time commitments configured across horizon",
-        "per_day_preview": per_day[:14],  # first two weeks for LLM context
+        "per_day_preview": per_day[:14],  # first two weeks for generation context
     }
 
 
@@ -666,7 +667,7 @@ def _money_capacity_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================================
-# Resolved context — used both by the LLM and by downstream deterministic
+# Resolved context — used by the local generator and downstream deterministic
 # calculators. Applied confirmations override inferred values.
 # ============================================================================
 
@@ -729,7 +730,7 @@ def _blocking_fields(current_state: List[dict]) -> List[str]:
 # Compact generator context — never expose the raw full portfolio (§1C).
 # ============================================================================
 
-def _compact_llm_context(
+def _compact_generation_context(
     snapshot: Dict[str, Any],
     resolved: Dict[str, Any],
     time_capacity: Dict[str, Any],
@@ -792,23 +793,23 @@ def _compact_llm_context(
 # Strict Pydantic generated-plan contract (§5).
 # ============================================================================
 
-class LLMResourceMoney(BaseModel):
+class PlanResourceMoney(BaseModel):
     model_config = ConfigDict(extra="forbid")
     amount: Optional[str] = None  # decimal string
     currency: Optional[str] = None
     assumption_id: Optional[str] = None
 
 
-class LLMResources(BaseModel):
+class PlanResources(BaseModel):
     model_config = ConfigDict(extra="forbid")
     time_minutes: Optional[int] = Field(default=None, ge=0)
-    money: Optional[LLMResourceMoney] = None
+    money: Optional[PlanResourceMoney] = None
     energy: Optional[str] = Field(default=None, pattern="^(low|medium|high|unknown)$")
     attention: Optional[str] = Field(default=None, pattern="^(low|medium|high|unknown)$")
     assumption_id: Optional[str] = None
 
 
-class LLMSchedule(BaseModel):
+class PlanSchedule(BaseModel):
     model_config = ConfigDict(extra="forbid")
     day_of_week: Optional[str] = Field(
         default=None,
@@ -820,7 +821,7 @@ class LLMSchedule(BaseModel):
     mode: Optional[str] = Field(default=None, pattern="^(one_time|recurring)$")
 
 
-class LLMProposedOutcome(BaseModel):
+class ProposedOutcomeSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     proposal_ref: str
     title: str
@@ -831,7 +832,7 @@ class LLMProposedOutcome(BaseModel):
     assumption_id: Optional[str] = None
 
 
-class LLMProposedTask(BaseModel):
+class ProposedTaskSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     proposal_ref: str
     parent_outcome_ref: Optional[str] = None  # required for goal/journey (validated later)
@@ -844,20 +845,20 @@ class LLMProposedTask(BaseModel):
     depends_on: List[str] = []
     earliest_start: Optional[str] = None
     target_date: Optional[str] = None
-    required_resources: Optional[LLMResources] = None
-    schedule: Optional[LLMSchedule] = None
+    required_resources: Optional[PlanResources] = None
+    schedule: Optional[PlanSchedule] = None
     evidence_ids: List[str] = []
     assumption_id: Optional[str] = None
 
 
-class LLMBlockingQuestion(BaseModel):
+class PlanBlockingQuestion(BaseModel):
     model_config = ConfigDict(extra="forbid")
     field: str
     question: str
     why_blocking: Optional[str] = None
 
 
-class LLMAssumption(BaseModel):
+class PlanAssumption(BaseModel):
     model_config = ConfigDict(extra="forbid")
     assumption_id: str
     statement: str
@@ -865,151 +866,40 @@ class LLMAssumption(BaseModel):
     requires_user_confirmation: bool = True
 
 
-class LLMCheckIn(BaseModel):
+class PlanCheckIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cadence: str = Field(pattern="^(daily|weekly|monthly|manual)$")
     linked_to: str = Field(pattern="^(outcome|task|goal|project|journey)$")
 
 
-class LLMRisk(BaseModel):
+class PlanRisk(BaseModel):
     model_config = ConfigDict(extra="forbid")
     description: str
     evidence_ids: List[str] = []
     assumption_id: Optional[str] = None
 
 
-class LLMResponse(BaseModel):
+class GeneratedPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     objective_summary: str
     measurable_success_criteria: Optional[str] = None
-    proposed_outcomes: List[LLMProposedOutcome] = []
-    proposed_tasks: List[LLMProposedTask] = []
-    proposed_check_ins: List[LLMCheckIn] = []
-    blocking_questions: List[LLMBlockingQuestion] = []
-    assumptions: List[LLMAssumption] = []
-    risks: List[LLMRisk] = []
+    proposed_outcomes: List[ProposedOutcomeSpec] = []
+    proposed_tasks: List[ProposedTaskSpec] = []
+    proposed_check_ins: List[PlanCheckIn] = []
+    blocking_questions: List[PlanBlockingQuestion] = []
+    assumptions: List[PlanAssumption] = []
+    risks: List[PlanRisk] = []
 
 
 # ============================================================================
-# LLM prompt & call
+# Deterministic local plan generation
 # ============================================================================
-
-_LLM_SYSTEM = (
-    "You are Hymn's Planning Interpreter. You never invent facts. "
-    "You must ground every proposed outcome, task, risk, and assumption in "
-    "evidence supplied in the resolved_context (via evidence_ids) or in an "
-    "explicit assumption you declare. You must not invent external sources; "
-    "external estimates are disabled. Output ONLY valid JSON conforming to "
-    "the LLMResponse schema described in the user message. If a required "
-    "value cannot be grounded, omit the field or reference an assumption_id "
-    "you also emit in the assumptions array. Never fabricate durations, "
-    "costs, dates, dependencies, or skills."
-)
-
-
-_LLM_INSTRUCTIONS = """You will receive:
-
-* target_type
-* target_id
-* target_summary
-* resolved_context : field → {value, evidence_id, confidence, blocking}
-* existing_expected_outcomes / tasks / knowledge_stages / knowledge_components
-* capacity : deterministic time + money summaries
-* portfolio_summary : counts only
-
-Return a JSON object with EXACTLY these keys:
-
-{
-  "objective_summary": "one sentence grounded in target_summary + resolved_context.objective",
-  "measurable_success_criteria": null OR the confirmed value from resolved_context,
-  "proposed_outcomes": [{
-    "proposal_ref": "unique per-proposal identifier",
-    "title": "...",
-    "measurable_end_state": "e.g. body_weight <= 70kg",
-    "completion_condition": "...",
-    "target_date": "YYYY-MM-DD or null",
-    "evidence_ids": ["<evidence_id from resolved_context>", ...],
-    "assumption_id": null OR "<id you also emit in assumptions[]>"
-  }],
-  "proposed_tasks": [{
-    "proposal_ref": "unique",
-    "parent_outcome_ref": "for goal/journey: proposal_ref of the parent outcome OR an existing outcome id",
-    "component_ref": "for journey: existing knowledge_component id OR null",
-    "reuse_existing_task_id": null OR "id of an existing task to reuse/update",
-    "title": "...",
-    "action_and_deliverable": "...",
-    "completion_condition": "measurable — no 'work on', 'research', 'stay consistent'",
-    "owner": "self",
-    "depends_on": ["proposal_ref of another proposed task"],
-    "earliest_start": "YYYY-MM-DD or null",
-    "target_date": "YYYY-MM-DD or null",
-    "required_resources": {
-      "time_minutes": integer OR null,
-      "money": {"amount": "decimal string" OR null, "currency": "USD" OR null, "assumption_id": null},
-      "energy": "low|medium|high|unknown OR null",
-      "attention": "low|medium|high|unknown OR null",
-      "assumption_id": null
-    },
-    "schedule": null OR {"mode": "one_time|recurring", "day_of_week": "monday|...",
-                          "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"},
-    "evidence_ids": [...],
-    "assumption_id": null OR "<id>"
-  }],
-  "proposed_check_ins": [{"cadence": "daily|weekly|monthly|manual", "linked_to": "outcome|task|goal|project|journey"}],
-  "blocking_questions": [{"field": "field name", "question": "...", "why_blocking": "..."}],
-  "assumptions": [{"assumption_id": "unique",
-                    "statement": "...",
-                    "range": "text range or null",
-                    "requires_user_confirmation": true}],
-  "risks": [{"description": "...", "evidence_ids": [...], "assumption_id": null}]
-}
-
-STRICT RULES:
-1. Only reference evidence_ids that exist in resolved_context.
-2. If time_minutes / money / energy / attention are not known, leave them null and declare an assumption_id.
-3. Every proposed task MUST include a measurable completion_condition. No 'research X', 'work on Y' phrasings.
-4. Every proposed task for a goal or journey must set parent_outcome_ref to a proposal_ref you also emit OR an existing expected_outcome id.
-5. Journey tasks that map to a Knowledge Component MUST set component_ref to that component id.
-6. Do NOT output external_estimates. External sources are unavailable.
-7. Do NOT invent public sources; declare an assumption instead.
-8. Reuse an existing task via reuse_existing_task_id when the proposed task duplicates an existing one.
-"""
-
-
-def _extract_json(text: str) -> Optional[dict]:
-    if not text:
-        return None
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        cand = m.group(1)
-    else:
-        start = text.find("{")
-        if start == -1:
-            return None
-        depth = 0
-        end = -1
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        if end == -1:
-            return None
-        cand = text[start:end]
-    try:
-        return json.loads(cand)
-    except json.JSONDecodeError:
-        return None
-
 
 def _generate_plan_locally(
     compact_ctx: Dict[str, Any],
     target_type: str,
     target_id: str,
-) -> LLMResponse:
+) -> GeneratedPlan:
     """Return a deterministic Foundation plan without network access.
 
     The local generator preserves the response contract and useful confirmed
@@ -1022,12 +912,12 @@ def _generate_plan_locally(
     target_summary = compact_ctx.get("target_summary") or {}
     objective = (resolved.get("objective") or {}).get("value")
     success = (resolved.get("success_criteria") or {}).get("value")
-    risks: List[LLMRisk] = []
+    risks: List[PlanRisk] = []
 
     time_capacity = ((compact_ctx.get("capacity") or {}).get("time") or {})
     if time_capacity.get("status") != "known":
         risks.append(
-            LLMRisk(
+            PlanRisk(
                 description=(
                     "Time capacity is unknown because the local portfolio "
                     "does not contain enough scheduled commitment coverage."
@@ -1037,7 +927,7 @@ def _generate_plan_locally(
     money_capacity = ((compact_ctx.get("capacity") or {}).get("money") or {})
     if money_capacity.get("has_unknown_due_dates"):
         risks.append(
-            LLMRisk(
+            PlanRisk(
                 description=(
                     "Some money reservations have unknown due dates, so "
                     "monthly feasibility cannot be determined."
@@ -1045,11 +935,11 @@ def _generate_plan_locally(
             )
         )
 
-    return LLMResponse(
+    return GeneratedPlan(
         objective_summary=str(objective or target_summary.get("title") or target_type.title()),
         measurable_success_criteria=str(success) if success is not None else None,
         blocking_questions=[
-            LLMBlockingQuestion(
+            PlanBlockingQuestion(
                 field="plan_items",
                 question="Add or confirm concrete outcomes and tasks before approval.",
                 why_blocking=(
@@ -1063,7 +953,7 @@ def _generate_plan_locally(
 
 
 # ============================================================================
-# Deterministic post-LLM validation & feasibility (§5, §7).
+# Deterministic generated-plan validation & feasibility (§5, §7).
 # ============================================================================
 
 def _detect_cycles(tasks: List[dict]) -> List[List[str]]:
@@ -1128,15 +1018,15 @@ def _validate_dependencies(proposed_tasks: List[dict]) -> List[str]:
     return problems
 
 
-def _validate_evidence_refs(llm_out: LLMResponse, evidence_ids: set, assumption_ids: set) -> List[str]:
+def _validate_evidence_refs(generated_plan: GeneratedPlan, evidence_ids: set, assumption_ids: set) -> List[str]:
     problems: List[str] = []
-    for o in llm_out.proposed_outcomes:
+    for o in generated_plan.proposed_outcomes:
         for eid in o.evidence_ids:
             if eid not in evidence_ids:
                 problems.append(f"outcome '{o.proposal_ref}' references unknown evidence_id={eid}")
         if o.assumption_id and o.assumption_id not in assumption_ids:
             problems.append(f"outcome '{o.proposal_ref}' references unknown assumption_id={o.assumption_id}")
-    for t in llm_out.proposed_tasks:
+    for t in generated_plan.proposed_tasks:
         for eid in t.evidence_ids:
             if eid not in evidence_ids:
                 problems.append(f"task '{t.proposal_ref}' references unknown evidence_id={eid}")
@@ -1147,7 +1037,7 @@ def _validate_evidence_refs(llm_out: LLMResponse, evidence_ids: set, assumption_
                 problems.append(f"task '{t.proposal_ref}' required_resources.assumption_id={t.required_resources.assumption_id} unknown")
             if t.required_resources.money and t.required_resources.money.assumption_id and t.required_resources.money.assumption_id not in assumption_ids:
                 problems.append(f"task '{t.proposal_ref}' money assumption_id unknown")
-    for r in llm_out.risks:
+    for r in generated_plan.risks:
         for eid in r.evidence_ids:
             if eid not in evidence_ids:
                 problems.append(f"risk references unknown evidence_id={eid}")
@@ -1159,9 +1049,9 @@ def _validate_evidence_refs(llm_out: LLMResponse, evidence_ids: set, assumption_
 _BAD_TITLE_PATTERNS = ("research", "work on", "make progress", "stay consistent")
 
 
-def _validate_tasks_semantic(llm_out: LLMResponse, target_type: str) -> List[str]:
+def _validate_tasks_semantic(generated_plan: GeneratedPlan, target_type: str) -> List[str]:
     problems: List[str] = []
-    for t in llm_out.proposed_tasks:
+    for t in generated_plan.proposed_tasks:
         if not t.completion_condition or t.completion_condition.strip() == "":
             problems.append(f"task '{t.proposal_ref}' missing completion_condition")
         lower = (t.title or "").lower()
@@ -1182,38 +1072,38 @@ def _validate_tasks_semantic(llm_out: LLMResponse, target_type: str) -> List[str
 
 
 def _validate_parent_outcome_refs(
-    llm_out: LLMResponse, existing_outcome_ids: set,
+    generated_plan: GeneratedPlan, existing_outcome_ids: set,
 ) -> List[str]:
     """Parent outcome refs must either point to a proposal_ref in the same
-    LLM response or to an existing expected_outcome id."""
-    proposed_refs = {o.proposal_ref for o in llm_out.proposed_outcomes}
+    generated plan or to an existing expected_outcome id."""
+    proposed_refs = {o.proposal_ref for o in generated_plan.proposed_outcomes}
     problems: List[str] = []
-    for t in llm_out.proposed_tasks:
+    for t in generated_plan.proposed_tasks:
         if t.parent_outcome_ref and t.parent_outcome_ref not in proposed_refs and t.parent_outcome_ref not in existing_outcome_ids:
             problems.append(f"task '{t.proposal_ref}' parent_outcome_ref={t.parent_outcome_ref} not found in proposals or existing outcomes")
     return problems
 
 
-def _validate_component_refs(llm_out: LLMResponse, existing_component_ids: set, target_type: str) -> List[str]:
+def _validate_component_refs(generated_plan: GeneratedPlan, existing_component_ids: set, target_type: str) -> List[str]:
     problems: List[str] = []
     if target_type != "journey":
         return problems
-    for t in llm_out.proposed_tasks:
+    for t in generated_plan.proposed_tasks:
         if t.component_ref and t.component_ref not in existing_component_ids:
             problems.append(f"task '{t.proposal_ref}' component_ref={t.component_ref} not found")
     return problems
 
 
-def _validate_reuse_targets(llm_out: LLMResponse, existing_task_ids: set) -> List[str]:
+def _validate_reuse_targets(generated_plan: GeneratedPlan, existing_task_ids: set) -> List[str]:
     problems: List[str] = []
-    for t in llm_out.proposed_tasks:
+    for t in generated_plan.proposed_tasks:
         if t.reuse_existing_task_id and t.reuse_existing_task_id not in existing_task_ids:
             problems.append(f"task '{t.proposal_ref}' reuse_existing_task_id={t.reuse_existing_task_id} not found")
     return problems
 
 
 def _feasibility(
-    llm_out: LLMResponse,
+    generated_plan: GeneratedPlan,
     time_capacity: Dict[str, Any],
     money_capacity: Dict[str, Any],
     portfolio_conflicts: List[dict],
@@ -1237,7 +1127,7 @@ def _feasibility(
     total_free_min = time_capacity.get("total_free_minutes")
     total_required_min = 0
     money_needed_by_month_cur: Dict[Tuple[str, str], Decimal] = {}
-    for t in llm_out.proposed_tasks:
+    for t in generated_plan.proposed_tasks:
         req = t.required_resources
         if req is None:
             unknowns.append(f"task '{t.proposal_ref}' required_resources missing")
@@ -1329,20 +1219,20 @@ def _feasibility(
 
 
 # ============================================================================
-# Approval actions — built from the validated LLM response.
+# Approval actions — built from the validated generated plan.
 # ============================================================================
 
 def _plan_actions(
-    llm_out: LLMResponse,
+    generated_plan: GeneratedPlan,
     target_type: str,
     target_id: str,
     linked_goal_id: Optional[str],
 ) -> List[dict]:
-    """Convert the validated LLM output into a strict list of approval
+    """Convert the validated generated plan into a strict list of approval
     actions. Each action carries an ``action_id`` (proposal_ref + action)
     so idempotency by (version, action_id) works during commit."""
     actions: List[dict] = []
-    for o in llm_out.proposed_outcomes:
+    for o in generated_plan.proposed_outcomes:
         if target_type not in ("goal", "journey"):
             continue
         goal_id = target_id if target_type == "goal" else linked_goal_id
@@ -1364,7 +1254,7 @@ def _plan_actions(
                 "notes": o.completion_condition or "",
             },
         })
-    for t in llm_out.proposed_tasks:
+    for t in generated_plan.proposed_tasks:
         if t.reuse_existing_task_id:
             actions.append({
                 "action_id": f"reuse_task:{t.proposal_ref}",
@@ -1450,9 +1340,9 @@ def _plan_actions(
                 },
             })
     # Check-ins: map to Goal/Project cadence, do NOT create future completed check-ins.
-    if llm_out.proposed_check_ins:
+    if generated_plan.proposed_check_ins:
         # Pick strictest cadence linked to the target itself.
-        for c in llm_out.proposed_check_ins:
+        for c in generated_plan.proposed_check_ins:
             if c.linked_to in ("goal", "project", "journey") and target_type == c.linked_to:
                 actions.append({
                     "action_id": f"cadence:{c.linked_to}:{c.cadence}",
@@ -1461,6 +1351,631 @@ def _plan_actions(
                 })
                 break
     return actions
+
+
+# ============================================================================
+# Human context-review contract (Planning v1)
+# ============================================================================
+
+PUBLIC_STAGES = ("review", "questions", "proposal", "applied")
+PUBLIC_ITEM_KINDS = ("milestone", "outcome", "task")
+PUBLIC_ITEM_STATUSES = ("active", "deferred")
+CONTEXT_OVERRIDE_FIELDS = (
+    "objective",
+    "success_criteria",
+    "target_date",
+    "current_balance",
+    "current_balance_currency",
+    "current_balance_account_id",
+    "dependencies",
+    "constraints",
+    "plan_structure",
+)
+
+
+def _plain_decimal(value: Decimal) -> str:
+    text = format(value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _display_money(amount: Decimal, currency: str) -> str:
+    return f"{currency} {amount:,.2f}"
+
+
+def _return_metadata(target_type: str, target_id: str, title: str = "") -> dict:
+    route_prefix = {
+        "goal": "goals",
+        "project": "projects",
+        "journey": "knowledge",
+    }[target_type]
+    kind = "goal" if target_type == "goal" else (
+        "project" if target_type == "project" else "learning journey"
+    )
+    return {
+        "route": f"/{route_prefix}/{target_id}",
+        "target_type": target_type,
+        "target_id": target_id,
+        "label": f"Return to {title or kind}",
+    }
+
+
+def _effective_context(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    inferred = dict(proposal.get("inferred_context") or {})
+    if not inferred:
+        snapshot = proposal.get("snapshot") or {}
+        target = snapshot.get("target") or {}
+        inferred = {
+            "objective": target.get("title") or None,
+            "success_criteria": (
+                target.get("target_outcome")
+                if snapshot.get("target_type") == "goal"
+                else None
+            ),
+            "target_date": (
+                target.get("deadline")
+                or target.get("target_end_date")
+                or None
+            ),
+            "dependencies": None,
+            "constraints": None,
+            "plan_structure": None,
+        }
+    effective = dict(inferred)
+    for field, record in (proposal.get("context_overrides") or {}).items():
+        if field in CONTEXT_OVERRIDE_FIELDS and isinstance(record, dict):
+            effective[field] = record.get("value")
+    return effective
+
+
+_MONEY_TARGET_RE = re.compile(
+    r"(?ix)"
+    r"(?P<prefix>₹|\$|INR|USD|EUR|GBP)\s*"
+    r"(?P<amount>\d[\d,]*(?:\.\d+)?)"
+    r"(?:\s*(?P<scale>thousand|lakh|lac|million|crore))?"
+    r"|"
+    r"(?P<amount_after>\d[\d,]*(?:\.\d+)?)"
+    r"(?:\s*(?P<scale_after>thousand|lakh|lac|million|crore))"
+    r"\s*(?P<suffix>INR|USD|EUR|GBP)"
+)
+_CURRENCY_CODES = {
+    "₹": "INR",
+    "$": "USD",
+    "INR": "INR",
+    "USD": "USD",
+    "EUR": "EUR",
+    "GBP": "GBP",
+}
+_MONEY_SCALES = {
+    "thousand": Decimal("1000"),
+    "lakh": Decimal("100000"),
+    "lac": Decimal("100000"),
+    "million": Decimal("1000000"),
+    "crore": Decimal("10000000"),
+}
+
+
+def _parse_human_target_date(text: str) -> Optional[str]:
+    match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", text)
+    if not match:
+        return None
+    day, month, year = (int(part) for part in match.groups())
+    # Without a locale contract, only accept numeric dates whose first
+    # component cannot be a month.
+    if day <= 12:
+        return None
+    try:
+        return date_type(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def _parse_financial_target(
+    effective: Dict[str, Any],
+    snapshot: Dict[str, Any],
+) -> Optional[dict]:
+    target = snapshot.get("target") or {}
+    text = " ".join(
+        str(value)
+        for value in (
+            effective.get("objective"),
+            effective.get("success_criteria"),
+            target.get("notes"),
+        )
+        if value
+    )
+    match = _MONEY_TARGET_RE.search(text)
+    if not match:
+        return None
+    raw_amount = match.group("amount") or match.group("amount_after")
+    scale = (match.group("scale") or match.group("scale_after") or "").lower()
+    currency_token = match.group("prefix") or match.group("suffix")
+    try:
+        amount = Decimal(raw_amount.replace(",", ""))
+        if scale:
+            amount *= _MONEY_SCALES[scale]
+    except Exception:
+        return None
+    if amount <= 0:
+        return None
+    currency = _CURRENCY_CODES.get(currency_token.upper() if currency_token.isalpha() else currency_token)
+    target_date = effective.get("target_date")
+    if not _is_iso_date(target_date):
+        target_date = _parse_human_target_date(text)
+    return {
+        "amount": amount,
+        "currency": currency,
+        "target_date": target_date if _is_iso_date(target_date) else None,
+        "requires_bank": bool(re.search(r"\bbank(?:\s+account)?\b", text, re.IGNORECASE)),
+    }
+
+
+def _liquid_balance_context(
+    proposal: Dict[str, Any],
+    effective: Dict[str, Any],
+    financial_target: Optional[dict],
+) -> dict:
+    if not financial_target:
+        return {"status": "not_applicable", "account": None, "candidates": []}
+    currency = financial_target["currency"]
+    accounts = [
+        account
+        for account in (proposal.get("snapshot") or {}).get("portfolio", {}).get(
+            "financial_accounts", []
+        )
+        if account.get("liquidity_type") == "liquid"
+        and account.get("account_type") in ASSET_ACCOUNT_TYPES
+        and account.get("currency") == currency
+        and (
+            not financial_target.get("requires_bank")
+            or account.get("account_type") == "bank"
+        )
+    ]
+    selected_id = effective.get("current_balance_account_id")
+    if selected_id:
+        selected = next((account for account in accounts if account.get("id") == selected_id), None)
+        if selected:
+            return {"status": "known", "account": selected, "candidates": accounts}
+    manual_balance = effective.get("current_balance")
+    manual_currency = effective.get("current_balance_currency")
+    if manual_balance not in (None, "") and manual_currency == currency:
+        try:
+            amount = Decimal(str(manual_balance))
+            if amount >= 0:
+                return {
+                    "status": "known",
+                    "account": {
+                        "id": None,
+                        "name": "Balance supplied for this plan",
+                        "currency": currency,
+                        "current_value": _plain_decimal(amount),
+                    },
+                    "candidates": accounts,
+                }
+        except Exception:
+            pass
+    if len(accounts) == 1:
+        return {"status": "known", "account": accounts[0], "candidates": accounts}
+    if len(accounts) > 1:
+        return {"status": "ambiguous", "account": None, "candidates": accounts}
+    return {"status": "missing", "account": None, "candidates": []}
+
+
+def _human_questions(
+    proposal: Dict[str, Any],
+    effective: Dict[str, Any],
+    balance: dict,
+) -> List[dict]:
+    answers = proposal.get("question_answers") or {}
+    questions: List[dict] = []
+    if not effective.get("success_criteria"):
+        questions.append({
+            "id": "success_criteria",
+            "field": "success_criteria",
+            "prompt": "What would success look like?",
+            "help_text": "Describe the result that would tell you this goal or project is complete.",
+            "input_type": "text",
+            "required": True,
+            "options": [],
+        })
+    if not effective.get("target_date"):
+        questions.append({
+            "id": "target_date",
+            "field": "target_date",
+            "prompt": "When would you like to reach this?",
+            "help_text": "A date helps Hymn explain the pace required. You can say you do not know yet.",
+            "input_type": "date",
+            "required": False,
+            "options": [],
+        })
+    if balance["status"] == "ambiguous":
+        questions.append({
+            "id": "balance_account",
+            "field": "current_balance_account_id",
+            "prompt": "Which recorded balance applies to this goal?",
+            "help_text": "Hymn found more than one liquid account in the target currency and will not add them together.",
+            "input_type": "select",
+            "required": True,
+            "options": [
+                {
+                    "value": account["id"],
+                    "label": f"{account.get('name') or 'Unnamed account'} — "
+                             f"{account.get('currency')} {account.get('current_value')}",
+                }
+                for account in balance["candidates"]
+            ],
+        })
+    elif balance["status"] == "missing":
+        questions.append({
+            "id": "current_balance",
+            "field": "current_balance",
+            "prompt": "What current recorded balance should Hymn use?",
+            "help_text": "No matching liquid balance is recorded. Add one here only if you know it.",
+            "input_type": "money",
+            "required": False,
+            "options": [],
+        })
+    decisions = proposal.get("context_decisions") or {}
+    # Do not repeat answered questions. "I don't know yet" is also a valid,
+    # explicit answer; "That's not right" keeps the correction question open.
+    return [
+        question
+        for question in questions
+        if question["id"] not in answers
+        and (decisions.get(question["field"]) or {}).get("action") != "dont_know"
+    ]
+
+
+def _fact_item(
+    key: str,
+    label: str,
+    value: Optional[str],
+    *,
+    status: str = "known",
+    editable: bool = False,
+    editor: str = "text",
+    why: str,
+    evidence: Optional[List[str]] = None,
+) -> dict:
+    return {
+        "key": key,
+        "label": label,
+        "value": value,
+        "status": status if value not in (None, "") else "missing",
+        "editable": editable,
+        "editor": editor,
+        "why": {
+            "summary": why,
+            "evidence": list(evidence or []),
+        },
+    }
+
+
+def _human_feasibility(
+    proposal: Dict[str, Any],
+    effective: Dict[str, Any],
+    financial_target: Optional[dict],
+    balance: dict,
+) -> dict:
+    calculations: List[dict] = []
+    appears_feasible: List[str] = []
+    difficulties: List[str] = []
+    unknowns: List[str] = []
+
+    target_date = _parse_date(effective.get("target_date"))
+    if target_date:
+        remaining_days = (target_date - datetime.now(timezone.utc).date()).days
+        if remaining_days < 0:
+            difficulties.append("The target date has already passed.")
+        else:
+            calculations.append({
+                "label": "Time remaining",
+                "value": f"{remaining_days} days",
+                "explanation": "Calculated from the target date and today's date.",
+            })
+    else:
+        unknowns.append("A target date is needed to calculate the pace.")
+
+    if financial_target:
+        target_amount = financial_target["amount"]
+        currency = financial_target["currency"]
+        calculations.insert(0, {
+            "label": "Target",
+            "value": _display_money(target_amount, currency),
+            "explanation": "Read from the goal wording; no amount was invented.",
+        })
+        if balance["status"] == "known":
+            account = balance["account"]
+            current = _decimal_from_stored(account.get("current_value"))
+            gap = max(Decimal(0), target_amount - current)
+            calculations.extend([
+                {
+                    "label": "Current recorded balance",
+                    "value": _display_money(current, currency),
+                    "explanation": f"Uses only {account.get('name') or 'the selected liquid account'}.",
+                },
+                {
+                    "label": "Remaining gap",
+                    "value": _display_money(gap, currency),
+                    "explanation": "Target minus the selected current balance.",
+                },
+            ])
+            if target_date and target_date >= datetime.now(timezone.utc).date():
+                remaining_days = (target_date - datetime.now(timezone.utc).date()).days
+                months = max(Decimal(1), Decimal(remaining_days) / Decimal("30.4375"))
+                required = gap / months
+                calculations.append({
+                    "label": "Average progress needed",
+                    "value": f"{_display_money(required, currency)} per month",
+                    "explanation": "An even monthly average, not a prediction or financial recommendation.",
+                })
+            if current >= target_amount:
+                appears_feasible.append("The selected recorded balance already meets the stated target.")
+            else:
+                unknowns.append("Hymn does not know future income, returns, or unrecorded commitments.")
+        elif balance["status"] == "ambiguous":
+            unknowns.append("More than one matching liquid account exists; choose the one that applies.")
+        else:
+            unknowns.append("No matching liquid account balance is available.")
+    else:
+        task_count = len((proposal.get("snapshot") or {}).get("tasks") or [])
+        if task_count:
+            appears_feasible.append(f"{task_count} existing task{'s' if task_count != 1 else ''} can inform the plan.")
+        else:
+            unknowns.append("No execution tasks are recorded yet.")
+        unknowns.append("Hymn does not have enough evidence to estimate effort or capacity.")
+
+    if difficulties:
+        status = "may_be_difficult"
+        summary = "The current information points to a difficulty that needs attention."
+    elif unknowns:
+        status = "insufficient_information"
+        summary = "Hymn can explain what is known, but cannot yet make a confident feasibility claim."
+    else:
+        status = "appears_feasible"
+        summary = "The recorded information does not show an immediate obstacle."
+    return {
+        "status": status,
+        "summary": summary,
+        "appears_feasible": appears_feasible,
+        "difficulties": difficulties,
+        "calculations": calculations,
+        "unknowns": unknowns,
+    }
+
+
+def _build_context_review(proposal: Dict[str, Any]) -> dict:
+    snapshot = proposal.get("snapshot") or {}
+    target = snapshot.get("target") or {}
+    effective = _effective_context(proposal)
+    financial_target = _parse_financial_target(effective, snapshot)
+    balance = _liquid_balance_context(proposal, effective, financial_target)
+    questions = _human_questions(proposal, effective, balance)
+    overrides = proposal.get("context_overrides") or {}
+
+    outcomes = snapshot.get("expected_outcomes") or []
+    tasks = snapshot.get("tasks") or []
+    checkins = snapshot.get("checkins") or []
+    done_tasks = sum(1 for task in tasks if task.get("status") == "done")
+    portfolio_goals = snapshot.get("portfolio", {}).get("active_goals") or []
+    portfolio_projects = snapshot.get("portfolio", {}).get("active_projects") or []
+    active_goals = [
+        goal for goal in portfolio_goals if goal.get("status", "active") == "active"
+    ]
+    paused_goals = [
+        goal for goal in portfolio_goals if goal.get("status") == "paused"
+    ]
+    active_projects = [
+        project
+        for project in portfolio_projects
+        if project.get("status", "active") == "active"
+    ]
+    paused_projects = [
+        project for project in portfolio_projects if project.get("status") == "paused"
+    ]
+
+    progress_value = (
+        f"{done_tasks} of {len(tasks)} linked tasks are complete."
+        if tasks
+        else "No linked tasks are recorded yet."
+    )
+    outcome_value = (
+        f"{len(outcomes)} expected outcome{'s' if len(outcomes) != 1 else ''} recorded."
+        if outcomes
+        else "No expected outcomes are recorded yet."
+    )
+    checkin_value = (
+        f"{len(checkins)} relevant progress update{'s' if len(checkins) != 1 else ''} recorded."
+        if checkins
+        else "No relevant progress updates are recorded yet."
+    )
+    balance_value: Optional[str] = None
+    balance_status = "missing"
+    if balance["status"] == "known":
+        account = balance["account"]
+        balance_value = f"{account.get('currency')} {account.get('current_value')} in {account.get('name')}"
+        balance_status = "user_edited" if (
+            "current_balance" in overrides or "current_balance_account_id" in overrides
+        ) else "known"
+    elif balance["status"] == "ambiguous":
+        balance_value = "More than one matching liquid balance is recorded."
+
+    sections = [
+        {
+            "key": "what_you_want",
+            "title": "What you want",
+            "items": [
+                _fact_item(
+                    "objective", "Desired result", effective.get("objective"),
+                    status="user_edited" if "objective" in overrides else "known",
+                    editable=True, why="Taken from the title of this goal or project.",
+                    evidence=[f"Goal or project: {target.get('title') or 'Untitled'}"],
+                ),
+                _fact_item(
+                    "success_criteria", "What success means", effective.get("success_criteria"),
+                    status="user_edited" if "success_criteria" in overrides else "known",
+                    editable=True, why="Uses the recorded target outcome or your saved correction.",
+                ),
+                _fact_item(
+                    "target_date", "Target date", effective.get("target_date"),
+                    status="user_edited" if "target_date" in overrides else "known",
+                    editable=True, editor="date",
+                    why="Uses the target date saved on this goal or project.",
+                ),
+            ],
+        },
+        {
+            "key": "where_things_stand",
+            "title": "Where things stand",
+            "items": [
+                _fact_item(
+                    "work_progress", "Linked work", progress_value,
+                    why="Counted only tasks linked to this goal or project.",
+                ),
+                _fact_item(
+                    "outcome_progress", "Expected outcomes", outcome_value,
+                    why="Counted only outcomes owned by you and linked to this goal.",
+                ),
+                _fact_item(
+                    "progress_updates", "Progress updates", checkin_value,
+                    why="Counted relevant progress records linked to this work.",
+                ),
+                _fact_item(
+                    "current_balance", "Current relevant balance", balance_value,
+                    status=balance_status, editable=bool(financial_target), editor="money",
+                    why=(
+                        "Uses one matching liquid account only; Hymn never adds unrelated balances."
+                        if financial_target
+                        else "A balance is shown only for a clearly financial target."
+                    ),
+                ),
+            ],
+        },
+        {
+            "key": "what_may_affect_this",
+            "title": "What may affect this",
+            "items": [
+                _fact_item(
+                    "other_goals", "Other active goals",
+                    f"{len(active_goals)} other active goal{'s' if len(active_goals) != 1 else ''}.",
+                    why="The current goal is shown separately and is not included in this count.",
+                ),
+                _fact_item(
+                    "paused_goals", "Other paused goals",
+                    f"{len(paused_goals)} other paused goal{'s' if len(paused_goals) != 1 else ''}.",
+                    why="Paused goals are shown separately so they are not presented as active work.",
+                ),
+                _fact_item(
+                    "other_projects", "Other active projects",
+                    f"{len(active_projects)} other active project{'s' if len(active_projects) != 1 else ''}.",
+                    why="Counted from your portfolio; no workload assumption is made.",
+                ),
+                _fact_item(
+                    "paused_projects", "Other paused projects",
+                    f"{len(paused_projects)} other paused project{'s' if len(paused_projects) != 1 else ''}.",
+                    why="Paused projects are shown separately so they are not presented as active work.",
+                ),
+                _fact_item(
+                    "dependencies", "Dependencies",
+                    effective.get("dependencies") or "No dependencies are recorded yet.",
+                    status=(
+                        "user_edited" if "dependencies" in overrides
+                        else "missing"
+                    ),
+                    editable=True,
+                    why="Hymn does not infer dependencies that are not explicitly recorded.",
+                ),
+                _fact_item(
+                    "constraints", "Constraints",
+                    effective.get("constraints") or "No constraints are recorded yet.",
+                    status=(
+                        "user_edited" if "constraints" in overrides
+                        else "missing"
+                    ),
+                    editable=True,
+                    why="Only constraints you record are treated as authoritative.",
+                ),
+            ],
+        },
+        {
+            "key": "what_hymn_still_needs",
+            "title": "What Hymn still needs",
+            "items": [
+                _fact_item(
+                    f"question_{question['id']}",
+                    question["prompt"],
+                    question["help_text"],
+                    why="This answer is needed to avoid inventing part of the plan.",
+                )
+                for question in questions
+            ] or [
+                _fact_item(
+                    "nothing_missing", "No blocking questions",
+                    "You can review the draft plan next.",
+                    why="All required planning context is available.",
+                )
+            ],
+        },
+    ]
+    return {
+        "title": "Does Hymn understand your situation?",
+        "intro": "Review what Hymn knows, correct anything important, and answer only the missing questions.",
+        "sections": sections,
+        "questions": questions,
+        "feasibility": _human_feasibility(
+            proposal, effective, financial_target, balance,
+        ),
+    }
+
+
+def _refresh_public_contract(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    proposal["context_review"] = _build_context_review(proposal)
+    proposal.setdefault("draft_plan", {"version": 0, "items": [], "can_apply": False})
+    proposal["return_to"] = _return_metadata(
+        proposal["target_type"],
+        proposal["target_id"],
+        (proposal.get("snapshot") or {}).get("target", {}).get("title") or "",
+    )
+    if proposal.get("applied_plan") or proposal.get("status") == "approved":
+        stage = "applied"
+        action = ("view_target", "View the attached plan", "GET", proposal["return_to"]["route"])
+    elif proposal["draft_plan"].get("items"):
+        stage = "proposal"
+        action = (
+            "apply_plan", "Apply this plan", "POST",
+            f"/planning/proposals/{proposal['id']}/apply",
+        )
+    elif proposal["context_review"]["questions"]:
+        stage = "questions"
+        action = ("answer_questions", "Answer the questions above", "POST", None)
+    else:
+        stage = "review"
+        action = (
+            "build_draft", "Build a draft plan", "POST",
+            f"/planning/proposals/{proposal['id']}/draft",
+        )
+    proposal["stage"] = stage
+    proposal["next_action"] = {
+        "action": action[0],
+        "label": action[1],
+        "method": action[2],
+        "endpoint": action[3],
+    }
+    return proposal
+
+
+def _public_payload(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    _refresh_public_contract(proposal)
+    return {
+        "id": proposal["id"],
+        "target_type": proposal["target_type"],
+        "target_id": proposal["target_id"],
+        "stage": proposal["stage"],
+        "next_action": proposal["next_action"],
+        "context_review": proposal["context_review"],
+        "draft_plan": proposal["draft_plan"],
+        "return_to": proposal["return_to"],
+        "applied_plan": proposal.get("applied_plan"),
+    }
 
 
 # ============================================================================
@@ -1476,7 +1991,7 @@ async def _build_analyze(
     snapshot_hash = _snapshot_hash(snapshot)
     proposal_id = _uuid()
     now = _now()
-    return {
+    proposal = {
         "id": proposal_id,
         "user_id": user_id,
         "target_type": target_type,
@@ -1509,13 +2024,38 @@ async def _build_analyze(
         "selected_tradeoff_id": None,
         "objective_summary": snapshot["target"].get("title") or None,
         "measurable_success_criteria": None,
+        # The inferred values are immutable. User corrections live separately
+        # in context_overrides so every later calculation can show which value
+        # is authoritative without rewriting history.
+        "inferred_context": {
+            "objective": snapshot["target"].get("title") or None,
+            "success_criteria": (
+                snapshot["target"].get("target_outcome") or None
+                if target_type == "goal"
+                else None
+            ),
+            "target_date": (
+                snapshot["target"].get("deadline")
+                or snapshot["target"].get("target_end_date")
+                or None
+            ),
+            "dependencies": None,
+            "constraints": None,
+            "plan_structure": None,
+        },
+        "context_overrides": {},
+        "context_decisions": {},
+        "question_answers": {},
+        "draft_plan": {"version": 0, "items": [], "can_apply": False},
+        "applied_plan": None,
         "created_at": now,
         "updated_at": now,
     }
+    return _refresh_public_contract(proposal)
 
 
 async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[str, Any]:
-    """Take a confirmed proposal and generate the LLM proposal (§1C)."""
+    """Take a confirmed proposal and generate the deterministic proposal (§1C)."""
     snapshot = proposal["snapshot"]
     current_state = _apply_confirmations(proposal["current_state"], proposal.get("confirmations") or {})
 
@@ -1540,8 +2080,8 @@ async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[st
     time_capacity = _time_capacity_summary(snapshot, today, horizon_end)
     money_capacity = _money_capacity_summary(snapshot)
 
-    compact = _compact_llm_context(snapshot, resolved, time_capacity, money_capacity)
-    llm_out = _generate_plan_locally(
+    compact = _compact_generation_context(snapshot, resolved, time_capacity, money_capacity)
+    generated_plan = _generate_plan_locally(
         compact,
         snapshot["target_type"],
         snapshot["target_id"],
@@ -1551,22 +2091,22 @@ async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[st
     portfolio_conflicts: List[dict] = []
     approval_actions: List[dict] = []
 
-    if llm_out:
+    if generated_plan:
         # Evidence + assumption reference validation
         evidence_ids = {f["evidence_id"] for f in current_state}
-        assumption_ids = {a.assumption_id for a in llm_out.assumptions}
-        validation_errors.extend(_validate_evidence_refs(llm_out, evidence_ids, assumption_ids))
-        validation_errors.extend(_validate_tasks_semantic(llm_out, snapshot["target_type"]))
+        assumption_ids = {a.assumption_id for a in generated_plan.assumptions}
+        validation_errors.extend(_validate_evidence_refs(generated_plan, evidence_ids, assumption_ids))
+        validation_errors.extend(_validate_tasks_semantic(generated_plan, snapshot["target_type"]))
 
         existing_outcome_ids = {o["id"] for o in snapshot["expected_outcomes"]}
         existing_task_ids = {t["id"] for t in snapshot["tasks"]}
         existing_component_ids = {c["id"] for c in snapshot["knowledge_components"]}
-        validation_errors.extend(_validate_parent_outcome_refs(llm_out, existing_outcome_ids))
-        validation_errors.extend(_validate_component_refs(llm_out, existing_component_ids, snapshot["target_type"]))
-        validation_errors.extend(_validate_reuse_targets(llm_out, existing_task_ids))
+        validation_errors.extend(_validate_parent_outcome_refs(generated_plan, existing_outcome_ids))
+        validation_errors.extend(_validate_component_refs(generated_plan, existing_component_ids, snapshot["target_type"]))
+        validation_errors.extend(_validate_reuse_targets(generated_plan, existing_task_ids))
 
         # Dependencies
-        proposed_tasks_dict = [t.model_dump() for t in llm_out.proposed_tasks]
+        proposed_tasks_dict = [t.model_dump() for t in generated_plan.proposed_tasks]
         dep_problems = _validate_dependencies(proposed_tasks_dict)
         validation_errors.extend(dep_problems)
         cycles = _detect_cycles(proposed_tasks_dict)
@@ -1578,11 +2118,11 @@ async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[st
             portfolio_conflicts.append({"kind": "duplicate_task", **d})
 
         approval_actions = _plan_actions(
-            llm_out, snapshot["target_type"], snapshot["target_id"],
+            generated_plan, snapshot["target_type"], snapshot["target_id"],
             (snapshot.get("linked_goal") or {}).get("id"),
         )
     feasibility = _feasibility(
-        llm_out,
+        generated_plan,
         time_capacity,
         money_capacity,
         portfolio_conflicts,
@@ -1590,10 +2130,10 @@ async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[st
 
     # Roll-ups
     resource_requirements: List[dict] = []
-    if llm_out:
+    if generated_plan:
         total_min = 0
         money_by_cur: Dict[str, Decimal] = {}
-        for t in llm_out.proposed_tasks:
+        for t in generated_plan.proposed_tasks:
             if t.required_resources and t.required_resources.time_minutes:
                 total_min += t.required_resources.time_minutes
             if t.required_resources and t.required_resources.money and t.required_resources.money.amount and t.required_resources.money.currency:
@@ -1611,31 +2151,31 @@ async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[st
 
     # Visual phases (month grouping)
     visual_phases: List[dict] = []
-    if llm_out:
+    if generated_plan:
         by_month: Dict[str, List[str]] = {}
-        for t in llm_out.proposed_tasks:
+        for t in generated_plan.proposed_tasks:
             m = _month_of(t.earliest_start or t.target_date or "") or "unknown"
             by_month.setdefault(m, []).append(t.title)
         for month, titles in sorted(by_month.items()):
             visual_phases.append({"label": f"Phase {month}", "tasks": titles})
 
     proposal["current_state"] = current_state
-    proposal["proposed_outcomes"] = [o.model_dump() for o in (llm_out.proposed_outcomes if llm_out else [])]
-    proposal["proposed_tasks"] = [t.model_dump() for t in (llm_out.proposed_tasks if llm_out else [])]
-    proposal["proposed_check_ins"] = [c.model_dump() for c in (llm_out.proposed_check_ins if llm_out else [])]
-    proposal["blocking_questions"] = [q.model_dump() for q in (llm_out.blocking_questions if llm_out else [])]
-    proposal["assumptions"] = [a.model_dump() for a in (llm_out.assumptions if llm_out else [])]
-    proposal["risks"] = [r.model_dump() for r in (llm_out.risks if llm_out else [])]
+    proposal["proposed_outcomes"] = [o.model_dump() for o in (generated_plan.proposed_outcomes if generated_plan else [])]
+    proposal["proposed_tasks"] = [t.model_dump() for t in (generated_plan.proposed_tasks if generated_plan else [])]
+    proposal["proposed_check_ins"] = [c.model_dump() for c in (generated_plan.proposed_check_ins if generated_plan else [])]
+    proposal["blocking_questions"] = [q.model_dump() for q in (generated_plan.blocking_questions if generated_plan else [])]
+    proposal["assumptions"] = [a.model_dump() for a in (generated_plan.assumptions if generated_plan else [])]
+    proposal["risks"] = [r.model_dump() for r in (generated_plan.risks if generated_plan else [])]
     proposal["portfolio_conflicts"] = portfolio_conflicts
     proposal["visual_phases"] = visual_phases
     proposal["resource_requirements"] = resource_requirements
     proposal["feasibility"] = feasibility
     proposal["approval_actions"] = approval_actions
     proposal["validation_errors"] = validation_errors
-    proposal["objective_summary"] = (llm_out.objective_summary if llm_out
+    proposal["objective_summary"] = (generated_plan.objective_summary if generated_plan
                                       else snapshot["target"].get("title") or None)
-    proposal["measurable_success_criteria"] = (llm_out.measurable_success_criteria
-                                               if llm_out else None)
+    proposal["measurable_success_criteria"] = (generated_plan.measurable_success_criteria
+                                               if generated_plan else None)
     proposal["external_estimates"] = []
 
     # Status determination
@@ -1686,6 +2226,57 @@ class PauseRequest(BaseModel):
     future_allocations: str
 
 
+class ContextUpdates(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    objective: Optional[str] = None
+    success_criteria: Optional[str] = None
+    target_date: Optional[str] = None
+    current_balance: Optional[str] = None
+    current_balance_currency: Optional[str] = None
+    current_balance_account_id: Optional[str] = None
+    dependencies: Optional[str] = None
+    constraints: Optional[str] = None
+    plan_structure: Optional[str] = None
+
+
+class ContextPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    updates: ContextUpdates
+
+
+class ContextDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str
+    value: Optional[str] = None
+
+
+class QuestionAnswerRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
+
+
+class DraftItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: Optional[str] = None
+    kind: str
+    title: str = Field(min_length=1, max_length=200)
+    notes: str = Field(default="", max_length=4000)
+    status: str = "active"
+    position: int = Field(default=0, ge=0)
+    parent_id: Optional[str] = None
+
+
+class DraftReplaceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: List[DraftItemInput] = Field(max_length=100)
+
+
 # ============================================================================
 # Persistence helpers
 # ============================================================================
@@ -1712,13 +2303,227 @@ def _slim(proposal: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _normalize_override(
+    proposal: Dict[str, Any],
+    field: str,
+    value: Optional[str],
+) -> Optional[str]:
+    _require(field in CONTEXT_OVERRIDE_FIELDS, f"Unsupported context field: {field}")
+    if value is None:
+        return None
+    value = value.strip()
+    if field in ("objective", "success_criteria"):
+        _require(bool(value), f"{field} cannot be empty")
+        _require(len(value) <= 500, f"{field} is too long")
+        return value
+    if field == "target_date":
+        _require(_is_iso_date(value), "target_date must be a real date in YYYY-MM-DD format")
+        return value
+    if field == "current_balance":
+        try:
+            amount = Decimal(value.replace(",", ""))
+        except Exception:
+            raise HTTPException(status_code=400, detail="current_balance must be a valid amount")
+        _require(amount >= 0, "current_balance cannot be negative")
+        return _plain_decimal(amount)
+    if field == "current_balance_currency":
+        currency = value.upper()
+        _require(currency in ("INR", "USD", "EUR", "GBP"), "Unsupported balance currency")
+        return currency
+    if field == "current_balance_account_id":
+        accounts = (
+            (proposal.get("snapshot") or {})
+            .get("portfolio", {})
+            .get("financial_accounts", [])
+        )
+        account = next((row for row in accounts if row.get("id") == value), None)
+        _require(account is not None, "Selected balance is not available for this user", 404)
+        _require(account.get("liquidity_type") == "liquid", "Selected account is not liquid")
+        return value
+    _require(len(value) <= 4000, f"{field} is too long")
+    return value or None
+
+
+def _save_override(
+    proposal: Dict[str, Any],
+    field: str,
+    value: Optional[str],
+    source: str,
+) -> None:
+    normalized = _normalize_override(proposal, field, value)
+    proposal.setdefault("context_overrides", {})[field] = {
+        "value": normalized,
+        "source": source,
+        "recorded_at": _now(),
+    }
+
+
+def _make_draft_items(proposal: Dict[str, Any]) -> List[dict]:
+    effective = _effective_context(proposal)
+    target_type = proposal["target_type"]
+    objective = effective.get("objective") or "this work"
+    success = effective.get("success_criteria")
+    target_date = effective.get("target_date")
+    items: List[dict] = []
+
+    if target_date:
+        items.append({
+            "id": _uuid(),
+            "kind": "milestone",
+            "title": f"Reach {objective} by {target_date}",
+            "notes": "This milestone uses the saved target date.",
+            "status": "active",
+            "position": len(items),
+            "parent_id": None,
+        })
+
+    parent_id: Optional[str] = None
+    if success and target_type in ("goal", "journey"):
+        parent_id = _uuid()
+        items.append({
+            "id": parent_id,
+            "kind": "outcome",
+            "title": success,
+            "notes": "Expected result supplied by the user or recorded on the goal.",
+            "status": "active",
+            "position": len(items),
+            "parent_id": None,
+        })
+    elif success and target_type == "project":
+        parent_id = _uuid()
+        items.append({
+            "id": parent_id,
+            "kind": "task",
+            "title": success,
+            "notes": "First actionable result, using the success description exactly as reviewed.",
+            "status": "active",
+            "position": len(items),
+            "parent_id": None,
+        })
+
+    supplied_structure = effective.get("plan_structure")
+    if supplied_structure:
+        titles = [
+            part.strip(" \t-*")
+            for part in re.split(r"[\r\n;]+", supplied_structure)
+            if part.strip(" \t-*")
+        ]
+        for title in titles[:30]:
+            items.append({
+                "id": _uuid(),
+                "kind": "task",
+                "title": title[:200],
+                "notes": "Supplied by the user during planning review.",
+                "status": "active",
+                "position": len(items),
+                "parent_id": parent_id if (
+                    parent_id
+                    and any(item["id"] == parent_id and item["kind"] == "outcome" for item in items)
+                ) else None,
+            })
+    return items
+
+
+def _validate_draft_items(items: List[DraftItemInput]) -> List[dict]:
+    result: List[dict] = []
+    ids: set = set()
+    for position, item in enumerate(sorted(items, key=lambda row: row.position)):
+        _require_in(item.kind, PUBLIC_ITEM_KINDS, "kind")
+        _require_in(item.status, PUBLIC_ITEM_STATUSES, "status")
+        item_id = item.id or _uuid()
+        _require(item_id not in ids, "Draft item ids must be unique")
+        ids.add(item_id)
+        result.append({
+            "id": item_id,
+            "kind": item.kind,
+            "title": item.title.strip(),
+            "notes": item.notes.strip(),
+            "status": item.status,
+            "position": position,
+            "parent_id": item.parent_id,
+        })
+    for item in result:
+        _require(
+            item["parent_id"] is None or item["parent_id"] in ids,
+            f"Draft item {item['id']} has an unknown parent",
+        )
+        _require(item["parent_id"] != item["id"], "A draft item cannot be its own parent")
+    return result
+
+
+def _draft_actions(proposal: Dict[str, Any]) -> List[dict]:
+    items = [
+        item for item in proposal.get("draft_plan", {}).get("items", [])
+        if item.get("status") == "active"
+    ]
+    target_type = proposal["target_type"]
+    linked_goal_id = (
+        (proposal.get("snapshot") or {}).get("linked_goal") or {}
+    ).get("id")
+    outcome_refs: Dict[str, str] = {}
+    actions: List[dict] = []
+
+    for item in items:
+        if item["kind"] != "outcome" or target_type not in ("goal", "journey"):
+            continue
+        goal_id = proposal["target_id"] if target_type == "goal" else linked_goal_id
+        if not goal_id:
+            continue
+        proposal_ref = f"human-{item['id']}"
+        outcome_refs[item["id"]] = proposal_ref
+        actions.append({
+            "action_id": f"human-outcome:{item['id']}",
+            "action": "create_expected_outcome",
+            "proposal_ref": proposal_ref,
+            "payload": {
+                "goal_id": goal_id,
+                "title": item["title"],
+                "target_value": item["title"],
+                "current_value": "",
+                "unit": "",
+                "deadline": (
+                    _effective_context(proposal).get("target_date") or ""
+                ),
+                "status": "active",
+                "outcome_type": "generic",
+                "notes": item.get("notes") or "",
+            },
+        })
+    for item in items:
+        if item["kind"] != "task":
+            continue
+        actions.append({
+            "action_id": f"human-task:{item['id']}",
+            "action": "create_task",
+            "proposal_ref": f"human-{item['id']}",
+            "parent_outcome_ref": outcome_refs.get(item.get("parent_id")),
+            "component_ref": None,
+            "depends_on_refs": [],
+            "payload": {
+                "title": item["title"],
+                "due_date": _effective_context(proposal).get("target_date") or "",
+                "priority": "medium",
+                "status": "todo",
+                "notes": item.get("notes") or "",
+                "origin": (
+                    "project" if target_type == "project"
+                    else "expected_outcome"
+                ),
+            },
+        })
+    return actions
+
+
 # ============================================================================
 # Endpoints
 # ============================================================================
 
 @planning_router.post("/analyze")
 async def analyze(body: AnalyzeRequest, current_user: dict = Depends(get_current_user)):
-    """Deterministic-only. Returns status=confirmation_required. No LLM."""
+    """Legacy deterministic analysis endpoint.
+
+    New clients should use /context-reviews for the sanitized human contract.
+    """
     db = get_db()
     _require_in(body.target_type, TARGET_TYPES, "target_type")
     existing = await db.plan_proposals.count_documents(
@@ -1729,6 +2534,63 @@ async def analyze(body: AnalyzeRequest, current_user: dict = Depends(get_current
     proposal["version"] = existing + 1
     await _store_proposal(db, proposal)
     return _slim(proposal)
+
+
+@planning_router.post("/context-reviews")
+async def create_context_review(
+    body: AnalyzeRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Open the canonical review for an owned Goal, Project, or Journey.
+
+    Repeated entry reuses the latest unfinished review instead of creating
+    duplicate planning routes. The response deliberately excludes the raw
+    inference/evidence records retained for legacy clients and auditability.
+    """
+    db = get_db()
+    _require_in(body.target_type, TARGET_TYPES, "target_type")
+    existing = await db.plan_proposals.find_one(
+        {
+            "user_id": current_user["id"],
+            "target_type": body.target_type,
+            "target_id": body.target_id,
+            "status": {"$nin": ["approved", "rejected", "abandoned"]},
+        },
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    if existing:
+        live_snapshot = await _read_snapshot(
+            db, current_user["id"], body.target_type, body.target_id,
+        )
+        if _snapshot_hash(live_snapshot) == existing.get("snapshot_hash"):
+            return _public_payload(existing)
+        # Keep the prior review for auditability, but do not trap the user in
+        # a proposal whose evidence no longer matches the owned target.
+        existing["status"] = "abandoned"
+        existing["updated_at"] = _now()
+        await _store_proposal(db, existing)
+    proposal = await _build_analyze(
+        db, current_user["id"], body.target_type, body.target_id,
+    )
+    prior_count = await db.plan_proposals.count_documents({
+        "user_id": current_user["id"],
+        "target_type": body.target_type,
+        "target_id": body.target_id,
+    })
+    proposal["version"] = prior_count + 1
+    await _store_proposal(db, proposal)
+    return _public_payload(proposal)
+
+
+@planning_router.get("/context-reviews/{proposal_id}")
+async def get_context_review(
+    proposal_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    proposal = await _load_proposal(db, current_user["id"], proposal_id)
+    return _public_payload(proposal)
 
 
 @planning_router.get("/proposals/{proposal_id}")
@@ -1756,12 +2618,206 @@ async def list_proposals(
     return docs
 
 
+@planning_router.patch("/proposals/{proposal_id}/context")
+async def update_context(
+    proposal_id: str,
+    body: ContextPatchRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    proposal = await _load_proposal(db, current_user["id"], proposal_id)
+    _require(
+        proposal.get("status") not in ("approved", "rejected", "abandoned"),
+        "An applied or closed plan cannot be edited",
+    )
+    fields = body.updates.model_fields_set
+    _require(bool(fields), "Provide at least one context update")
+    values = body.updates.model_dump()
+    for field in fields:
+        _save_override(proposal, field, values.get(field), "user_edit")
+        proposal.setdefault("context_decisions", {})[field] = {
+            "action": "change",
+            "recorded_at": _now(),
+        }
+    # An authoritative context correction invalidates a prior draft.
+    proposal["draft_plan"] = {
+        "version": (proposal.get("draft_plan") or {}).get("version", 0),
+        "items": [],
+        "can_apply": False,
+    }
+    proposal["updated_at"] = _now()
+    _refresh_public_contract(proposal)
+    await _store_proposal(db, proposal)
+    return _public_payload(proposal)
+
+
+@planning_router.post("/proposals/{proposal_id}/context/{field}/decision")
+async def decide_context_item(
+    proposal_id: str,
+    field: str,
+    body: ContextDecisionRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    proposal = await _load_proposal(db, current_user["id"], proposal_id)
+    _require(field in CONTEXT_OVERRIDE_FIELDS, "This review item cannot be changed")
+    _require_in(
+        body.action,
+        ("looks_right", "change", "dont_know", "not_right"),
+        "action",
+    )
+    _require(
+        proposal.get("status") not in ("approved", "rejected", "abandoned"),
+        "An applied or closed plan cannot be edited",
+    )
+    if body.action == "change":
+        _require(body.value is not None, "Change requires a value")
+        _save_override(proposal, field, body.value, "user_edit")
+    elif body.action in ("dont_know", "not_right"):
+        _save_override(proposal, field, None, "user_decision")
+    proposal.setdefault("context_decisions", {})[field] = {
+        "action": body.action,
+        "recorded_at": _now(),
+    }
+    if body.action != "looks_right":
+        proposal["draft_plan"] = {
+            "version": (proposal.get("draft_plan") or {}).get("version", 0),
+            "items": [],
+            "can_apply": False,
+        }
+    proposal["updated_at"] = _now()
+    _refresh_public_contract(proposal)
+    await _store_proposal(db, proposal)
+    return _public_payload(proposal)
+
+
+@planning_router.post("/proposals/{proposal_id}/questions/{question_id}/answer")
+async def answer_context_question(
+    proposal_id: str,
+    question_id: str,
+    body: QuestionAnswerRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    proposal = await _load_proposal(db, current_user["id"], proposal_id)
+    _require(
+        proposal.get("status") not in ("approved", "rejected", "abandoned"),
+        "An applied or closed plan cannot be edited",
+    )
+    review = _build_context_review(proposal)
+    question = next(
+        (item for item in review["questions"] if item["id"] == question_id),
+        None,
+    )
+    _require(question is not None, "Question not found", 404)
+    value = body.value.strip()
+    field = question["field"]
+    if value:
+        _save_override(proposal, field, value, "question_answer")
+        if question_id == "current_balance":
+            target = _parse_financial_target(
+                _effective_context(proposal), proposal.get("snapshot") or {},
+            )
+            if target:
+                _save_override(
+                    proposal,
+                    "current_balance_currency",
+                    target["currency"],
+                    "question_answer",
+                )
+    else:
+        _save_override(proposal, field, None, "question_answer")
+    proposal.setdefault("question_answers", {})[question_id] = {
+        "value": value or None,
+        "recorded_at": _now(),
+    }
+    proposal["draft_plan"] = {
+        "version": (proposal.get("draft_plan") or {}).get("version", 0),
+        "items": [],
+        "can_apply": False,
+    }
+    proposal["updated_at"] = _now()
+    _refresh_public_contract(proposal)
+    await _store_proposal(db, proposal)
+    return _public_payload(proposal)
+
+
+@planning_router.post("/proposals/{proposal_id}/draft")
+async def build_human_draft(
+    proposal_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    proposal = await _load_proposal(db, current_user["id"], proposal_id)
+    _require(
+        proposal.get("status") not in ("approved", "rejected", "abandoned"),
+        "An applied or closed plan cannot be regenerated",
+    )
+    review = _build_context_review(proposal)
+    required = [
+        question["prompt"]
+        for question in review["questions"]
+        if question["required"]
+    ]
+    _require(
+        not required,
+        "Answer the required questions before building a draft: "
+        + "; ".join(required),
+        409,
+    )
+    items = _make_draft_items(proposal)
+    _require(
+        bool(items),
+        "Hymn needs a success description, target date, or user-supplied plan structure before it can build an honest draft.",
+        409,
+    )
+    version = (proposal.get("draft_plan") or {}).get("version", 0) + 1
+    proposal["draft_plan"] = {
+        "version": version,
+        "items": items,
+        "can_apply": True,
+    }
+    proposal["updated_at"] = _now()
+    _refresh_public_contract(proposal)
+    await _store_proposal(db, proposal)
+    return _public_payload(proposal)
+
+
+@planning_router.put("/proposals/{proposal_id}/draft")
+async def replace_human_draft(
+    proposal_id: str,
+    body: DraftReplaceRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    proposal = await _load_proposal(db, current_user["id"], proposal_id)
+    _require(
+        proposal.get("status") not in ("approved", "rejected", "abandoned"),
+        "An applied or closed plan cannot be edited",
+    )
+    _require(
+        (proposal.get("draft_plan") or {}).get("version", 0) > 0,
+        "Build the draft before editing it",
+        409,
+    )
+    items = _validate_draft_items(body.items)
+    proposal["draft_plan"] = {
+        "version": proposal["draft_plan"]["version"] + 1,
+        "items": items,
+        "can_apply": bool(items),
+    }
+    proposal["updated_at"] = _now()
+    _refresh_public_contract(proposal)
+    await _store_proposal(db, proposal)
+    return _public_payload(proposal)
+
+
 @planning_router.post("/proposals/{proposal_id}/confirm")
 async def confirm_proposal(
     proposal_id: str, body: ConfirmRequest, current_user: dict = Depends(get_current_user),
 ):
     """Batch-merge confirmations onto the proposal. Never discards prior
-    confirmations. Never calls the LLM."""
+    confirmations. Never calls a remote generator."""
     db = get_db()
     proposal = await _load_proposal(db, current_user["id"], proposal_id)
     _require(
@@ -1788,8 +2844,8 @@ async def confirm_proposal(
     proposal["status"] = "confirmation_required" if still_blocking else "blocking_input_required"
     # blocking_input_required is the "ready to generate" gate — the user can
     # now hit /generate. If ALL blockers are resolved and no /generate has
-    # been called yet, status stays at blocking_input_required until the LLM
-    # runs.
+    # been called yet, status stays at blocking_input_required until the local
+    # generator runs.
     if not still_blocking:
         # Mark as ready-to-generate — the frontend polls / triggers /generate.
         proposal["status"] = "confirmation_required"
@@ -2160,6 +3216,147 @@ async def _commit_actions(
         "committed_actions": len(log_entries),
         "created_expected_outcomes": list(outcome_id_by_ref.values()),
         "created_tasks": list(task_id_by_ref.values()),
+    }
+
+
+def _apply_response(proposal: Dict[str, Any], already_applied: bool) -> dict:
+    applied = proposal.get("applied_plan") or {}
+    return {
+        "status": "applied",
+        "already_applied": already_applied,
+        "proposal_id": proposal["id"],
+        "created_outcome_ids": applied.get("created_outcome_ids") or [],
+        "created_task_ids": applied.get("created_task_ids") or [],
+        "return_to": proposal.get("return_to") or _return_metadata(
+            proposal["target_type"], proposal["target_id"],
+        ),
+        "attached_plan": {
+            "proposal_id": proposal["id"],
+            "version": applied.get("draft_version"),
+            "items": applied.get("items") or [],
+            "applied_at": applied.get("applied_at"),
+        },
+    }
+
+
+@planning_router.post("/proposals/{proposal_id}/apply")
+async def apply_human_draft(
+    proposal_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Apply the reviewed draft once and attach it to its owned target."""
+    db = get_db()
+    proposal = await _load_proposal(db, current_user["id"], proposal_id)
+    if proposal.get("applied_plan"):
+        _refresh_public_contract(proposal)
+        return _apply_response(proposal, already_applied=True)
+
+    draft = proposal.get("draft_plan") or {}
+    _require(draft.get("can_apply") and draft.get("items"), "There is no reviewed draft to apply", 409)
+    live_target = await _read_target(
+        db, current_user["id"], proposal["target_type"], proposal["target_id"],
+    )
+    _require(live_target is not None, "Planning target no longer exists", 409)
+    live_snapshot = await _read_snapshot(
+        db, current_user["id"], proposal["target_type"], proposal["target_id"],
+    )
+    _require(
+        _snapshot_hash(live_snapshot) == proposal.get("snapshot_hash"),
+        "Your Hymn information changed while this plan was being reviewed. "
+        "Refresh the understanding before applying it.",
+        409,
+    )
+    review = _build_context_review(proposal)
+    required = [
+        question["prompt"]
+        for question in review["questions"]
+        if question["required"]
+    ]
+    _require(
+        not required,
+        "Answer the required questions before applying this plan: "
+        + "; ".join(required),
+        409,
+    )
+
+    # Convert only reviewed, active outcome/task items into existing canonical
+    # record shapes. Milestones remain visible in the attached plan because
+    # Hymn does not yet have a separate milestone collection.
+    proposal["approval_actions"] = _draft_actions(proposal)
+    proposal["status"] = "proposal_ready"
+    proposal["validation_errors"] = []
+    proposal["commit_phase"] = "preparing"
+    await _store_proposal(db, proposal)
+    committed = await _commit_actions(db, current_user["id"], proposal)
+
+    applied_at = _now()
+    proposal["applied_plan"] = {
+        "draft_version": draft["version"],
+        "items": draft["items"],
+        "created_outcome_ids": committed["created_expected_outcomes"],
+        "created_task_ids": committed["created_tasks"],
+        "applied_at": applied_at,
+    }
+    proposal["updated_at"] = applied_at
+    _refresh_public_contract(proposal)
+
+    target_collection = {
+        "goal": "goals",
+        "project": "projects",
+        "journey": "knowledge_journeys",
+    }[proposal["target_type"]]
+    attached = await db[target_collection].update_one(
+        {
+            "id": proposal["target_id"],
+            "user_id": current_user["id"],
+        },
+        {
+            "$set": {
+                "planning_plan_id": proposal["id"],
+                "planning_plan_updated_at": applied_at,
+                "updated_at": applied_at,
+            }
+        },
+    )
+    _require(attached.matched_count == 1, "Planning target no longer exists", 409)
+    await _store_proposal(db, proposal)
+    return _apply_response(proposal, already_applied=False)
+
+
+@planning_router.get("/targets/{target_type}/{target_id}/attached-plan")
+async def get_attached_plan(
+    target_type: str,
+    target_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    _require_in(target_type, TARGET_TYPES, "target_type")
+    target = await _read_target(db, current_user["id"], target_type, target_id)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"{target_type.title()} not found")
+    proposal = await db.plan_proposals.find_one(
+        {
+            "user_id": current_user["id"],
+            "target_type": target_type,
+            "target_id": target_id,
+            "applied_plan": {"$ne": None},
+        },
+        {"_id": 0},
+        sort=[("updated_at", -1)],
+    )
+    if not proposal:
+        return {
+            "attached": False,
+            "message": "No plan has been applied yet.",
+            "return_to": _return_metadata(
+                target_type, target_id, target.get("title") or "",
+            ),
+        }
+    response = _apply_response(proposal, already_applied=True)
+    return {
+        "attached": True,
+        **response["attached_plan"],
+        "return_to": response["return_to"],
     }
 
 

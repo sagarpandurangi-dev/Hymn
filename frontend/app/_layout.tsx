@@ -64,6 +64,7 @@ export default function RootLayout() {
           <Stack.Screen name="checkin/life" options={{ presentation: "modal" }} />
           <Stack.Screen name="checkin/[id]" />
           <Stack.Screen name="checkin/edit/[id]" />
+          <Stack.Screen name="checkin-schedule/[targetType]/[targetId]" />
           <Stack.Screen name="domains/index" />
           <Stack.Screen name="domains/add" options={{ presentation: "modal" }} />
           <Stack.Screen name="domains/edit/[id]" options={{ presentation: "modal" }} />

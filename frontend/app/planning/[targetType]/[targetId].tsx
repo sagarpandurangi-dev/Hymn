@@ -1,7 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -9,683 +8,529 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Stack, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
+
 import { api } from "@/src/lib/api";
-import { colors, spacing, radius, fonts } from "@/src/lib/theme";
+import {
+  createDraftItem,
+  errorMessage,
+  isPlanningTargetType,
+  moveDraftItem,
+  nextActionSummary,
+  orderedContextSections,
+  planningEmptyState,
+  removeDraftItem,
+  replaceDraftItem,
+  toggleDraftItemDeferred,
+  validateDraftItems,
+  type DraftItemKind,
+  type PlanningContextDecisionAction,
+  type PlanningContextItem,
+  type PlanningContextResponse,
+  type PlanningDraftItem,
+  type PlanningFeasibility,
+  type PlanningQuestion,
+  type PlanningReturnTo,
+  type PlanningTargetType,
+} from "@/src/lib/planning";
+import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
-type FactAction = "confirm" | "edit" | "reject" | "mark_unknown";
+const DECISIONS: {
+  action: PlanningContextDecisionAction;
+  label: string;
+}[] = [
+  { action: "looks_right", label: "Looks right" },
+  { action: "change", label: "Change" },
+  { action: "dont_know", label: "I don’t know yet" },
+  { action: "not_right", label: "That’s not right" },
+];
 
-type Fact = {
-  evidence_id: string;
-  field: string;
-  value: any;
-  evidence: string;
-  confidence: string;
-  source?: string;
-  note?: string;
-  blocking?: boolean;
-};
+export default function PlanningContextReviewScreen() {
+  const params = useLocalSearchParams<{
+    targetType?: string;
+    targetId?: string;
+  }>();
+  const router = useRouter();
+  const targetType = isPlanningTargetType(params.targetType)
+    ? params.targetType
+    : null;
+  const targetId =
+    typeof params.targetId === "string" && params.targetId.trim()
+      ? params.targetId
+      : null;
 
-type Proposal = {
-  id: string;
-  target_type: "goal" | "project" | "journey";
-  target_id: string;
-  status: string;
-  version: number;
-  snapshot_hash: string;
-  objective_summary?: string;
-  measurable_success_criteria?: string | null;
-  current_state: Fact[];
-  confirmations: Record<string, { action: FactAction; value?: any; note?: string; recorded_at?: string }>;
-  ready_to_generate?: boolean;
-  blocking_questions: { field: string; question: string; why_blocking?: string }[];
-  proposed_outcomes: any[];
-  proposed_tasks: any[];
-  proposed_check_ins: any[];
-  visual_phases: { label: string; tasks: string[] }[];
-  resource_requirements: any[];
-  portfolio_conflicts: any[];
-  assumptions: any[];
-  external_estimates: any[];
-  risks: any[];
-  feasibility: {
-    status: string;
-    reasons: string[];
-    tradeoffs?: any[];
-    alternatives?: any[];
-    selected_tradeoff_id?: string | null;
-  };
-  approval_actions: any[];
-  validation_errors: string[];
-  selected_tradeoff_id?: string | null;
-  commit_phase?: string | null;
-  approved_at?: string;
-  rejected_at?: string;
-};
-
-const statusLabels: Record<string, string> = {
-  confirmation_required: "Confirm current state",
-  blocking_input_required: "Needs your input",
-  generating: "Generating proposal…",
-  proposal_ready: "Ready to approve",
-  infeasible: "Not currently feasible",
-  approved: "Approved",
-  rejected: "Rejected",
-  abandoned: "Abandoned",
-  paused: "Paused",
-  error: "Error",
-};
-
-export default function PlanningScreen() {
-  const params = useLocalSearchParams<{ targetType?: string; targetId?: string }>();
-  const targetType = params.targetType as "goal" | "project" | "journey";
-  const targetId = params.targetId!;
-
-  const [proposal, setProposal] = useState<Proposal | null>(null);
+  const [proposal, setProposal] = useState<PlanningContextResponse | null>(null);
+  const [draftItems, setDraftItems] = useState<PlanningDraftItem[]>([]);
+  const [draftDirty, setDraftDirty] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingApply, setConfirmingApply] = useState(false);
 
-  // Batched decisions the user made in-session for the current view.
-  const [pending, setPending] = useState<
-    Record<string, { action: FactAction; value?: any }>
-  >({});
+  const acceptProposal = useCallback((next: PlanningContextResponse) => {
+    setProposal(next);
+    setDraftItems(next.draft_plan.items);
+    setDraftDirty(false);
+    setError(null);
+  }, []);
 
-  const runAnalyze = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      setPending({});
-      const p = await api.planningAnalyze({ target_type: targetType, target_id: targetId });
-      setProposal(p);
-    } catch (e: any) {
-      setError(e.message || "Failed to analyze");
-    } finally {
+  const load = useCallback(async () => {
+    if (!targetType || !targetId) {
+      setError("This planning link is incomplete. Return to the goal or project and try again.");
       setLoading(false);
-    }
-  }, [targetType, targetId]);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const list = await api.planningListProposals(targetType, targetId);
-        if (!cancelled) {
-          if (list && list.length > 0) {
-            setProposal(list[0] as Proposal);
-            setLoading(false);
-          } else {
-            await runAnalyze();
-          }
-        }
-      } catch (e: any) {
-        if (!cancelled) {
-          setError(e.message || "Failed to load");
-          setLoading(false);
-        }
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [runAnalyze, targetType, targetId]);
-
-  const setDecision = (field: string, action: FactAction, value?: any) => {
-    setPending((prev) => ({ ...prev, [field]: { action, value } }));
-  };
-
-  const submitAllConfirmations = async () => {
-    if (!proposal) return;
-    const entries = Object.entries(pending).map(([field, v]) => ({
-      field,
-      action: v.action,
-      value: v.value,
-    }));
-    if (entries.length === 0) {
-      Alert.alert("Nothing to submit", "Confirm, edit, mark-unknown or reject at least one field.");
       return;
     }
     try {
-      setBusy("confirm");
-      const p = await api.planningConfirm(proposal.id, entries);
-      setProposal(p);
-      setPending({});
-    } catch (e: any) {
-      Alert.alert("Confirm failed", e.message || "Please try again");
+      setLoading(true);
+      setError(null);
+      const next = await api.planningCreateContextReview({
+        target_type: targetType,
+        target_id: targetId,
+      });
+      acceptProposal(next);
+    } catch (caught: unknown) {
+      setError(errorMessage(caught, "Hymn could not read this plan. Please try again."));
     } finally {
-      setBusy(null);
+      setLoading(false);
     }
-  };
+  }, [acceptProposal, targetId, targetType]);
 
-  const generate = async () => {
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const decideContextItem = async (
+    item: PlanningContextItem,
+    action: PlanningContextDecisionAction,
+    value?: string,
+  ) => {
     if (!proposal) return;
     try {
-      setBusy("generate");
-      const p = await api.planningGenerate(proposal.id);
-      setProposal(p);
-    } catch (e: any) {
-      Alert.alert("Generate failed", e.message || "Please try again");
+      setBusy(`context:${item.key}`);
+      const next = await api.planningDecideContextItem(
+        proposal.id,
+        item.key,
+        action,
+        value,
+      );
+      acceptProposal(next);
+    } catch (caught: unknown) {
+      setError(errorMessage(caught, "That change was not saved. Please try again."));
     } finally {
       setBusy(null);
     }
   };
 
-  const selectTradeoff = async (id: string) => {
+  const answerQuestion = async (question: PlanningQuestion, value: string) => {
     if (!proposal) return;
     try {
-      setBusy("tradeoff");
-      const p = await api.planningSelectTradeoff(proposal.id, id);
-      setProposal(p);
-    } catch (e: any) {
-      Alert.alert("Trade-off selection failed", e.message || "Please try again");
+      setBusy(`question:${question.id}`);
+      const next = await api.planningAnswerQuestion(
+        proposal.id,
+        question.id,
+        value,
+      );
+      acceptProposal(next);
+    } catch (caught: unknown) {
+      setError(errorMessage(caught, "That answer was not saved. Please try again."));
     } finally {
       setBusy(null);
     }
   };
 
-  const approve = async () => {
+  const prepareDraft = async () => {
     if (!proposal) return;
-    Alert.alert(
-      "Approve proposal?",
-      "This will create the proposed outcomes, tasks, and reservations in your portfolio.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Approve",
-          onPress: async () => {
-            try {
-              setBusy("approve");
-              const res = await api.planningApprove(proposal.id);
-              Alert.alert("Approved", `Committed ${res.committed_actions} action(s).`);
-              const p = await api.planningGetProposal(proposal.id);
-              setProposal(p);
-            } catch (e: any) {
-              if (e.status === 409) {
-                Alert.alert("Portfolio changed", "Re-analyzing…");
-                await runAnalyze();
-              } else {
-                Alert.alert("Approve failed", e.message || "Please try again");
-              }
-            } finally {
-              setBusy(null);
-            }
-          },
-        },
-      ],
-    );
+    try {
+      setBusy("draft");
+      const next = await api.planningGenerateDraft(proposal.id);
+      acceptProposal(next);
+    } catch (caught: unknown) {
+      setError(errorMessage(caught, "Hymn could not prepare the draft. Please try again."));
+    } finally {
+      setBusy(null);
+    }
   };
 
-  const reject = async () => {
-    if (!proposal) return;
-    Alert.alert("Reject proposal?", "All future planning allocations will be released.", [
-      { text: "Keep", style: "cancel" },
-      {
-        text: "Reject",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            setBusy("reject");
-            await api.planningReject(proposal.id);
-            const p = await api.planningGetProposal(proposal.id);
-            setProposal(p);
-          } catch (e: any) {
-            Alert.alert("Reject failed", e.message || "Please try again");
-          } finally {
-            setBusy(null);
-          }
-        },
-      },
+  const changeDraftItems = (next: PlanningDraftItem[]) => {
+    setDraftItems(next);
+    setDraftDirty(true);
+    setConfirmingApply(false);
+  };
+
+  const addDraftItem = (kind: DraftItemKind) => {
+    const id = `new-${Date.now()}-${draftItems.length}`;
+    changeDraftItems([
+      ...draftItems,
+      createDraftItem(kind, id, draftItems.length),
     ]);
   };
 
-  const feasibility = proposal?.feasibility?.status ?? "unknown";
-  const needsTradeoff = feasibility === "feasible_with_tradeoffs";
-  const canApprove = useMemo(() => {
-    if (!proposal) return false;
-    if (proposal.status !== "proposal_ready") return false;
-    if (proposal.validation_errors.length > 0) return false;
-    if (feasibility === "not_currently_feasible" || feasibility === "unknown") return false;
-    if (needsTradeoff && !proposal.selected_tradeoff_id) return false;
-    return true;
-  }, [proposal, feasibility, needsTradeoff]);
+  const saveDraft = async () => {
+    if (!proposal) return;
+    const validation = validateDraftItems(draftItems);
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    try {
+      setBusy("save-draft");
+      const next = await api.planningSaveDraft(proposal.id, draftItems);
+      acceptProposal(next);
+    } catch (caught: unknown) {
+      setError(errorMessage(caught, "The draft was not saved. Please try again."));
+    } finally {
+      setBusy(null);
+    }
+  };
 
-  const stillBlocking = useMemo(() => (proposal?.current_state || []).some((f) => f.blocking), [proposal]);
-  const canGenerate = useMemo(() => {
-    if (!proposal) return false;
-    if (["approved", "rejected", "abandoned"].includes(proposal.status)) return false;
-    return !stillBlocking && (proposal.proposed_tasks?.length ?? 0) === 0;
-  }, [proposal, stillBlocking]);
+  const navigateToReturn = (returnTo: PlanningReturnTo) => {
+    const id = encodeURIComponent(returnTo.target_id);
+    if (returnTo.target_type === "goal") {
+      router.replace(`/goals/${id}`);
+    } else if (returnTo.target_type === "project") {
+      router.replace(`/projects/${id}`);
+    } else {
+      router.replace(`/knowledge/${id}`);
+    }
+  };
+
+  const applyDraft = async () => {
+    if (!proposal) return;
+    try {
+      setBusy("apply");
+      const result = await api.planningApply(proposal.id);
+      navigateToReturn(result.return_to);
+    } catch (caught: unknown) {
+      setError(errorMessage(caught, "The plan was not applied. Nothing new was created."));
+      setConfirmingApply(false);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   if (loading) {
     return (
-      <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
-        <Stack.Screen options={{ title: "Planning" }} />
-        <View style={styles.center}>
-          <ActivityIndicator color={colors.brandPrimary} />
-          <Text style={styles.loadingText}>Reading your portfolio…</Text>
-        </View>
-      </SafeAreaView>
+      <Page>
+        <CenteredState
+          icon={<ActivityIndicator color={colors.brandPrimary} />}
+          title="Understanding your situation…"
+          body="Hymn is reading only the records linked to this goal or project."
+        />
+      </Page>
     );
   }
 
-  if (error && !proposal) {
+  if (!proposal) {
     return (
-      <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
-        <Stack.Screen options={{ title: "Planning" }} />
-        <View style={styles.center}>
-          <Text style={styles.errorText}>{error}</Text>
-          <Pressable style={styles.primaryBtn} onPress={runAnalyze}>
-            <Text style={styles.primaryBtnText}>Retry</Text>
-          </Pressable>
-        </View>
-      </SafeAreaView>
+      <Page>
+        <CenteredState
+          icon={<Ionicons name="alert-circle-outline" size={30} color={colors.error} />}
+          title="This plan could not be opened"
+          body={error ?? "No planning details were returned."}
+          actionLabel="Try again"
+          onAction={() => void load()}
+        />
+      </Page>
     );
   }
 
-  if (!proposal) return null;
-
-  const isTerminal = ["approved", "rejected", "abandoned"].includes(proposal.status);
-  const showConfirmForm = proposal.status === "confirmation_required" && (proposal.proposed_tasks?.length ?? 0) === 0;
+  const sections = orderedContextSections(proposal.context_review.sections);
+  const hasQuestions = proposal.context_review.questions.length > 0;
+  const draftValidation = validateDraftItems(draftItems);
+  const canApply =
+    proposal.draft_plan.can_apply &&
+    !draftDirty &&
+    !draftValidation &&
+    !hasQuestions &&
+    proposal.stage !== "applied";
 
   return (
-    <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
-      <Stack.Screen options={{ title: "Planning" }} />
+    <Page>
       <ScrollView contentContainerStyle={styles.scroll}>
-        {/* Header */}
-        <View style={styles.card}>
-          <Text style={styles.eyebrow}>Version {proposal.version}</Text>
-          <Text style={styles.title}>{proposal.objective_summary || "Objective"}</Text>
-          <View style={styles.row}>
-            <StatusPill status={proposal.status} />
-            <FeasibilityPill status={feasibility} />
+        <View style={styles.hero}>
+          <Text style={styles.eyebrow}>
+            {targetTypeLabel(proposal.target_type)} planning
+          </Text>
+          <Text style={styles.pageTitle}>Does Hymn understand your situation?</Text>
+          <Text style={styles.intro}>{proposal.context_review.intro}</Text>
+          <View style={styles.nextAction}>
+            <Ionicons name="navigate-circle-outline" size={20} color={colors.brandPrimary} />
+            <Text style={styles.nextActionText}>{nextActionSummary(proposal)}</Text>
           </View>
-          {proposal.measurable_success_criteria ? (
-            <Text style={styles.subtitle}>{proposal.measurable_success_criteria}</Text>
-          ) : null}
-          <Pressable onPress={runAnalyze} style={styles.reanalyzeBtn} disabled={!!busy}>
-            <Ionicons name="refresh" size={16} color={colors.onSurfaceSecondary} />
-            <Text style={styles.reanalyzeText}>Re-analyze from live portfolio</Text>
-          </Pressable>
         </View>
 
-        {/* Confirmation form */}
-        {showConfirmForm && (
-          <Section title="Confirm current state">
-            {proposal.current_state.map((f) => (
-              <ConfirmRow
-                key={f.evidence_id}
-                fact={f}
-                pending={pending[f.field]}
-                onDecision={setDecision}
-              />
-            ))}
-            <View style={styles.actionsCard}>
-              <Pressable
-                onPress={submitAllConfirmations}
-                disabled={!!busy}
-                style={[styles.primaryBtn, !!busy && styles.btnDisabled]}
-              >
-                {busy === "confirm" ? (
-                  <ActivityIndicator color={colors.onBrandPrimary} />
-                ) : (
-                  <Text style={styles.primaryBtnText}>Submit confirmations</Text>
-                )}
-              </Pressable>
-              <Text style={styles.helperText}>
-                All your decisions are submitted together in one request. No LLM call is made here.
-              </Text>
-            </View>
-          </Section>
-        )}
-
-        {/* Generate button */}
-        {!isTerminal && canGenerate && (
-          <View style={[styles.card, { marginTop: spacing.md }]}>
-            <Text style={styles.sectionTitle}>Ready to generate</Text>
-            <Text style={styles.helperText}>
-              All required fields are resolved. Generating will make one LLM call using only your confirmed context.
-            </Text>
-            <Pressable
-              onPress={generate}
-              disabled={!!busy}
-              style={[styles.primaryBtn, { marginTop: spacing.sm }, !!busy && styles.btnDisabled]}
-            >
-              {busy === "generate" ? (
-                <ActivityIndicator color={colors.onBrandPrimary} />
-              ) : (
-                <Text style={styles.primaryBtnText}>Generate proposal</Text>
-              )}
+        {error ? (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorBannerText}>{error}</Text>
+            <Pressable onPress={() => setError(null)} hitSlop={8}>
+              <Text style={styles.errorDismiss}>Dismiss</Text>
             </Pressable>
           </View>
-        )}
+        ) : null}
 
-        {/* Current state readout (post-confirm view) */}
-        {!showConfirmForm && (
-          <Section title="Current state">
-            {proposal.current_state.map((f) => (
-              <View key={f.evidence_id} style={styles.factRow}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.factField}>{prettyField(f.field)}</Text>
-                  <Text style={styles.factValue}>{prettyValue(f.value)}</Text>
-                  {f.note ? <Text style={styles.factNote}>{f.note}</Text> : null}
-                  <View style={styles.row}>
-                    <ConfidencePill confidence={f.confidence} />
-                    <Text style={styles.evidenceText}>via {f.evidence}</Text>
-                    {f.blocking ? (
-                      <Text style={[styles.evidenceText, { color: colors.error }]}>· blocking</Text>
-                    ) : null}
-                  </View>
-                </View>
-              </View>
-            ))}
-          </Section>
-        )}
-
-        {/* Blocking questions */}
-        {proposal.blocking_questions.length > 0 && (
-          <Section title="Blocking questions">
-            {proposal.blocking_questions.map((q, i) => (
-              <View key={i} style={styles.blockerCard}>
-                <Text style={styles.blockerField}>{prettyField(q.field)}</Text>
-                <Text style={styles.blockerQuestion}>{q.question}</Text>
-                {q.why_blocking ? (
-                  <Text style={styles.blockerWhy}>Why blocking: {q.why_blocking}</Text>
-                ) : null}
-              </View>
-            ))}
-          </Section>
-        )}
-
-        {/* Proposed outcomes */}
-        {proposal.proposed_outcomes.length > 0 && (
-          <Section title={`Proposed expected outcomes (${proposal.proposed_outcomes.length})`}>
-            {proposal.proposed_outcomes.map((o, i) => (
-              <View key={i} style={styles.itemCard}>
-                <Text style={styles.itemTitle}>{o.title}</Text>
-                {o.measurable_end_state ? (
-                  <Text style={styles.itemDetail}>End state: {o.measurable_end_state}</Text>
-                ) : null}
-                {o.target_date ? <Text style={styles.itemDetail}>Target: {o.target_date}</Text> : null}
-              </View>
-            ))}
-          </Section>
-        )}
-
-        {/* Proposed tasks */}
-        {proposal.proposed_tasks.length > 0 && (
-          <Section title={`Proposed tasks (${proposal.proposed_tasks.length})`}>
-            {proposal.proposed_tasks.map((t, i) => (
-              <View key={i} style={styles.itemCard}>
-                <Text style={styles.itemTitle}>{t.title}</Text>
-                {t.completion_condition ? (
-                  <Text style={styles.itemDetail}>Done when: {t.completion_condition}</Text>
-                ) : null}
-                <View style={styles.metaRow}>
-                  {t.target_date ? <Text style={styles.itemMeta}>Due {t.target_date}</Text> : null}
-                  {t.required_resources?.time_minutes ? (
-                    <Text style={styles.itemMeta}>{t.required_resources.time_minutes} min</Text>
-                  ) : null}
-                  {t.required_resources?.money?.amount ? (
-                    <Text style={styles.itemMeta}>
-                      {t.required_resources.money.currency} {t.required_resources.money.amount}
-                    </Text>
-                  ) : null}
-                  {t.reuse_existing_task_id ? (
-                    <Text style={[styles.itemMeta, { color: colors.brandSecondary }]}>reuse</Text>
-                  ) : null}
-                </View>
-              </View>
-            ))}
-          </Section>
-        )}
-
-        {/* Portfolio conflicts */}
-        {proposal.portfolio_conflicts.length > 0 && (
-          <Section title="Portfolio conflicts">
-            {proposal.portfolio_conflicts.map((c, i) => (
-              <View key={i} style={styles.conflictCard}>
-                <Text style={styles.conflictKind}>{prettyField(c.kind)}</Text>
-                <Text style={styles.itemDetail}>{JSON.stringify(c)}</Text>
-              </View>
-            ))}
-          </Section>
-        )}
-
-        {/* Assumptions */}
-        {proposal.assumptions.length > 0 && (
-          <Section title="Assumptions (require your confirmation)">
-            {proposal.assumptions.map((a, i) => (
-              <View key={i} style={styles.itemCard}>
-                <Text style={styles.itemTitle}>{a.statement}</Text>
-                {a.range ? <Text style={styles.itemDetail}>Range: {a.range}</Text> : null}
-              </View>
-            ))}
-          </Section>
-        )}
-
-        {/* Feasibility + trade-offs */}
-        {feasibility !== "unknown" && (
-          <Section title="Feasibility">
-            {proposal.feasibility.reasons.map((r, i) => (
-              <Text key={i} style={styles.reasonText}>• {prettyField(r)}</Text>
-            ))}
-            {needsTradeoff && (
-              <View style={{ marginTop: spacing.sm }}>
-                <Text style={styles.helperText}>
-                  Select a trade-off before you can approve.
-                </Text>
-                {(proposal.feasibility.alternatives || []).map((alt: any, i: number) => (
-                  <View key={i}>
-                    <Text style={styles.itemMeta}>{prettyField(alt.kind || "alternative")}</Text>
-                    {(alt.options || []).map((opt: any) => {
-                      const selected = proposal.selected_tradeoff_id === opt.id;
-                      return (
-                        <Pressable
-                          key={opt.id}
-                          onPress={() => selectTradeoff(opt.id)}
-                          disabled={!!busy}
-                          style={[styles.tradeoffBtn, selected && styles.tradeoffBtnSelected]}
-                        >
-                          <Ionicons
-                            name={selected ? "radio-button-on" : "radio-button-off"}
-                            size={18}
-                            color={selected ? colors.brandPrimary : colors.onSurfaceSecondary}
-                          />
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.tradeoffTitle}>{prettyField(opt.action)}</Text>
-                            <Text style={styles.itemDetail}>{opt.rationale}</Text>
-                          </View>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                ))}
-              </View>
+        {sections.map((section) => (
+          <Section key={section.key} title={section.title}>
+            {section.items.length > 0 ? (
+              section.items.map((item) => (
+                <ContextItemCard
+                  key={item.key}
+                  item={item}
+                  busy={busy === `context:${item.key}`}
+                  disabled={busy !== null || proposal.stage === "applied"}
+                  readonly={proposal.stage === "applied"}
+                  onDecide={(action, value) =>
+                    void decideContextItem(item, action, value)
+                  }
+                />
+              ))
+            ) : (
+              <Text style={styles.emptyText}>
+                {section.key === "what_hymn_still_needs" && !hasQuestions
+                  ? "Hymn has enough context to prepare a draft."
+                  : "Nothing relevant is recorded here yet."}
+              </Text>
             )}
           </Section>
-        )}
+        ))}
 
-        {/* Risks */}
-        {proposal.risks.length > 0 && (
-          <Section title="Risks">
-            {proposal.risks.map((r, i) => (
-              <Text key={i} style={styles.reasonText}>• {r.description}</Text>
+        {hasQuestions ? (
+          <Section title="A few things to clarify">
+            <Text style={styles.sectionIntro}>
+              These answers are needed before Hymn can prepare an honest plan.
+            </Text>
+            {proposal.context_review.questions.map((question) => (
+              <QuestionCard
+                key={question.id}
+                question={question}
+                busy={busy === `question:${question.id}`}
+                disabled={busy !== null}
+                onSave={(value) => void answerQuestion(question, value)}
+              />
             ))}
           </Section>
-        )}
+        ) : null}
 
-        {/* Validation errors */}
-        {proposal.validation_errors.length > 0 && (
-          <Section title="Validation errors (approval blocked)">
-            {proposal.validation_errors.map((e, i) => (
-              <Text key={i} style={[styles.reasonText, { color: colors.error }]}>• {e}</Text>
-            ))}
-          </Section>
-        )}
+        <FeasibilityCard feasibility={proposal.context_review.feasibility} />
 
-        {/* Approve / reject */}
-        {!isTerminal && (proposal.proposed_tasks?.length ?? 0) > 0 && (
-          <View style={styles.actionsCard}>
+        <Section title="Your draft plan">
+          {draftItems.length > 0 ? (
+            <>
+              <Text style={styles.sectionIntro}>
+                Nothing below is created until you approve it. Edit, reorder,
+                defer, or remove anything first.
+              </Text>
+              {draftItems.map((item, index) => (
+                <DraftItemEditor
+                  key={item.id}
+                  item={item}
+                  first={index === 0}
+                  last={index === draftItems.length - 1}
+                  disabled={busy !== null || proposal.stage === "applied"}
+                  onChange={(next) =>
+                    changeDraftItems(replaceDraftItem(draftItems, next))
+                  }
+                  onMove={(direction) =>
+                    changeDraftItems(moveDraftItem(draftItems, item.id, direction))
+                  }
+                  onToggleDeferred={() =>
+                    changeDraftItems(toggleDraftItemDeferred(draftItems, item.id))
+                  }
+                  onRemove={() =>
+                    changeDraftItems(removeDraftItem(draftItems, item.id))
+                  }
+                />
+              ))}
+            </>
+          ) : (
+            <Text style={styles.emptyText}>{planningEmptyState(proposal.stage)}</Text>
+          )}
+
+          {proposal.stage !== "applied" && proposal.draft_plan.version > 0 ? (
+            <View style={styles.addRow}>
+              {(["milestone", "outcome", "task"] as const).map((kind) => (
+                <Pressable
+                  key={kind}
+                  onPress={() => addDraftItem(kind)}
+                  disabled={busy !== null || proposal.stage === "applied"}
+                  style={styles.smallButton}
+                >
+                  <Ionicons name="add" size={16} color={colors.onSurface} />
+                  <Text style={styles.smallButtonText}>Add {kind}</Text>
+                </Pressable>
+              ))}
+            </View>
+          ) : null}
+
+          {draftDirty ? (
+            <View style={styles.unsavedBox}>
+              <Text style={styles.unsavedText}>You have unsaved plan changes.</Text>
+              {draftValidation ? (
+                <Text style={styles.validationText}>{draftValidation}</Text>
+              ) : null}
+              <Pressable
+                style={[
+                  styles.primaryButton,
+                  (busy !== null || Boolean(draftValidation)) && styles.disabled,
+                ]}
+                disabled={busy !== null || Boolean(draftValidation)}
+                onPress={() => void saveDraft()}
+              >
+                {busy === "save-draft" ? (
+                  <ActivityIndicator color={colors.onBrandPrimary} />
+                ) : (
+                  <Text style={styles.primaryButtonText}>Save plan changes</Text>
+                )}
+              </Pressable>
+            </View>
+          ) : null}
+
+          {!hasQuestions &&
+          proposal.stage !== "applied" &&
+          draftItems.length === 0 &&
+          !draftDirty ? (
             <Pressable
-              onPress={approve}
-              disabled={!canApprove || !!busy}
-              style={[styles.primaryBtn, (!canApprove || !!busy) && styles.btnDisabled]}
+              style={[styles.primaryButton, busy !== null && styles.disabled]}
+              disabled={busy !== null}
+              onPress={() => void prepareDraft()}
             >
-              {busy === "approve" ? (
+              {busy === "draft" ? (
                 <ActivityIndicator color={colors.onBrandPrimary} />
               ) : (
-                <Text style={styles.primaryBtnText}>Approve & commit</Text>
+                <Text style={styles.primaryButtonText}>Prepare a draft plan</Text>
               )}
             </Pressable>
-            <Pressable onPress={reject} disabled={!!busy} style={styles.secondaryBtn}>
-              <Text style={styles.secondaryBtnText}>Reject proposal</Text>
+          ) : null}
+        </Section>
+
+        {proposal.stage === "applied" ? (
+          <View style={styles.completionCard}>
+            <Ionicons name="checkmark-circle" size={28} color={colors.success} />
+            <View style={styles.flex}>
+              <Text style={styles.completionTitle}>Plan attached</Text>
+              <Text style={styles.itemHelp}>
+                The approved plan is now visible on the original{" "}
+                {proposal.return_to.target_type}.
+              </Text>
+            </View>
+            <Pressable
+              style={styles.secondaryButton}
+              onPress={() => navigateToReturn(proposal.return_to)}
+            >
+              <Text style={styles.secondaryButtonText}>{proposal.return_to.label}</Text>
             </Pressable>
-            <Text style={styles.helperText}>
-              {canApprove
-                ? "Nothing is written until you approve."
-                : needsTradeoff && !proposal.selected_tradeoff_id
-                  ? "Select a trade-off above before approving."
-                  : "Approval blocked while the plan has validation errors, unknown feasibility, or unresolved blockers."}
-            </Text>
           </View>
-        )}
+        ) : draftItems.length > 0 ? (
+          <View style={styles.approvalCard}>
+            <Text style={styles.sectionTitle}>Ready to add this plan?</Text>
+            <Text style={styles.sectionIntro}>
+              Hymn will create only the active items shown above and attach them
+              to this {proposal.target_type}. Repeating this action will not
+              create duplicates.
+            </Text>
+            {confirmingApply ? (
+              <View style={styles.confirmBox}>
+                <Text style={styles.confirmTitle}>Apply this exact draft?</Text>
+                <Text style={styles.itemHelp}>
+                  Deferred items remain in the draft and are not created now.
+                </Text>
+                <View style={styles.buttonRow}>
+                  <Pressable
+                    style={styles.secondaryButton}
+                    disabled={busy !== null}
+                    onPress={() => setConfirmingApply(false)}
+                  >
+                    <Text style={styles.secondaryButtonText}>Keep reviewing</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[
+                      styles.primaryButton,
+                      (!canApply || busy !== null) && styles.disabled,
+                      styles.flex,
+                    ]}
+                    disabled={!canApply || busy !== null}
+                    onPress={() => void applyDraft()}
+                  >
+                    {busy === "apply" ? (
+                      <ActivityIndicator color={colors.onBrandPrimary} />
+                    ) : (
+                      <Text style={styles.primaryButtonText}>Yes, apply plan</Text>
+                    )}
+                  </Pressable>
+                </View>
+              </View>
+            ) : (
+              <>
+                <Pressable
+                  style={[styles.primaryButton, !canApply && styles.disabled]}
+                  disabled={!canApply}
+                  onPress={() => setConfirmingApply(true)}
+                >
+                  <Text style={styles.primaryButtonText}>Review and apply</Text>
+                </Pressable>
+                {!canApply ? (
+                  <Text style={styles.validationText}>
+                    {draftDirty
+                      ? "Save your plan changes before applying."
+                      : hasQuestions
+                        ? "Answer the questions above before applying."
+                        : draftValidation ??
+                          "Hymn needs more context before this plan can be applied."}
+                  </Text>
+                ) : null}
+              </>
+            )}
+          </View>
+        ) : null}
       </ScrollView>
+    </Page>
+  );
+}
+
+function Page({ children }: { children: React.ReactNode }) {
+  return (
+    <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
+      <Stack.Screen options={{ title: "Plan with Hymn" }} />
+      {children}
     </SafeAreaView>
   );
 }
 
-// ==========================================================================
-// Row for a single fact — supports confirm / edit / mark_unknown / reject.
-// ==========================================================================
-
-function ConfirmRow({
-  fact,
-  pending,
-  onDecision,
+function CenteredState({
+  icon,
+  title,
+  body,
+  actionLabel,
+  onAction,
 }: {
-  fact: Fact;
-  pending?: { action: FactAction; value?: any };
-  onDecision: (field: string, action: FactAction, value?: any) => void;
+  icon: React.ReactNode;
+  title: string;
+  body: string;
+  actionLabel?: string;
+  onAction?: () => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [editValue, setEditValue] = useState<string>(
-    typeof fact.value === "string" ? fact.value : "",
-  );
-  const active = pending?.action;
   return (
-    <View style={styles.factRow}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.factField}>{prettyField(fact.field)}</Text>
-        {editing ? (
-          <TextInput
-            value={editValue}
-            onChangeText={setEditValue}
-            onBlur={() => {
-              onDecision(fact.field, "edit", editValue);
-              setEditing(false);
-            }}
-            style={styles.editInput}
-            placeholder="Enter value"
-            placeholderTextColor={colors.onSurfaceTertiary}
-            autoFocus
-          />
-        ) : (
-          <Text style={styles.factValue}>{prettyValue(pending?.value ?? fact.value)}</Text>
-        )}
-        {fact.note ? <Text style={styles.factNote}>{fact.note}</Text> : null}
-        <View style={styles.row}>
-          <ConfidencePill confidence={fact.confidence} />
-          <Text style={styles.evidenceText}>via {fact.evidence}</Text>
-          {fact.blocking ? (
-            <Text style={[styles.evidenceText, { color: colors.error }]}>· blocking</Text>
-          ) : null}
-        </View>
-        {active ? (
-          <Text style={[styles.evidenceText, { color: colors.brandSecondary, marginTop: 4 }]}>
-            Pending: {active}
-          </Text>
-        ) : null}
-      </View>
-      <View style={styles.factActions}>
-        <Pressable
-          onPress={() => onDecision(fact.field, "confirm")}
-          hitSlop={8}
-        >
-          <Ionicons
-            name="checkmark-circle"
-            size={22}
-            color={active === "confirm" ? colors.success : colors.onSurfaceTertiary}
-          />
+    <View style={styles.center}>
+      {icon}
+      <Text style={styles.centerTitle}>{title}</Text>
+      <Text style={styles.centerBody}>{body}</Text>
+      {actionLabel && onAction ? (
+        <Pressable style={styles.primaryButton} onPress={onAction}>
+          <Text style={styles.primaryButtonText}>{actionLabel}</Text>
         </Pressable>
-        <Pressable onPress={() => setEditing(true)} hitSlop={8}>
-          <Ionicons
-            name="create-outline"
-            size={22}
-            color={active === "edit" ? colors.brandPrimary : colors.onSurfaceTertiary}
-          />
-        </Pressable>
-        <Pressable onPress={() => onDecision(fact.field, "mark_unknown")} hitSlop={8}>
-          <Ionicons
-            name="help-circle"
-            size={22}
-            color={active === "mark_unknown" ? colors.warning : colors.onSurfaceTertiary}
-          />
-        </Pressable>
-        <Pressable onPress={() => onDecision(fact.field, "reject")} hitSlop={8}>
-          <Ionicons
-            name="close-circle"
-            size={22}
-            color={active === "reject" ? colors.error : colors.onSurfaceTertiary}
-          />
-        </Pressable>
-      </View>
+      ) : null}
     </View>
   );
 }
 
-// ==========================================================================
-// Small components
-// ==========================================================================
-
-function StatusPill({ status }: { status: string }) {
-  return (
-    <View style={[styles.pill, { backgroundColor: colors.surfaceTertiary }]}>
-      <Text style={[styles.pillText, { color: colors.onSurface }]}>{statusLabels[status] || status}</Text>
-    </View>
-  );
-}
-
-function FeasibilityPill({ status }: { status: string }) {
-  const map: Record<string, { bg: string; fg: string }> = {
-    feasible: { bg: colors.brandTertiary, fg: colors.onBrandTertiary },
-    feasible_with_tradeoffs: { bg: "#F5E6C7", fg: "#7A5C1C" },
-    not_currently_feasible: { bg: "#F4D1CB", fg: "#7A2B1E" },
-    unknown: { bg: colors.surfaceTertiary, fg: colors.onSurfaceSecondary },
-  };
-  const c = map[status] || map.unknown;
-  return (
-    <View style={[styles.pill, { backgroundColor: c.bg }]}>
-      <Text style={[styles.pillText, { color: c.fg }]}>Feasibility: {prettyField(status)}</Text>
-    </View>
-  );
-}
-
-function ConfidencePill({ confidence }: { confidence: string }) {
-  const cmap: Record<string, { bg: string; fg: string }> = {
-    high: { bg: colors.brandTertiary, fg: colors.onBrandTertiary },
-    medium: { bg: "#F5E6C7", fg: "#7A5C1C" },
-    low: { bg: "#F4D1CB", fg: "#7A2B1E" },
-  };
-  const c = cmap[confidence] || cmap.low;
-  return (
-    <View style={[styles.pillSmall, { backgroundColor: c.bg }]}>
-      <Text style={[styles.pillTextSmall, { color: c.fg }]}>{confidence}</Text>
-    </View>
-  );
-}
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>{title}</Text>
@@ -694,62 +539,776 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function prettyField(f: string) {
-  return String(f).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+function ContextItemCard({
+  item,
+  busy,
+  disabled,
+  readonly,
+  onDecide,
+}: {
+  item: PlanningContextItem;
+  busy: boolean;
+  disabled: boolean;
+  readonly: boolean;
+  onDecide: (action: PlanningContextDecisionAction, value?: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(item.value ?? "");
+  const [showWhy, setShowWhy] = useState(false);
+
+  useEffect(() => {
+    setEditValue(item.value ?? "");
+    setEditing(false);
+  }, [item.value]);
+
+  const canEdit = item.editable && item.editor !== "account_select";
+  const valueLabel =
+    item.status === "missing" || !item.value ? "Not known yet" : item.value;
+
+  return (
+    <View style={styles.contextItem}>
+      <View style={styles.itemHeader}>
+        <View style={styles.flex}>
+          <Text style={styles.itemLabel}>{item.label}</Text>
+          <Text style={item.status === "missing" ? styles.missingValue : styles.itemValue}>
+            {valueLabel}
+          </Text>
+        </View>
+        <Text style={styles.sourceBadge}>
+          {item.status === "user_edited"
+            ? "Your correction"
+            : item.status === "missing"
+              ? "Needs context"
+              : "From Hymn"}
+        </Text>
+      </View>
+
+      {editing ? (
+        <View style={styles.editorBox}>
+          <TextInput
+            value={editValue}
+            onChangeText={setEditValue}
+            placeholder={editorPlaceholder(item)}
+            placeholderTextColor={colors.onSurfaceTertiary}
+            keyboardType={item.editor === "money" ? "decimal-pad" : "default"}
+            autoCapitalize={item.editor === "text" ? "sentences" : "none"}
+            style={styles.input}
+            multiline={item.editor === "text"}
+            autoFocus
+          />
+          <View style={styles.buttonRow}>
+            <Pressable
+              style={styles.secondaryButton}
+              disabled={disabled}
+              onPress={() => {
+                setEditValue(item.value ?? "");
+                setEditing(false);
+              }}
+            >
+              <Text style={styles.secondaryButtonText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.primaryButton,
+                (!editValue.trim() || disabled) && styles.disabled,
+                styles.flex,
+              ]}
+              disabled={!editValue.trim() || disabled}
+              onPress={() => {
+                setEditing(false);
+                onDecide("change", editValue.trim());
+              }}
+            >
+              {busy ? (
+                <ActivityIndicator color={colors.onBrandPrimary} />
+              ) : (
+                <Text style={styles.primaryButtonText}>Save change</Text>
+              )}
+            </Pressable>
+          </View>
+        </View>
+      ) : item.editable && !readonly ? (
+        <View style={styles.decisionRow}>
+          {DECISIONS.map((decision) =>
+            decision.action === "change" && !canEdit ? null : (
+              <Pressable
+                key={decision.action}
+                style={styles.decisionButton}
+                disabled={disabled}
+                onPress={() => {
+                  if (decision.action === "change") {
+                    setEditing(true);
+                  } else {
+                    onDecide(decision.action);
+                  }
+                }}
+              >
+                <Text style={styles.decisionButtonText}>{decision.label}</Text>
+              </Pressable>
+            ),
+          )}
+        </View>
+      ) : null}
+
+      <Pressable
+        style={styles.disclosureButton}
+        onPress={() => setShowWhy((current) => !current)}
+      >
+        <Text style={styles.disclosureText}>Why does Hymn think this?</Text>
+        <Ionicons
+          name={showWhy ? "chevron-up" : "chevron-down"}
+          size={16}
+          color={colors.onSurfaceSecondary}
+        />
+      </Pressable>
+      {showWhy ? (
+        <View style={styles.evidenceBox}>
+          <Text style={styles.itemHelp}>{item.why.summary}</Text>
+          {item.why.evidence.map((evidence) => (
+            <Text key={evidence} style={styles.evidenceLine}>
+              • {evidence}
+            </Text>
+          ))}
+        </View>
+      ) : null}
+    </View>
+  );
 }
 
-function prettyValue(v: any): string {
-  if (v === null || v === undefined) return "unknown";
-  if (typeof v === "object") return JSON.stringify(v);
-  return String(v);
+function QuestionCard({
+  question,
+  busy,
+  disabled,
+  onSave,
+}: {
+  question: PlanningQuestion;
+  busy: boolean;
+  disabled: boolean;
+  onSave: (value: string) => void;
+}) {
+  const [value, setValue] = useState("");
+
+  return (
+    <View style={styles.questionCard}>
+      <Text style={styles.questionTitle}>{question.prompt}</Text>
+      <Text style={styles.itemHelp}>{question.help_text}</Text>
+      {question.input_type === "select" ? (
+        <View style={styles.optionList}>
+          {question.options.map((option) => (
+            <Pressable
+              key={option.value}
+              style={[
+                styles.optionButton,
+                value === option.value && styles.optionButtonSelected,
+              ]}
+              disabled={disabled}
+              onPress={() => setValue(option.value)}
+            >
+              <Ionicons
+                name={value === option.value ? "radio-button-on" : "radio-button-off"}
+                size={18}
+                color={
+                  value === option.value
+                    ? colors.brandPrimary
+                    : colors.onSurfaceSecondary
+                }
+              />
+              <Text style={styles.optionText}>{option.label}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : (
+        <TextInput
+          value={value}
+          onChangeText={setValue}
+          placeholder={
+            question.input_type === "date"
+              ? "YYYY-MM-DD"
+              : question.input_type === "money"
+                ? "Enter an amount"
+                : "Type your answer"
+          }
+          placeholderTextColor={colors.onSurfaceTertiary}
+          keyboardType={question.input_type === "money" ? "decimal-pad" : "default"}
+          style={styles.input}
+          multiline={question.input_type === "text"}
+        />
+      )}
+      <Pressable
+        style={[
+          styles.primaryButton,
+          (disabled || (question.required && !value.trim())) && styles.disabled,
+        ]}
+        disabled={disabled || (question.required && !value.trim())}
+        onPress={() => onSave(value.trim())}
+      >
+        {busy ? (
+          <ActivityIndicator color={colors.onBrandPrimary} />
+        ) : (
+          <Text style={styles.primaryButtonText}>Save answer</Text>
+        )}
+      </Pressable>
+      <Pressable
+        style={[styles.secondaryButton, disabled && styles.disabled]}
+        disabled={disabled}
+        onPress={() => onSave("")}
+      >
+        <Text style={styles.secondaryButtonText}>I don&apos;t know yet</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function FeasibilityCard({ feasibility }: { feasibility: PlanningFeasibility }) {
+  const statusCopy = {
+    appears_feasible: "Appears feasible",
+    may_be_difficult: "May be difficult",
+    insufficient_information: "Not enough information yet",
+  }[feasibility.status];
+
+  return (
+    <Section title="What looks realistic">
+      <View style={styles.feasibilityHeader}>
+        <Text style={styles.feasibilityStatus}>{statusCopy}</Text>
+        <Text style={styles.sectionIntro}>{feasibility.summary}</Text>
+      </View>
+      <ReadableList title="What appears feasible" items={feasibility.appears_feasible} />
+      <ReadableList title="What may make it difficult" items={feasibility.difficulties} />
+      {feasibility.calculations.length > 0 ? (
+        <View style={styles.readableGroup}>
+          <Text style={styles.groupTitle}>Calculations Hymn used</Text>
+          {feasibility.calculations.map((calculation) => (
+            <View key={`${calculation.label}:${calculation.value}`} style={styles.calculation}>
+              <Text style={styles.itemLabel}>{calculation.label}</Text>
+              <Text style={styles.itemValue}>{calculation.value}</Text>
+              <Text style={styles.itemHelp}>{calculation.explanation}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+      <ReadableList title="What cannot yet be determined" items={feasibility.unknowns} />
+    </Section>
+  );
+}
+
+function ReadableList({ title, items }: { title: string; items: string[] }) {
+  if (items.length === 0) return null;
+  return (
+    <View style={styles.readableGroup}>
+      <Text style={styles.groupTitle}>{title}</Text>
+      {items.map((item) => (
+        <Text key={item} style={styles.listItem}>
+          • {item}
+        </Text>
+      ))}
+    </View>
+  );
+}
+
+function DraftItemEditor({
+  item,
+  first,
+  last,
+  disabled,
+  onChange,
+  onMove,
+  onToggleDeferred,
+  onRemove,
+}: {
+  item: PlanningDraftItem;
+  first: boolean;
+  last: boolean;
+  disabled: boolean;
+  onChange: (next: PlanningDraftItem) => void;
+  onMove: (direction: "up" | "down") => void;
+  onToggleDeferred: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <View style={[styles.draftItem, item.status === "deferred" && styles.deferredItem]}>
+      <View style={styles.itemHeader}>
+        <Text style={styles.kindBadge}>{draftKindLabel(item.kind)}</Text>
+        <View style={styles.orderButtons}>
+          <Pressable
+            style={[styles.iconButton, first && styles.disabled]}
+            disabled={first || disabled}
+            onPress={() => onMove("up")}
+            accessibilityLabel={`Move ${item.title || item.kind} up`}
+          >
+            <Ionicons name="arrow-up" size={17} color={colors.onSurfaceSecondary} />
+          </Pressable>
+          <Pressable
+            style={[styles.iconButton, last && styles.disabled]}
+            disabled={last || disabled}
+            onPress={() => onMove("down")}
+            accessibilityLabel={`Move ${item.title || item.kind} down`}
+          >
+            <Ionicons name="arrow-down" size={17} color={colors.onSurfaceSecondary} />
+          </Pressable>
+        </View>
+      </View>
+      <Text style={styles.inputLabel}>Title</Text>
+      <TextInput
+        value={item.title}
+        onChangeText={(title) => onChange({ ...item, title })}
+        placeholder={`Describe this ${item.kind}`}
+        placeholderTextColor={colors.onSurfaceTertiary}
+        style={styles.input}
+        editable={!disabled}
+      />
+      <Text style={styles.inputLabel}>Helpful detail</Text>
+      <TextInput
+        value={item.notes}
+        onChangeText={(notes) => onChange({ ...item, notes })}
+        placeholder="What should be true when this is done?"
+        placeholderTextColor={colors.onSurfaceTertiary}
+        style={[styles.input, styles.notesInput]}
+        multiline
+        editable={!disabled}
+      />
+      <View style={styles.decisionRow}>
+        <Pressable
+          style={styles.decisionButton}
+          disabled={disabled}
+          onPress={onToggleDeferred}
+        >
+          <Text style={styles.decisionButtonText}>
+            {item.status === "deferred" ? "Include now" : "Defer"}
+          </Text>
+        </Pressable>
+        <Pressable
+          style={styles.decisionButton}
+          disabled={disabled}
+          onPress={onRemove}
+        >
+          <Text style={[styles.decisionButtonText, styles.removeText]}>Remove</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function targetTypeLabel(targetType: PlanningTargetType): string {
+  if (targetType === "goal") return "Goal";
+  if (targetType === "project") return "Project";
+  return "Learning journey";
+}
+
+function draftKindLabel(kind: DraftItemKind): string {
+  if (kind === "milestone") return "Milestone";
+  if (kind === "outcome") return "Expected outcome";
+  return "Task";
+}
+
+function editorPlaceholder(item: PlanningContextItem): string {
+  if (item.editor === "date") return "YYYY-MM-DD";
+  if (item.editor === "money") return "Enter an amount";
+  return `Enter ${item.label.toLowerCase()}`;
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: colors.surface },
-  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: spacing.lg },
   scroll: { padding: spacing.lg, paddingBottom: spacing.xxxl },
-  loadingText: { marginTop: spacing.md, color: colors.onSurfaceSecondary, fontFamily: fonts.body },
-  errorText: { color: colors.error, marginBottom: spacing.md, fontFamily: fonts.body },
-  eyebrow: { color: colors.onSurfaceSecondary, fontSize: 12, letterSpacing: 1, textTransform: "uppercase", marginBottom: spacing.xs, fontFamily: fonts.body },
-  title: { fontFamily: fonts.displayBold, fontSize: 22, color: colors.onSurface, marginBottom: spacing.sm },
-  subtitle: { fontFamily: fonts.body, color: colors.onSurfaceSecondary, marginTop: spacing.sm },
-  card: { backgroundColor: colors.surfaceSecondary, borderRadius: radius.lg, padding: spacing.lg, marginBottom: spacing.md, borderWidth: StyleSheet.hairlineWidth, borderColor: colors.border },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, alignItems: "center", marginTop: spacing.sm },
-  section: { marginTop: spacing.md },
-  sectionTitle: { fontFamily: fonts.displayBold, fontSize: 15, color: colors.onSurface, marginBottom: spacing.sm, marginLeft: spacing.xs },
-  pill: { paddingHorizontal: spacing.md, paddingVertical: 4, borderRadius: radius.pill },
-  pillText: { fontFamily: fonts.body, fontSize: 12 },
-  pillSmall: { paddingHorizontal: spacing.sm, paddingVertical: 2, borderRadius: radius.pill, alignSelf: "flex-start", marginTop: spacing.xs },
-  pillTextSmall: { fontFamily: fonts.body, fontSize: 10, fontWeight: "600" },
-  factRow: { flexDirection: "row", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border, paddingVertical: spacing.sm, alignItems: "flex-start" },
-  factField: { fontFamily: fonts.displayBold, fontSize: 13, color: colors.onSurface },
-  factValue: { fontFamily: fonts.body, fontSize: 13, color: colors.onSurfaceSecondary, marginTop: 2 },
-  factNote: { fontFamily: fonts.body, fontSize: 12, color: colors.onSurfaceTertiary, marginTop: 2, fontStyle: "italic" },
-  factActions: { flexDirection: "row", gap: spacing.sm, paddingLeft: spacing.sm },
-  evidenceText: { fontFamily: fonts.body, fontSize: 11, color: colors.onSurfaceTertiary },
-  editInput: { fontFamily: fonts.body, fontSize: 13, color: colors.onSurface, borderBottomWidth: 1, borderBottomColor: colors.borderStrong, paddingVertical: 4, marginTop: 4 },
-  blockerCard: { paddingVertical: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  blockerField: { fontFamily: fonts.body, fontSize: 12, color: colors.brandSecondary, textTransform: "uppercase" },
-  blockerQuestion: { fontFamily: fonts.displayBold, fontSize: 14, color: colors.onSurface, marginTop: 2 },
-  blockerWhy: { fontFamily: fonts.body, fontSize: 12, color: colors.onSurfaceSecondary, marginTop: 2 },
-  itemCard: { paddingVertical: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  itemTitle: { fontFamily: fonts.displayBold, fontSize: 14, color: colors.onSurface },
-  itemDetail: { fontFamily: fonts.body, fontSize: 12, color: colors.onSurfaceSecondary, marginTop: 2 },
-  itemMeta: { fontFamily: fonts.body, fontSize: 11, color: colors.onSurfaceTertiary },
-  metaRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, marginTop: spacing.xs },
-  conflictCard: { paddingVertical: spacing.sm, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border },
-  conflictKind: { fontFamily: fonts.displayBold, fontSize: 13, color: colors.error },
-  reasonText: { fontFamily: fonts.body, fontSize: 13, color: colors.onSurfaceSecondary, marginTop: 2 },
-  tradeoffBtn: { flexDirection: "row", gap: spacing.sm, paddingVertical: spacing.sm, borderRadius: radius.md, alignItems: "flex-start" },
-  tradeoffBtnSelected: { backgroundColor: colors.surfaceTertiary },
-  tradeoffTitle: { fontFamily: fonts.displayBold, fontSize: 13, color: colors.onSurface },
-  actionsCard: { marginTop: spacing.lg, gap: spacing.sm },
-  primaryBtn: { backgroundColor: colors.brandPrimary, paddingVertical: spacing.md, borderRadius: radius.md, alignItems: "center" },
-  primaryBtnText: { color: colors.onBrandPrimary, fontFamily: fonts.displayBold, fontSize: 15 },
-  secondaryBtn: { backgroundColor: colors.surfaceSecondary, paddingVertical: spacing.md, borderRadius: radius.md, alignItems: "center", borderWidth: 1, borderColor: colors.borderStrong },
-  secondaryBtnText: { color: colors.onSurface, fontFamily: fonts.body, fontSize: 14 },
-  btnDisabled: { opacity: 0.5 },
-  helperText: { fontFamily: fonts.body, fontSize: 12, color: colors.onSurfaceTertiary, textAlign: "center", marginTop: spacing.xs },
-  reanalyzeBtn: { flexDirection: "row", alignItems: "center", gap: spacing.xs, marginTop: spacing.md, paddingVertical: spacing.xs },
-  reanalyzeText: { fontFamily: fonts.body, fontSize: 12, color: colors.onSurfaceSecondary },
+  flex: { flex: 1 },
+  center: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: spacing.xl,
+  },
+  centerTitle: {
+    marginTop: spacing.md,
+    fontFamily: fonts.displayBold,
+    fontSize: 20,
+    color: colors.onSurface,
+    textAlign: "center",
+  },
+  centerBody: {
+    marginTop: spacing.sm,
+    marginBottom: spacing.lg,
+    fontFamily: fonts.body,
+    color: colors.onSurfaceSecondary,
+    textAlign: "center",
+    lineHeight: 20,
+  },
+  hero: { marginBottom: spacing.xl },
+  eyebrow: {
+    fontFamily: fonts.body,
+    color: colors.brandPrimary,
+    fontSize: 12,
+    letterSpacing: 1,
+    textTransform: "uppercase",
+    marginBottom: spacing.xs,
+  },
+  pageTitle: {
+    fontFamily: fonts.displayBold,
+    fontSize: 27,
+    lineHeight: 34,
+    color: colors.onSurface,
+  },
+  intro: {
+    fontFamily: fonts.body,
+    fontSize: 15,
+    lineHeight: 22,
+    color: colors.onSurfaceSecondary,
+    marginTop: spacing.sm,
+  },
+  nextAction: {
+    marginTop: spacing.md,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    backgroundColor: colors.brandTertiary,
+    padding: spacing.md,
+    borderRadius: radius.md,
+  },
+  nextActionText: {
+    flex: 1,
+    fontFamily: fonts.body,
+    fontSize: 13,
+    color: colors.onBrandTertiary,
+  },
+  section: { marginBottom: spacing.lg },
+  sectionTitle: {
+    fontFamily: fonts.displayBold,
+    fontSize: 17,
+    color: colors.onSurface,
+    marginBottom: spacing.sm,
+  },
+  sectionIntro: {
+    fontFamily: fonts.body,
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.onSurfaceSecondary,
+    marginBottom: spacing.md,
+  },
+  card: {
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+    padding: spacing.lg,
+  },
+  contextItem: {
+    paddingVertical: spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  itemHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: spacing.sm,
+  },
+  itemLabel: {
+    fontFamily: fonts.displayBold,
+    fontSize: 14,
+    color: colors.onSurface,
+  },
+  itemValue: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    lineHeight: 20,
+    color: colors.onSurfaceSecondary,
+    marginTop: 3,
+  },
+  missingValue: {
+    fontFamily: fonts.body,
+    fontSize: 14,
+    color: colors.warning,
+    marginTop: 3,
+  },
+  sourceBadge: {
+    fontFamily: fonts.body,
+    fontSize: 10,
+    color: colors.onSurfaceSecondary,
+    backgroundColor: colors.surfaceTertiary,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.xs,
+    borderRadius: radius.pill,
+  },
+  decisionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  decisionButton: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 7,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    borderRadius: radius.pill,
+  },
+  decisionButtonText: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    color: colors.onSurface,
+  },
+  disclosureButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs,
+    marginTop: spacing.md,
+    alignSelf: "flex-start",
+  },
+  disclosureText: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    color: colors.onSurfaceSecondary,
+  },
+  evidenceBox: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    padding: spacing.md,
+    marginTop: spacing.sm,
+  },
+  evidenceLine: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    lineHeight: 18,
+    color: colors.onSurfaceSecondary,
+    marginTop: spacing.xs,
+  },
+  itemHelp: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    lineHeight: 18,
+    color: colors.onSurfaceSecondary,
+  },
+  editorBox: { marginTop: spacing.md },
+  inputLabel: {
+    fontFamily: fonts.body,
+    fontSize: 11,
+    color: colors.onSurfaceSecondary,
+    marginTop: spacing.sm,
+    marginBottom: spacing.xs,
+  },
+  input: {
+    minHeight: 44,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.surface,
+    color: colors.onSurface,
+    fontFamily: fonts.body,
+    fontSize: 14,
+  },
+  notesInput: { minHeight: 70, textAlignVertical: "top" },
+  buttonRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  primaryButton: {
+    minHeight: 44,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.brandPrimary,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderRadius: radius.md,
+  },
+  primaryButtonText: {
+    color: colors.onBrandPrimary,
+    fontFamily: fonts.displayBold,
+    fontSize: 14,
+  },
+  secondaryButton: {
+    minHeight: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderRadius: radius.md,
+  },
+  secondaryButtonText: {
+    color: colors.onSurface,
+    fontFamily: fonts.body,
+    fontSize: 13,
+  },
+  disabled: { opacity: 0.45 },
+  questionCard: {
+    marginTop: spacing.sm,
+    paddingTop: spacing.md,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
+  questionTitle: {
+    fontFamily: fonts.displayBold,
+    fontSize: 15,
+    color: colors.onSurface,
+    marginBottom: spacing.xs,
+  },
+  optionList: { gap: spacing.sm, marginVertical: spacing.md },
+  optionButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    borderRadius: radius.md,
+    padding: spacing.md,
+  },
+  optionButtonSelected: {
+    backgroundColor: colors.brandTertiary,
+    borderColor: colors.brandPrimary,
+  },
+  optionText: {
+    flex: 1,
+    fontFamily: fonts.body,
+    fontSize: 13,
+    color: colors.onSurface,
+  },
+  feasibilityHeader: { marginBottom: spacing.md },
+  feasibilityStatus: {
+    fontFamily: fonts.displayBold,
+    fontSize: 15,
+    color: colors.onSurface,
+    marginBottom: spacing.xs,
+  },
+  readableGroup: {
+    paddingTop: spacing.md,
+    marginTop: spacing.sm,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
+  groupTitle: {
+    fontFamily: fonts.displayBold,
+    fontSize: 13,
+    color: colors.onSurface,
+    marginBottom: spacing.xs,
+  },
+  listItem: {
+    fontFamily: fonts.body,
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.onSurfaceSecondary,
+    marginTop: spacing.xs,
+  },
+  calculation: { marginTop: spacing.sm },
+  draftItem: {
+    paddingVertical: spacing.md,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.border,
+  },
+  deferredItem: { opacity: 0.65 },
+  kindBadge: {
+    fontFamily: fonts.body,
+    fontSize: 11,
+    color: colors.brandPrimary,
+    textTransform: "uppercase",
+    letterSpacing: 0.7,
+    flex: 1,
+  },
+  orderButtons: { flexDirection: "row", gap: spacing.xs },
+  iconButton: {
+    width: 32,
+    height: 32,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  removeText: { color: colors.error },
+  addRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  smallButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.borderStrong,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+  },
+  smallButtonText: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    color: colors.onSurface,
+  },
+  unsavedBox: {
+    marginTop: spacing.md,
+    padding: spacing.md,
+    backgroundColor: "#F5E6C7",
+    borderRadius: radius.md,
+  },
+  unsavedText: {
+    fontFamily: fonts.displayBold,
+    fontSize: 13,
+    color: "#7A5C1C",
+    marginBottom: spacing.sm,
+  },
+  validationText: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    color: colors.error,
+    textAlign: "center",
+    marginTop: spacing.sm,
+  },
+  approvalCard: {
+    backgroundColor: colors.brandTertiary,
+    padding: spacing.lg,
+    borderRadius: radius.lg,
+    marginBottom: spacing.xl,
+  },
+  confirmBox: { marginTop: spacing.sm },
+  confirmTitle: {
+    fontFamily: fonts.displayBold,
+    fontSize: 14,
+    color: colors.onSurface,
+  },
+  completionCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: spacing.md,
+    backgroundColor: colors.brandTertiary,
+    padding: spacing.lg,
+    borderRadius: radius.lg,
+    marginBottom: spacing.xl,
+  },
+  completionTitle: {
+    fontFamily: fonts.displayBold,
+    fontSize: 15,
+    color: colors.onBrandTertiary,
+  },
+  emptyText: {
+    fontFamily: fonts.body,
+    fontSize: 13,
+    lineHeight: 19,
+    color: colors.onSurfaceSecondary,
+  },
+  errorBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.md,
+    backgroundColor: "#F4D1CB",
+    padding: spacing.md,
+    borderRadius: radius.md,
+    marginBottom: spacing.lg,
+  },
+  errorBannerText: {
+    flex: 1,
+    fontFamily: fonts.body,
+    fontSize: 13,
+    color: "#7A2B1E",
+  },
+  errorDismiss: {
+    fontFamily: fonts.displayBold,
+    fontSize: 12,
+    color: "#7A2B1E",
+  },
 });

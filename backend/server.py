@@ -337,6 +337,7 @@ class ProjectCreate(BaseModel):
     start_date: str = ""
     target_end_date: str = ""
     notes: str = ""
+    checkin_cadence: str = ""  # "" | daily | weekly | monthly | manual
 
 
 class ProjectUpdate(BaseModel):
@@ -346,6 +347,7 @@ class ProjectUpdate(BaseModel):
     start_date: Optional[str] = None
     target_end_date: Optional[str] = None
     notes: Optional[str] = None
+    checkin_cadence: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -356,6 +358,7 @@ class ProjectResponse(BaseModel):
     start_date: str
     target_end_date: str
     notes: str
+    checkin_cadence: str
     created_at: str
     updated_at: str
 
@@ -623,6 +626,9 @@ def project_to_response(p: dict) -> ProjectResponse:
         start_date=p.get("start_date", "") or "",
         target_end_date=p.get("target_end_date", "") or "",
         notes=p.get("notes", "") or "",
+        # Existing records predate project scheduling. Returning an empty
+        # cadence keeps those records readable without a database migration.
+        checkin_cadence=p.get("checkin_cadence", "") or "",
         created_at=p.get("created_at", ""),
         updated_at=p.get("updated_at", ""),
     )
@@ -1094,6 +1100,11 @@ async def list_projects(current_user: dict = Depends(get_current_user)):
 async def create_project(body: ProjectCreate, current_user: dict = Depends(get_current_user)):
     if body.status not in PROJECT_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(PROJECT_STATUSES)}")
+    if body.checkin_cadence and body.checkin_cadence not in CHECKIN_CADENCES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)} or empty",
+        )
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         "id": str(uuid.uuid4()),
@@ -1104,6 +1115,7 @@ async def create_project(body: ProjectCreate, current_user: dict = Depends(get_c
         "start_date": (body.start_date or "").strip(),
         "target_end_date": (body.target_end_date or "").strip(),
         "notes": (body.notes or "").strip(),
+        "checkin_cadence": (body.checkin_cadence or "").strip(),
         "created_at": now,
         "updated_at": now,
     }
@@ -1128,7 +1140,16 @@ async def update_project(project_id: str, body: ProjectUpdate, current_user: dic
     updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
     if "status" in updates and updates["status"] not in PROJECT_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(PROJECT_STATUSES)}")
-    for k in ("title", "description", "start_date", "target_end_date", "notes"):
+    if (
+        "checkin_cadence" in updates
+        and updates["checkin_cadence"]
+        and updates["checkin_cadence"] not in CHECKIN_CADENCES
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)} or empty",
+        )
+    for k in ("title", "description", "start_date", "target_end_date", "notes", "checkin_cadence"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()

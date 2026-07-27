@@ -91,6 +91,57 @@ class TestProjects:
         assert r.status_code == 200
         assert r.json()["title"] == p["title"]
         assert r.json()["status"] == "active"
+        assert r.json()["checkin_cadence"] == ""
+
+    def test_create_and_update_checkin_cadence(self, token_a):
+        r = requests.post(
+            f"{API}/projects",
+            headers=_h(token_a),
+            json={
+                "title": f"TEST_p_cadence_{uuid.uuid4().hex[:6]}",
+                "checkin_cadence": "weekly",
+            },
+            timeout=10,
+        )
+        assert r.status_code == 201, r.text
+        project = r.json()
+        assert project["checkin_cadence"] == "weekly"
+
+        updated = requests.put(
+            f"{API}/projects/{project['id']}",
+            headers=_h(token_a),
+            json={"checkin_cadence": "monthly"},
+            timeout=10,
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["checkin_cadence"] == "monthly"
+
+        cleared = requests.put(
+            f"{API}/projects/{project['id']}",
+            headers=_h(token_a),
+            json={"checkin_cadence": ""},
+            timeout=10,
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["checkin_cadence"] == ""
+
+    def test_invalid_checkin_cadence_400(self, token_a):
+        created = requests.post(
+            f"{API}/projects",
+            headers=_h(token_a),
+            json={"title": "TEST_invalid_cadence", "checkin_cadence": "fortnightly"},
+            timeout=10,
+        )
+        assert created.status_code == 400
+
+        project = _mk_project(token_a, "TEST_invalid_cadence_update")
+        updated = requests.put(
+            f"{API}/projects/{project['id']}",
+            headers=_h(token_a),
+            json={"checkin_cadence": "fortnightly"},
+            timeout=10,
+        )
+        assert updated.status_code == 400
 
     def test_create_invalid_status_400(self, token_a):
         r = requests.post(f"{API}/projects", headers=_h(token_a), json={"title": "x", "status": "bogus"}, timeout=10)

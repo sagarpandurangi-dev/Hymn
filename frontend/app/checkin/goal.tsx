@@ -177,7 +177,7 @@ export default function GoalCheckinScreen() {
     <SafeAreaView style={s.safe} edges={["top", "bottom"]}>
       <View style={s.headerRow}>
         <Pressable onPress={() => router.back()} testID="goal-checkin-cancel" hitSlop={12}><Text style={s.cancel}>Cancel</Text></Pressable>
-        <Text style={s.headerTitle}>Goal Check-in</Text>
+        <Text style={s.headerTitle}>Log goal progress</Text>
         <View style={{ width: 56 }} />
       </View>
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={s.flex}>
@@ -363,7 +363,7 @@ export default function GoalCheckinScreen() {
 
         <View style={s.footer}>
           <Pressable style={[s.cta, busy && s.ctaDisabled]} onPress={onSave} disabled={busy} testID="goal-checkin-save-button">
-            {busy ? <ActivityIndicator color={colors.onSurfaceInverse} /> : <Text style={s.ctaText}>Save check-in</Text>}
+            {busy ? <ActivityIndicator color={colors.onSurfaceInverse} /> : <Text style={s.ctaText}>Save progress</Text>}
           </Pressable>
         </View>
       </KeyboardAvoidingView>
