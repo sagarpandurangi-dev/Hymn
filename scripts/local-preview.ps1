@@ -14,11 +14,34 @@ $BrowserUrl = "http://localhost:8081"
 $BackendUrl = "http://127.0.0.1:8001"
 
 function Get-CurrentBranch {
-    $branch = (& git -C $RepoRoot branch --show-current 2>$null).Trim()
-    if (-not $branch) {
-        throw "Could not determine the current Git branch."
+    $gitMarker = Join-Path $RepoRoot ".git"
+    if (Test-Path -LiteralPath $gitMarker -PathType Container) {
+        $gitDirectory = $gitMarker
+    } elseif (Test-Path -LiteralPath $gitMarker -PathType Leaf) {
+        $pointer = (Get-Content -Raw -LiteralPath $gitMarker).Trim()
+        if ($pointer -notmatch '^gitdir:\s*(.+)$') {
+            throw "The repository .git pointer is invalid."
+        }
+        $gitDirectory = $matches[1]
+        if (-not [IO.Path]::IsPathRooted($gitDirectory)) {
+            $gitDirectory = Join-Path $RepoRoot $gitDirectory
+        }
+    } else {
+        throw "This folder is not a Git working tree."
     }
-    return $branch
+
+    $headPath = Join-Path $gitDirectory "HEAD"
+    if (-not (Test-Path -LiteralPath $headPath)) {
+        throw "The repository HEAD file is missing."
+    }
+    $head = (Get-Content -Raw -LiteralPath $headPath).Trim()
+    if ($head -match '^ref:\s+refs/heads/(.+)$') {
+        return $matches[1]
+    }
+    if ($head -match '^[0-9a-fA-F]{40}$') {
+        return "detached@$($head.Substring(0, 8))"
+    }
+    throw "Could not determine the current Git branch."
 }
 
 function Read-PreviewState {
@@ -414,6 +437,9 @@ function Invoke-SelfTest {
     }
     if ($BrowserUrl -ne "http://localhost:8081" -or $BackendUrl -ne "http://127.0.0.1:8001") {
         throw "Canonical URL test failed."
+    }
+    if (-not (Get-CurrentBranch)) {
+        throw "Git HEAD branch detection test failed."
     }
     Write-Host "Local preview safety self-test passed."
 }
