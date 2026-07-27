@@ -183,7 +183,7 @@ export default function TodayScreen() {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Tell Hymn what you want to do"
-          onPress={() => router.push("/intents")}
+          onPress={() => router.push("/dreams/new?sourceType=intent")}
           style={({ pressed }) => [
             styles.intentEntry,
             pressed && styles.intentEntryPressed,
@@ -196,7 +196,7 @@ export default function TodayScreen() {
           <View style={styles.intentEntryCopy}>
             <Text style={styles.intentEntryTitle}>I want to…</Text>
             <Text style={styles.intentEntryBody}>
-              Turn a decision into a clear, reviewable plan.
+              Turn a dream or decision into a clear, reviewable map.
             </Text>
           </View>
           <Ionicons name="arrow-forward" size={20} color={colors.brandPrimary} />

@@ -93,7 +93,7 @@ export default function KnowledgeScreen() {
         </View>
         <View style={styles.headerActions}>
           <Pressable
-            onPress={() => router.push("/knowledge/new")}
+            onPress={() => router.push("/dreams/new?sourceType=learning")}
             testID="knowledge-add-button"
             hitSlop={12}
             style={styles.addBtn}
@@ -118,7 +118,7 @@ export default function KnowledgeScreen() {
           <Ionicons name="school-outline" size={44} color={colors.onSurfaceTertiary} />
           <Text style={styles.emptyTitle}>No journeys yet.</Text>
           <Text style={styles.emptyText}>What do you want to learn?</Text>
-          <Pressable onPress={() => router.push("/knowledge/new")} style={styles.emptyCta} testID="knowledge-empty-add-button">
+          <Pressable onPress={() => router.push("/dreams/new?sourceType=learning")} style={styles.emptyCta} testID="knowledge-empty-add-button">
             <Text style={styles.emptyCtaText}>Start a journey</Text>
           </Pressable>
         </View>

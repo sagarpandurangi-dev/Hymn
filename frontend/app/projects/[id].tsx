@@ -5,7 +5,7 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
-import type { AttachedPlanResponse } from "@/src/lib/planning";
+import type { ActiveDreamPlan } from "@/src/lib/dreams";
 import ConfirmModal from "@/src/components/ConfirmModal";
 
 type Project = {
@@ -38,7 +38,7 @@ export default function ProjectDetailScreen() {
   const router = useRouter();
   const [p, setP] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<ProjectTask[]>([]);
-  const [attachedPlan, setAttachedPlan] = useState<AttachedPlanResponse | null>(null);
+  const [attachedPlan, setAttachedPlan] = useState<ActiveDreamPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -59,7 +59,7 @@ export default function ProjectDetailScreen() {
         allTasks.filter((task) => task.project_id === id),
       );
       try {
-        setAttachedPlan(await api.planningGetAttachedPlan("project", id));
+        setAttachedPlan(await api.getActiveDreamPlan("project", id));
       } catch {
         setAttachedPlan(null);
       }
@@ -125,7 +125,7 @@ export default function ProjectDetailScreen() {
           </Text>
 
           <Pressable
-            onPress={() => router.push(`/planning/project/${p.id}`)}
+            onPress={() => router.push(`/dreams/new?sourceType=project&sourceId=${p.id}`)}
             testID="project-detail-plan-btn"
             style={styles.planBtn}
           >
@@ -165,7 +165,7 @@ export default function ProjectDetailScreen() {
 
           {attachedPlan?.attached ? (
             <Pressable
-              onPress={() => router.push(`/planning/project/${p.id}`)}
+              onPress={() => router.push(`/dreams/${attachedPlan.proposal_id}`)}
               style={styles.attachedPlan}
               testID="project-detail-attached-plan"
             >
@@ -174,7 +174,7 @@ export default function ProjectDetailScreen() {
                 <Text style={styles.attachedPlanTitle}>Plan attached</Text>
               </View>
               <Text style={styles.attachedPlanDetail}>
-                {attachedPlan.items.length} plan items are attached to this project.
+                {attachedPlan.nodes.length} accepted map items are attached to this project.
               </Text>
               <Text style={styles.attachedPlanLink}>Review plan</Text>
             </Pressable>

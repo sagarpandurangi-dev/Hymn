@@ -91,6 +91,8 @@ export default function RootLayout() {
           <Stack.Screen name="portfolio/index" />
           <Stack.Screen name="intents/index" />
           <Stack.Screen name="intents/[id]" />
+          <Stack.Screen name="dreams/new" />
+          <Stack.Screen name="dreams/[id]" />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>

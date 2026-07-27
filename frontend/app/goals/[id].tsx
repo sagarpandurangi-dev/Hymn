@@ -5,7 +5,7 @@ import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
-import type { AttachedPlanResponse } from "@/src/lib/planning";
+import type { ActiveDreamPlan } from "@/src/lib/dreams";
 import ConfirmModal from "@/src/components/ConfirmModal";
 
 type Goal = {
@@ -53,7 +53,7 @@ export default function GoalDetailScreen() {
   const [eos, setEos] = useState<EO[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [checkins, setCheckins] = useState<Checkin[]>([]);
-  const [attachedPlan, setAttachedPlan] = useState<AttachedPlanResponse | null>(null);
+  const [attachedPlan, setAttachedPlan] = useState<ActiveDreamPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -77,7 +77,7 @@ export default function GoalDetailScreen() {
       setTasks(taskList as Task[]);
       setCheckins(checkinList as Checkin[]);
       try {
-        setAttachedPlan(await api.planningGetAttachedPlan("goal", id));
+        setAttachedPlan(await api.getActiveDreamPlan("goal", id));
       } catch {
         setAttachedPlan(null);
       }
@@ -199,7 +199,7 @@ export default function GoalDetailScreen() {
           ) : null}
 
           <Pressable
-            onPress={() => router.push(`/planning/goal/${goal.id}`)}
+            onPress={() => router.push(`/dreams/new?sourceType=goal&sourceId=${goal.id}`)}
             testID="goal-detail-plan-btn"
             style={styles.planBtn}
           >
@@ -237,7 +237,7 @@ export default function GoalDetailScreen() {
 
           {attachedPlan?.attached ? (
             <Pressable
-              onPress={() => router.push(`/planning/goal/${goal.id}`)}
+              onPress={() => router.push(`/dreams/${attachedPlan.proposal_id}`)}
               style={styles.attachedPlan}
               testID="goal-detail-attached-plan"
             >
@@ -246,7 +246,7 @@ export default function GoalDetailScreen() {
                 <Text style={styles.attachedPlanTitle}>Plan attached</Text>
               </View>
               <Text style={styles.attachedPlanDetail}>
-                {attachedPlan.items.length} plan items are attached to this goal.
+                {attachedPlan.nodes.length} accepted map items are attached to this goal.
               </Text>
               <Text style={styles.attachedPlanLink}>Review plan</Text>
             </Pressable>

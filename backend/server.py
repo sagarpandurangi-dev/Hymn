@@ -2603,12 +2603,14 @@ from finance_manager import (
 from finance_advanced import advanced_router as finance_advanced_router, ensure_finance_advanced_indexes  # noqa: E402
 from planning_engine import planning_router, ensure_planning_indexes  # noqa: E402
 from intent_engine import intent_router, ensure_intent_indexes  # noqa: E402
+from dream_engine import dream_router, ensure_dream_indexes  # noqa: E402
 
 api_router.include_router(portfolio_router)
 api_router.include_router(finance_router)
 api_router.include_router(finance_advanced_router)
 api_router.include_router(planning_router)
 api_router.include_router(intent_router)
+api_router.include_router(dream_router)
 app.include_router(api_router)
 
 app.add_middleware(
@@ -2635,6 +2637,7 @@ async def startup_indexes():
     await ensure_finance_advanced_indexes(db)
     await ensure_planning_indexes(db)
     await ensure_intent_indexes(db)
+    await ensure_dream_indexes(db)
     try:
         touched = await backfill_fc_into_allocations(db)
         if touched:

@@ -17,6 +17,15 @@ import type {
   ReconciliationSuggestion,
   UnplannedResolutionResult,
 } from "./reconciliation";
+import type {
+  ActiveDreamPlan,
+  DreamAnalyzePayload,
+  DreamProposal,
+  DreamTreeOperation,
+  JourneyShape,
+  JourneyShapeResponse,
+  PlanningDepth,
+} from "./dreams";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
 
@@ -132,6 +141,69 @@ export const api = {
   listIntents: () => request<SavedIntent[]>("/intents", { auth: true }),
   getIntent: (id: string) =>
     request<SavedIntent>(`/intents/${encodeURIComponent(id)}`, { auth: true }),
+
+  listJourneyShapes: (query = "") =>
+    request<JourneyShapeResponse>(
+      `/dreams/journey-shapes?q=${encodeURIComponent(query)}`,
+      { auth: true },
+    ),
+  analyzeDream: (payload: DreamAnalyzePayload) =>
+    request<DreamProposal>("/dreams/analyze", {
+      method: "POST",
+      body: payload,
+      auth: true,
+    }),
+  getDream: (id: string) =>
+    request<DreamProposal>(`/dreams/${encodeURIComponent(id)}`, { auth: true }),
+  correctDream: (
+    id: string,
+    payload: {
+      expected_revision: number;
+      selected_shape?: JourneyShape;
+      fact_corrections?: Record<string, unknown>;
+      planning_depth?: PlanningDepth;
+    },
+  ) =>
+    request<DreamProposal>(`/dreams/${encodeURIComponent(id)}/interpretation`, {
+      method: "PATCH",
+      body: payload,
+      auth: true,
+    }),
+  editDreamMap: (
+    id: string,
+    expectedRevision: number,
+    operation: DreamTreeOperation,
+  ) =>
+    request<DreamProposal>(`/dreams/${encodeURIComponent(id)}/map/operations`, {
+      method: "POST",
+      body: { expected_revision: expectedRevision, operation },
+      auth: true,
+    }),
+  chooseDreamManualResearch: (id: string, expectedRevision: number) =>
+    request<DreamProposal>(`/dreams/${encodeURIComponent(id)}/research/manual`, {
+      method: "POST",
+      body: { expected_revision: expectedRevision, operation: { type: "manual" } },
+      auth: true,
+    }),
+  applyDream: (id: string) =>
+    request<{
+      plan_map_id: string;
+      proposal_revision: number;
+      return_to: import("./dreams").DreamReturnTo;
+      applied_at: string;
+      already_applied: boolean;
+    }>(`/dreams/${encodeURIComponent(id)}/apply`, {
+      method: "POST",
+      auth: true,
+    }),
+  getActiveDreamPlan: (
+    sourceType: "goal" | "project" | "journey",
+    sourceId: string,
+  ) =>
+    request<ActiveDreamPlan>(
+      `/dreams/targets/${sourceType}/${encodeURIComponent(sourceId)}/active-plan`,
+      { auth: true },
+    ),
 
   listDomains: () =>
     request<{ id: string; name: string; is_default: boolean; created_at: string }[]>("/domains", { auth: true }),
