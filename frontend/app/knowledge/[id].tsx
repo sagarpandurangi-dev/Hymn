@@ -16,6 +16,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
+import type { ActiveDreamPlan } from "@/src/lib/dreams";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import ConfirmModal from "@/src/components/ConfirmModal";
 
@@ -298,6 +299,7 @@ export default function KnowledgeJourneyDetail() {
   const [eos, setEos] = useState<EO[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [checkins, setCheckins] = useState<Checkin[]>([]);
+  const [attachedPlan, setAttachedPlan] = useState<ActiveDreamPlan | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -328,6 +330,11 @@ export default function KnowledgeJourneyDetail() {
       setEos(eoList as EO[]);
       setTasks(tList as Task[]);
       setCheckins(ciList as Checkin[]);
+      try {
+        setAttachedPlan(await api.getActiveDreamPlan("journey", id));
+      } catch {
+        setAttachedPlan(null);
+      }
     } catch (e: any) {
       setError(e?.message || "Could not load journey");
     } finally { setLoading(false); }
@@ -434,13 +441,27 @@ export default function KnowledgeJourneyDetail() {
         </View>
 
         <Pressable
-          onPress={() => router.push(`/planning/journey/${journey.id}` as any)}
+          onPress={() => router.push(`/dreams/new?sourceType=journey&sourceId=${journey.id}`)}
           testID="kj-plan-btn"
           style={styles.planBtn}
         >
           <Ionicons name="git-network-outline" size={18} color={colors.onBrandPrimary} />
           <Text style={styles.planBtnText}>Plan with Hymn</Text>
         </Pressable>
+
+        {attachedPlan?.attached ? (
+          <Pressable
+            onPress={() => router.push(`/dreams/${attachedPlan.proposal_id}`)}
+            style={styles.block}
+            testID="kj-attached-plan"
+          >
+            <Text style={styles.sectionLabel}>ACTIVE PLAN MAP</Text>
+            <Text style={styles.notesText}>
+              {attachedPlan.nodes.length} accepted map items are attached to this learning journey.
+            </Text>
+            <Text style={styles.edit}>Review plan</Text>
+          </Pressable>
+        ) : null}
 
         {journey.notes ? (
           <View style={styles.block}>
