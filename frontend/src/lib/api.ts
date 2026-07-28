@@ -161,6 +161,7 @@ export const api = {
       expected_revision: number;
       selected_shape?: JourneyShape;
       fact_corrections?: Record<string, unknown>;
+      not_sure_fields?: string[];
       planning_depth?: PlanningDepth;
     },
   ) =>
@@ -185,15 +186,31 @@ export const api = {
       body: { expected_revision: expectedRevision, operation: { type: "manual" } },
       auth: true,
     }),
-  applyDream: (id: string) =>
+  applyDream: (
+    id: string,
+    expectedRevision: number,
+    acceptedNodeIds: string[],
+  ) =>
     request<{
       plan_map_id: string;
       proposal_revision: number;
+      accepted_node_ids: string[];
+      created_counts: {
+        plan: number;
+        phase: number;
+        milestone: number;
+        task: number;
+        checkin_requirement: number;
+      };
       return_to: import("./dreams").DreamReturnTo;
       applied_at: string;
       already_applied: boolean;
     }>(`/dreams/${encodeURIComponent(id)}/apply`, {
       method: "POST",
+      body: {
+        expected_revision: expectedRevision,
+        accepted_node_ids: acceptedNodeIds,
+      },
       auth: true,
     }),
   getActiveDreamPlan: (

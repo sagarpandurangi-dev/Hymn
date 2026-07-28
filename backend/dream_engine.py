@@ -555,10 +555,30 @@ def _facts_by_key(interpretation: dict) -> Dict[str, dict]:
     return {fact["key"]: fact for fact in interpretation.get("facts") or []}
 
 
+def _refresh_interpretation_uncertainties(interpretation: dict) -> None:
+    """Keep clarification needs aligned with authoritative corrections."""
+    facts = _facts_by_key(interpretation)
+    unknown = set(interpretation.get("unknown_fact_keys") or [])
+    shape = interpretation["primary"]["journey_shape"]
+    if shape == "purchase":
+        uncertainties: List[str] = []
+        if not (facts.get("desired_object") or {}).get("value") and "desired_object" not in unknown:
+            uncertainties.append("What are you considering buying?")
+        if (
+            not (facts.get("amount") or {}).get("value")
+            or not (facts.get("currency") or {}).get("value")
+        ) and not {"amount", "currency"}.intersection(unknown):
+            uncertainties.append("What price range are you considering?")
+        if not (facts.get("deadline") or {}).get("value") and "deadline" not in unknown:
+            uncertainties.append("When would you like to buy?")
+        interpretation["uncertainties"] = uncertainties
+
+
 def apply_fact_corrections(
     interpretation: dict,
     selected_shape: Optional[str],
     corrections: Dict[str, Any],
+    not_sure_fields: Optional[List[str]] = None,
 ) -> dict:
     """Preserve inferred facts while making explicit user corrections authoritative."""
     result = deepcopy(interpretation)
@@ -585,6 +605,9 @@ def apply_fact_corrections(
         "preferences": "text",
         "journey_shape": "choice",
     }
+    unknown = set(result.get("unknown_fact_keys") or [])
+    not_sure = set(not_sure_fields or [])
+    _require(not_sure.issubset(allowed), "Unsupported not-sure field")
     for key, value in corrections.items():
         _require(key in allowed, f"Unsupported fact correction: {key}")
         if key == "deadline" and value:
@@ -615,6 +638,28 @@ def apply_fact_corrections(
         else:
             result.setdefault("facts", []).append(row)
         by_key[key] = row
+        if value not in (None, ""):
+            unknown.discard(key)
+    for key in not_sure:
+        row = {
+            "key": key,
+            "value": None,
+            "value_type": allowed[key],
+            "origin": "user_corrected",
+            "evidence_ids": ["user-correction"],
+            "uncertainty": "You chose to leave this open for now.",
+        }
+        if key in by_key:
+            result["facts"] = [
+                row if fact["key"] == key else fact
+                for fact in result["facts"]
+            ]
+        else:
+            result.setdefault("facts", []).append(row)
+        by_key[key] = row
+        unknown.add(key)
+    result["unknown_fact_keys"] = sorted(unknown)
+    _refresh_interpretation_uncertainties(result)
     result.setdefault("evidence", []).append({
         "id": "user-correction",
         "kind": "user_fact",
@@ -675,17 +720,23 @@ async def _owned_context(
     source_id: Optional[str],
     target: Optional[dict],
     interpretation: dict,
+    profile_currency: Optional[str] = None,
 ) -> dict:
     facts = _facts_by_key(interpretation)
     currency = (facts.get("currency") or {}).get("value")
     evidence: List[dict] = []
     queried: List[str] = []
 
+    context_currency = currency or profile_currency
     account_query: dict = {"user_id": user_id}
-    if currency:
-        account_query["currency"] = currency
+    if context_currency:
+        account_query["currency"] = context_currency
     queried.append("financial_accounts")
-    accounts = await db.financial_accounts.find(account_query, {"_id": 0}).to_list(length=5000)
+    accounts = (
+        await db.financial_accounts.find(account_query, {"_id": 0}).to_list(length=5000)
+        if context_currency
+        else []
+    )
     liquid = Decimal(0)
     liquid_count = 0
     compatible_accounts = []
@@ -791,6 +842,8 @@ async def _owned_context(
         "source": source_summary,
         "finance": {
             "requested_currency": currency,
+            "profile_currency": profile_currency,
+            "recorded_currency": context_currency,
             "compatible_liquid_accounts": compatible_accounts,
             "recorded_liquid_total": _money(liquid) if liquid_count else None,
             "recorded_liquid_account_count": liquid_count,
@@ -1617,6 +1670,53 @@ def _snapshot_hash(target: Optional[dict], context: dict) -> str:
     ).hexdigest()
 
 
+def _clarification_questions(interpretation: dict) -> List[dict]:
+    facts = _facts_by_key(interpretation)
+    unknown = set(interpretation.get("unknown_fact_keys") or [])
+    if interpretation["primary"]["journey_shape"] != "purchase":
+        return [
+            {
+                "id": f"question-{index}",
+                "kind": "text",
+                "prompt": question,
+                "why": "This would make the plan more specific, but you can continue without it.",
+                "fact_keys": [],
+                "status": "missing",
+                "value": None,
+            }
+            for index, question in enumerate(interpretation.get("uncertainties") or [])
+        ]
+
+    amount = (facts.get("amount") or {}).get("value")
+    currency = (facts.get("currency") or {}).get("value")
+    deadline = (facts.get("deadline") or {}).get("value")
+    price_unknown = bool({"amount", "currency"}.intersection(unknown))
+    deadline_unknown = "deadline" in unknown
+    return [
+        {
+            "id": "purchase-price",
+            "kind": "money",
+            "prompt": "What price range are you considering?",
+            "why": (
+                "A price and currency let Hymn compare the purchase with compatible "
+                "recorded resources. No currency conversion is assumed."
+            ),
+            "fact_keys": ["amount", "currency"],
+            "status": "unknown" if price_unknown else "answered" if amount and currency else "missing",
+            "value": {"amount": amount, "currency": currency},
+        },
+        {
+            "id": "purchase-timing",
+            "kind": "date",
+            "prompt": "When would you like to buy?",
+            "why": "Timing changes the available preparation time and which commitments may overlap.",
+            "fact_keys": ["deadline"],
+            "status": "unknown" if deadline_unknown else "answered" if deadline else "missing",
+            "value": deadline,
+        },
+    ]
+
+
 def public_proposal(proposal: dict) -> dict:
     """Return the typed UI contract without raw owned records or provenance codes."""
     interpretation = proposal["interpretation"]
@@ -1644,6 +1744,7 @@ def public_proposal(proposal: dict) -> dict:
             "alternatives": interpretation.get("alternatives") or [],
             "facts": facts,
             "uncertainties": interpretation.get("uncertainties") or [],
+            "questions": _clarification_questions(interpretation),
             "why": {
                 "summary": interpretation["primary"]["reason"],
                 "evidence": [
@@ -1699,6 +1800,7 @@ class DreamCorrectionRequest(BaseModel):
     expected_revision: int = Field(ge=1)
     selected_shape: Optional[str] = None
     fact_corrections: Dict[str, Any] = Field(default_factory=dict)
+    not_sure_fields: List[str] = Field(default_factory=list)
     planning_depth: Optional[Literal["light", "moderate", "major", "transformational"]] = None
 
 
@@ -1714,6 +1816,13 @@ class DreamTreeReplaceRequest(BaseModel):
 
     expected_revision: int = Field(ge=1)
     nodes: List[Dict[str, Any]]
+
+
+class DreamApplyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+    accepted_node_ids: List[str]
 
 
 async def _load_owned_proposal(db, user_id: str, proposal_id: str) -> dict:
@@ -1827,6 +1936,7 @@ async def analyze_dream(
         body.source_id,
         target,
         interpretation,
+        current_user.get("portfolio_reporting_currency"),
     )
     scale = relative_scale(interpretation, context, reference)
     user_nodes = [node.model_dump() for node in body.user_plan_nodes]
@@ -1889,7 +1999,24 @@ async def correct_dream(
         proposal["interpretation"],
         body.selected_shape,
         body.fact_corrections,
+        body.not_sure_fields,
     )
+    target = await _owned_target(
+        db,
+        current_user["id"],
+        proposal["source"]["type"],
+        proposal["source"].get("id"),
+    )
+    proposal["context"] = await _owned_context(
+        db,
+        current_user["id"],
+        proposal["source"]["type"],
+        proposal["source"].get("id"),
+        target,
+        proposal["interpretation"],
+        current_user.get("portfolio_reporting_currency"),
+    )
+    proposal["context_snapshot_hash"] = _snapshot_hash(target, proposal["context"])
     if body.planning_depth:
         proposal["scale"]["user_selected_depth"] = body.planning_depth
         proposal["scale"]["summary"] = (
@@ -2343,6 +2470,16 @@ async def _apply_plan(db, user_id: str, proposal: dict) -> dict:
         "plan_map_id": created["plan_map"],
         "proposal_revision": revision,
         "created_records": created,
+        "accepted_node_ids": [node["id"] for node in included],
+        "created_counts": {
+            "plan": 1,
+            "phase": sum(node["kind"] == "phase" for node in included),
+            "milestone": sum(node["kind"] == "milestone" for node in included),
+            "task": sum(node["kind"] == "task" for node in included),
+            "checkin_requirement": sum(
+                node["kind"] == "checkin_requirement" for node in included
+            ),
+        },
         "return_to": return_to,
         "applied_at": now,
         "already_applied": False,
@@ -2358,10 +2495,31 @@ async def _apply_plan(db, user_id: str, proposal: dict) -> dict:
 @dream_router.post("/{proposal_id}/apply")
 async def apply_dream(
     proposal_id: str,
+    body: Optional[DreamApplyRequest] = None,
     current_user: dict = Depends(get_current_user),
 ):
     db = get_db()
     proposal = await _load_owned_proposal(db, current_user["id"], proposal_id)
+    if body is not None:
+        _require(
+            proposal["revision"] == body.expected_revision,
+            "This dream changed in another tab. Refresh before applying.",
+            409,
+        )
+        submitted_ids = body.accepted_node_ids
+        _require(
+            len(submitted_ids) == len(set(submitted_ids)),
+            "The apply request contains duplicate plan items.",
+        )
+        current_ids = {
+            node["id"] for node in proposal["map"]["nodes"]
+            if node["decision_state"] in {"accepted", "modified"}
+        }
+        _require(
+            set(submitted_ids) == current_ids,
+            "Your plan choices changed. Review the latest plan before applying.",
+            409,
+        )
     if proposal.get("applied_plan"):
         return {**proposal["applied_plan"], "already_applied": True}
     if proposal["source"]["type"] in {"goal", "project", "journey"}:
@@ -2379,6 +2537,7 @@ async def apply_dream(
             proposal["source"].get("id"),
             live_target,
             proposal["interpretation"],
+            current_user.get("portfolio_reporting_currency"),
         )
         _require(
             _snapshot_hash(live_target, live_context) == proposal["context_snapshot_hash"],

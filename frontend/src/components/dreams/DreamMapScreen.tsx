@@ -4,7 +4,6 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   AccessibilityInfo,
   ActivityIndicator,
-  Alert,
   Animated,
   KeyboardAvoidingView,
   Platform,
@@ -19,17 +18,19 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { api, type ApiError } from "@/src/lib/api";
 import {
-  acceptedPlanNodes,
   canPlaceNode,
-  factDisplayValue,
+  dreamApplyReadiness,
+  dreamDecisionCounts,
+  factByKey,
+  journeyChipLabel,
   localReferenceDate,
   nodeDepth,
+  purchaseConversationSummary,
   researchActionLabel,
   siblingMoveOperation,
-  sourceLabel,
   suggestedAddKind,
   visiblePlanNodes,
-  type DreamFact,
+  type DreamClarificationQuestion,
   type DreamNode,
   type DreamNodeKind,
   type DreamProposal,
@@ -64,6 +65,21 @@ const DEPTH_LABELS: Record<PlanningDepth, string> = {
 
 const errorMessage = (error: unknown, fallback: string): string =>
   (error as ApiError | undefined)?.message || fallback;
+
+const creationEffectCopy = (proposal: DreamProposal): string => {
+  switch (proposal.source.type) {
+    case "goal":
+      return "Attach this plan to your existing goal";
+    case "project":
+      return "Attach this plan to your existing project";
+    case "journey":
+      return "Attach this plan to your existing learning journey";
+    case "learning":
+      return "Create a learning journey with this plan attached";
+    default:
+      return "Save one active plan for this intention";
+  }
+};
 
 function Section({
   title,
@@ -184,59 +200,176 @@ function ShapePicker({
   );
 }
 
-function FactRow({
-  fact,
+function ClarificationCard({
+  question,
+  proposal,
   busy,
   onSave,
+  onNotSure,
 }: {
-  fact: DreamFact;
+  question: DreamClarificationQuestion;
+  proposal: DreamProposal;
   busy: boolean;
-  onSave: (value: string) => Promise<void>;
+  onSave: (corrections: Record<string, unknown>) => Promise<void>;
+  onNotSure: (keys: string[]) => Promise<void>;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(factDisplayValue(fact) === "Not known yet" ? "" : factDisplayValue(fact));
-  const label = fact.key.replaceAll("_", " ");
+  const amountFact = factByKey(proposal, "amount");
+  const currencyFact = factByKey(proposal, "currency");
+  const deadlineFact = factByKey(proposal, "deadline");
+  const [editing, setEditing] = useState(question.status === "missing");
+  const [amount, setAmount] = useState(
+    amountFact?.value ? String(amountFact.value) : "",
+  );
+  const [currency, setCurrency] = useState(
+    currencyFact?.value
+      ? String(currencyFact.value)
+      : proposal.context.finance.profile_currency || "",
+  );
+  const [deadline, setDeadline] = useState(
+    deadlineFact?.value ? String(deadlineFact.value) : "",
+  );
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setAmount(amountFact?.value ? String(amountFact.value) : "");
+    setCurrency(
+      currencyFact?.value
+        ? String(currencyFact.value)
+        : proposal.context.finance.profile_currency || "",
+    );
+    setDeadline(deadlineFact?.value ? String(deadlineFact.value) : "");
+  }, [
+    amountFact?.value,
+    currencyFact?.value,
+    deadlineFact?.value,
+    proposal.context.finance.profile_currency,
+  ]);
+
+  const valid = question.kind === "money"
+    ? Number(amount.replaceAll(",", "")) > 0 && /^[A-Za-z]{3}$/.test(currency.trim())
+    : question.kind === "date"
+      ? /^\d{4}-\d{2}-\d{2}$/.test(deadline)
+      : false;
+
+  const answerLabel = question.kind === "money"
+    ? amountFact?.value && currencyFact?.value
+      ? `${String(currencyFact.value).toUpperCase()} ${String(amountFact.value)}`
+      : "Not answered yet"
+    : deadlineFact?.value
+      ? String(deadlineFact.value)
+      : "Not answered yet";
+
   return (
-    <View style={styles.factRow} testID={`dream-fact-${fact.key}`}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.factLabel}>{label}</Text>
-        {editing ? (
-          <TextInput
-            autoFocus
-            editable={!busy}
-            onChangeText={setValue}
-            placeholder={`Enter ${label}`}
-            placeholderTextColor={colors.onSurfaceTertiary}
-            style={styles.input}
-            value={value}
-          />
-        ) : (
-          <>
-            <Text style={styles.factValue}>{factDisplayValue(fact)}</Text>
-            <Text style={styles.factSource}>{sourceLabel(fact.origin)}</Text>
-          </>
-        )}
-      </View>
+    <View
+      accessibilityLabel={question.prompt}
+      style={[
+        styles.questionCard,
+        question.status === "answered" && styles.questionCardAnswered,
+      ]}
+      testID={`dream-question-${question.id}`}
+    >
+      <Text style={styles.questionTitle}>{question.prompt}</Text>
+      {question.status === "unknown" && !editing ? (
+        <Text style={styles.questionAnswer}>You’re not sure yet. That’s okay—the map will stay provisional.</Text>
+      ) : question.status === "answered" && !editing ? (
+        <Text style={styles.questionAnswer}>{answerLabel}</Text>
+      ) : null}
+
       {editing ? (
-        <View style={styles.inlineActions}>
-          <Pressable
-            disabled={busy}
-            onPress={() => {
-              void onSave(value).then(() => setEditing(false));
-            }}
-            style={styles.textButton}
-          >
-            <Text style={styles.textButtonStrong}>Save</Text>
-          </Pressable>
-          <Pressable onPress={() => setEditing(false)} style={styles.textButton}>
-            <Text style={styles.textButtonText}>Cancel</Text>
-          </Pressable>
+        <View style={styles.questionInputs}>
+          {question.kind === "money" ? (
+            <View style={styles.moneyInputs}>
+              <TextInput
+                accessibilityLabel="Expected price"
+                editable={!busy}
+                inputMode="decimal"
+                onChangeText={(value) => {
+                  setAmount(value);
+                  setSaved(false);
+                }}
+                placeholder="Price or range"
+                placeholderTextColor={colors.onSurfaceTertiary}
+                style={[styles.input, { flex: 1 }]}
+                value={amount}
+              />
+              <TextInput
+                accessibilityLabel="Currency"
+                autoCapitalize="characters"
+                editable={!busy}
+                maxLength={3}
+                onChangeText={(value) => {
+                  setCurrency(value.toUpperCase());
+                  setSaved(false);
+                }}
+                placeholder="INR"
+                placeholderTextColor={colors.onSurfaceTertiary}
+                style={[styles.input, styles.currencyInput]}
+                value={currency}
+              />
+            </View>
+          ) : (
+            <TextInput
+              accessibilityLabel="Desired purchase date"
+              editable={!busy}
+              onChangeText={(value) => {
+                setDeadline(value);
+                setSaved(false);
+              }}
+              placeholder="YYYY-MM-DD"
+              placeholderTextColor={colors.onSurfaceTertiary}
+              style={styles.input}
+              value={deadline}
+            />
+          )}
+          <View style={styles.actionRow}>
+            <Pressable
+              accessibilityRole="button"
+              disabled={busy || !valid}
+              onPress={() => {
+                const corrections = question.kind === "money"
+                  ? {
+                      amount: amount.replaceAll(",", ""),
+                      currency: currency.trim().toUpperCase(),
+                    }
+                  : { deadline };
+                void onSave(corrections).then(() => {
+                  setEditing(false);
+                  setSaved(true);
+                });
+              }}
+              style={[styles.primarySmall, (busy || !valid) && styles.disabled]}
+            >
+              <Text style={styles.primarySmallText}>Save answer</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              disabled={busy}
+              onPress={() => {
+                void onNotSure(question.fact_keys).then(() => {
+                  setEditing(false);
+                  setSaved(true);
+                });
+              }}
+              style={styles.secondarySmall}
+            >
+              <Text style={styles.secondarySmallText}>I’m not sure yet</Text>
+            </Pressable>
+          </View>
         </View>
       ) : (
-        <Pressable onPress={() => setEditing(true)} style={styles.textButton}>
-          <Text style={styles.textButtonText}>Change</Text>
+        <Pressable
+          accessibilityRole="button"
+          disabled={busy}
+          onPress={() => setEditing(true)}
+          style={styles.textButton}
+        >
+          <Text style={styles.textButtonText}>
+            {question.status === "answered" ? "Change answer" : "Add an answer"}
+          </Text>
         </Pressable>
       )}
+      {saved ? <Text style={styles.savedText}>Saved to this plan.</Text> : null}
+      <Disclosure lines={[question.why]} title="Why is Hymn asking this?" />
     </View>
   );
 }
@@ -446,14 +579,22 @@ export default function DreamMapScreen({
   const [error, setError] = useState<string | null>(null);
   const [reducedMotion, setReducedMotion] = useState(false);
   const [viewMode, setViewMode] = useState<"map" | "list">("map");
+  const [mapOpen, setMapOpen] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [shapeChoicesOpen, setShapeChoicesOpen] = useState(false);
+  const [applyNotice, setApplyNotice] = useState<string | null>(null);
   const [editingNode, setEditingNode] = useState<string | null>(null);
   const [movingNode, setMovingNode] = useState<string | null>(null);
+  const [deletingNode, setDeletingNode] = useState<string | null>(null);
   const [adding, setAdding] = useState<{
     parentId?: string | null;
     relativeId?: string;
     placement: "after" | "inside_end";
     kind: DreamNodeKind;
   } | null>(null);
+  const scrollRef = useRef<ScrollView | null>(null);
+  const [mapOffset, setMapOffset] = useState(0);
+  const [reviewOffset, setReviewOffset] = useState(0);
   const suggestionOpacity = useRef(new Animated.Value(1)).current;
   const analysisStarted = useRef(false);
 
@@ -473,7 +614,7 @@ export default function DreamMapScreen({
         duration: reducedMotion
           ? response.reduced_motion_contract.reduced_motion_duration_ms
           : response.reduced_motion_contract.duration_ms,
-        useNativeDriver: true,
+        useNativeDriver: Platform.OS !== "web",
       }).start();
     } catch {
       // The composer remains usable; the backend will still classify on submit.
@@ -557,6 +698,22 @@ export default function DreamMapScreen({
     }
   }, [analyze, proposalId, sourceId, sourceType]);
 
+  useEffect(() => {
+    if (!reviewOpen || reviewOffset <= 0) return;
+    scrollRef.current?.scrollTo({
+      y: Math.max(0, mapOffset + reviewOffset - spacing.lg),
+      animated: !reducedMotion,
+    });
+  }, [mapOffset, reducedMotion, reviewOffset, reviewOpen]);
+
+  useEffect(() => {
+    if (!mapOpen || reviewOpen || mapOffset <= 0) return;
+    scrollRef.current?.scrollTo({
+      y: Math.max(0, mapOffset - spacing.lg),
+      animated: !reducedMotion,
+    });
+  }, [mapOffset, mapOpen, reducedMotion, reviewOpen]);
+
   const chooseShape = async (shape: JourneyShape) => {
     setSelectedShape(shape);
     if (!proposal) return;
@@ -573,16 +730,32 @@ export default function DreamMapScreen({
     }
   };
 
-  const correctFact = async (key: string, value: string) => {
+  const correctFacts = async (corrections: Record<string, unknown>) => {
     if (!proposal) return;
     try {
-      setBusy(`fact:${key}`);
+      setBusy("clarification");
       acceptProposal(await api.correctDream(proposal.id, {
         expected_revision: proposal.revision,
-        fact_corrections: { [key]: value.trim() || null },
+        fact_corrections: corrections,
       }));
     } catch (caught: unknown) {
-      setError(errorMessage(caught, "That correction was not saved."));
+      setError(errorMessage(caught, "That answer was not saved."));
+      throw caught;
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const markNotSure = async (keys: string[]) => {
+    if (!proposal) return;
+    try {
+      setBusy("clarification");
+      acceptProposal(await api.correctDream(proposal.id, {
+        expected_revision: proposal.revision,
+        not_sure_fields: keys,
+      }));
+    } catch (caught: unknown) {
+      setError(errorMessage(caught, "That answer was not saved."));
       throw caught;
     } finally {
       setBusy(null);
@@ -621,82 +794,64 @@ export default function DreamMapScreen({
   };
 
   const deleteNode = (node: DreamNode) => {
-    if (!proposal) return;
-    const children = proposal.map.nodes.filter((row) => row.parent_id === node.id);
-    if (!children.length) {
-      Alert.alert(
-        `Remove ${NODE_LABELS[node.kind].toLowerCase()}?`,
-        "This removes it from the draft map only.",
-        [
-          { text: "Cancel", style: "cancel" },
-          {
-            text: "Remove",
-            style: "destructive",
-            onPress: () => void operate({
-              type: "delete",
-              node_id: node.id,
-              delete_mode: "remove_subtree",
-            }),
-          },
-        ],
-      );
-      return;
-    }
-    Alert.alert(
-      "This item contains other plan items",
-      "Choose what should happen to its children. Hymn will never orphan them.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Keep children",
-          onPress: () => void operate({
-            type: "delete",
-            node_id: node.id,
-            delete_mode: "reparent_children",
-            destination_parent_id: node.parent_id,
-          }),
-        },
-        {
-          text: "Remove whole subtree",
-          style: "destructive",
-          onPress: () => void operate({
-            type: "delete",
-            node_id: node.id,
-            delete_mode: "remove_subtree",
-          }),
-        },
-      ],
-    );
+    setDeletingNode(node.id);
   };
 
-  const apply = () => {
+  const openReview = () => {
+    setMapOpen(true);
+    setReviewOpen(true);
+    setApplyNotice(null);
+  };
+
+  const apply = async () => {
     if (!proposal) return;
-    const accepted = acceptedPlanNodes(proposal.map.nodes);
-    Alert.alert(
-      "Apply this plan?",
-      `Hymn will create ${accepted.length} accepted plan item(s). Nothing rejected or deferred will be created.`,
-      [
-        { text: "Keep reviewing", style: "cancel" },
-        {
-          text: "Apply plan",
-          onPress: async () => {
-            try {
-              setBusy("apply");
-              const result = await api.applyDream(proposal.id);
-              acceptProposal({
-                ...proposal,
-                status: "applied",
-                applied_plan: result,
-              });
-            } catch (caught: unknown) {
-              setError(errorMessage(caught, "The plan was not applied. Review the message and retry."));
-            } finally {
-              setBusy(null);
-            }
-          },
-        },
-      ],
-    );
+    const readiness = dreamApplyReadiness(proposal.map.nodes);
+    if (!readiness.ready) {
+      setApplyNotice(readiness.reason);
+      return;
+    }
+    try {
+      setBusy("apply");
+      setError(null);
+      setApplyNotice("Applying this reviewed revision…");
+      const result = await api.applyDream(
+        proposal.id,
+        proposal.revision,
+        readiness.acceptedNodeIds,
+      );
+      acceptProposal({
+        ...proposal,
+        status: "applied",
+        applied_plan: result,
+      });
+      setApplyNotice(
+        result.already_applied
+          ? "This plan was already applied. No duplicate records were created."
+          : "Your plan was applied once and attached successfully.",
+      );
+    } catch (caught: unknown) {
+      try {
+        const refreshed = await api.getDream(proposal.id);
+        acceptProposal(refreshed);
+        if (refreshed.status === "applied" && refreshed.applied_plan) {
+          setApplyNotice("The plan finished applying. No duplicate retry is needed.");
+        } else if (refreshed.status === "applying") {
+          setApplyNotice(
+            "Hymn is still finishing this plan. Refresh its status instead of applying again.",
+          );
+        } else {
+          setError(errorMessage(caught, "The plan was not applied. Fix the issue below and retry."));
+          setApplyNotice("Nothing partial was kept. Your reviewed draft is safe to retry.");
+        }
+      } catch {
+        setError(errorMessage(caught, "Hymn could not confirm the apply status."));
+        setApplyNotice(
+          "Do not apply again yet. Refresh this plan to check whether it finished.",
+        );
+      }
+    } finally {
+      setBusy(null);
+    }
   };
 
   const returnToSource = () => {
@@ -715,6 +870,18 @@ export default function DreamMapScreen({
 
   const shapeRows = shapes.length ? shapes : [];
   const nodes = proposal ? visiblePlanNodes(proposal.map.nodes) : [];
+  const applyReadiness = proposal
+    ? dreamApplyReadiness(proposal.map.nodes)
+    : { ready: false, reason: null, acceptedNodeIds: [] };
+  const decisionCounts = proposal
+    ? dreamDecisionCounts(proposal.map.nodes)
+    : null;
+  const hasOpenQuestions = proposal
+    ? proposal.interpretation.questions.some((question) => question.status !== "answered")
+    : false;
+  const desiredObject = proposal
+    ? factByKey(proposal, "desired_object")
+    : undefined;
   const moving = movingNode && proposal
     ? proposal.map.nodes.find((node) => node.id === movingNode)
     : null;
@@ -735,7 +902,7 @@ export default function DreamMapScreen({
       <SafeAreaView style={styles.safe}>
         <View style={styles.center}>
           <ActivityIndicator color={colors.brandPrimary} />
-          <Text style={styles.muted}>Opening your Dream map…</Text>
+          <Text style={styles.muted}>Opening your plan…</Text>
         </View>
       </SafeAreaView>
     );
@@ -748,8 +915,8 @@ export default function DreamMapScreen({
           <Ionicons name="chevron-back" size={24} color={colors.onSurface} />
         </Pressable>
         <View style={{ flex: 1 }}>
-          <Text style={styles.eyebrow}>Dream Engine</Text>
-          <Text style={styles.headerTitle}>Map what matters</Text>
+          <Text style={styles.eyebrow}>Your journey</Text>
+          <Text style={styles.headerTitle}>Plan what matters</Text>
         </View>
       </View>
       <KeyboardAvoidingView
@@ -758,6 +925,7 @@ export default function DreamMapScreen({
       >
         <ScrollView
           contentContainerStyle={styles.scroll}
+          ref={scrollRef}
           keyboardShouldPersistTaps="handled"
         >
           {error ? (
@@ -816,81 +984,120 @@ export default function DreamMapScreen({
             </>
           ) : (
             <>
-              <View style={styles.hero}>
-                <Text style={styles.quote}>“{proposal.original_text}”</Text>
-                <Text style={styles.eyebrow}>I think this is…</Text>
-                <Text style={styles.heroTitle}>{proposal.interpretation.primary.label}</Text>
-                <Text style={styles.body}>{proposal.interpretation.primary.reason}</Text>
+              <View style={styles.conversationHero} testID="dream-conversation-summary">
+                <Text style={styles.heroTitle}>{purchaseConversationSummary(proposal)}</Text>
                 <View style={styles.pillRow}>
-                  <Pill label={proposal.interpretation.primary.confidence} selected />
-                  <Pill label={`${proposal.interpretation.uncertainties.length} open question(s)`} />
+                  <Pill
+                    label={journeyChipLabel(proposal.interpretation.primary.journey_shape)}
+                    selected
+                  />
+                  {desiredObject?.value ? <Pill label={String(desiredObject.value)} /> : null}
                 </View>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={Boolean(busy) || proposal.status === "applied"}
+                  onPress={() => setShapeChoicesOpen((open) => !open)}
+                  style={styles.textButton}
+                >
+                  <Text style={styles.textButtonText}>
+                    {shapeChoicesOpen ? "Hide journey choices" : "Change journey type"}
+                  </Text>
+                </Pressable>
                 <Disclosure
-                  lines={proposal.interpretation.why.evidence}
-                  title="Why does Hymn think this?"
+                  lines={[
+                    proposal.interpretation.primary.reason,
+                    ...proposal.interpretation.why.evidence,
+                  ]}
+                  title="How did Hymn understand this?"
                 />
               </View>
 
-              <ShapePicker
-                disabled={Boolean(busy) || proposal.status === "applied"}
-                onSelect={(shape) => void chooseShape(shape)}
-                opacity={suggestionOpacity}
-                selected={proposal.interpretation.primary.journey_shape}
-                shapes={shapeRows}
-              />
+              {shapeChoicesOpen ? (
+                <ShapePicker
+                  disabled={Boolean(busy) || proposal.status === "applied"}
+                  onSelect={(shape) => {
+                    void chooseShape(shape);
+                    setShapeChoicesOpen(false);
+                  }}
+                  opacity={suggestionOpacity}
+                  selected={proposal.interpretation.primary.journey_shape}
+                  shapes={shapeRows}
+                />
+              ) : null}
 
-              <Section title="What Hymn understood" testID="dream-facts">
-                {proposal.interpretation.facts.map((fact) => (
-                  <FactRow
-                    busy={Boolean(busy)}
-                    fact={fact}
-                    key={fact.key}
-                    onSave={(value) => correctFact(fact.key, value)}
-                  />
+              <Section title="A couple of useful questions" testID="dream-clarifications">
+                <Text style={styles.sectionIntro}>
+                  Answer what you know. “I’m not sure yet” is a valid answer, and you can refine it later.
+                </Text>
+                {proposal.interpretation.questions.map((question) => (
+                  question.fact_keys.length ? (
+                    <ClarificationCard
+                      busy={Boolean(busy)}
+                      key={question.id}
+                      onNotSure={markNotSure}
+                      onSave={correctFacts}
+                      proposal={proposal}
+                      question={question}
+                    />
+                  ) : (
+                    <View key={question.id} style={styles.questionCard}>
+                      <Text style={styles.questionTitle}>{question.prompt}</Text>
+                      <Text style={styles.helper}>{question.why}</Text>
+                      <Text style={styles.questionAnswer}>
+                        You can keep this open and add the detail directly to the map.
+                      </Text>
+                    </View>
+                  )
                 ))}
-                {proposal.interpretation.uncertainties.length ? (
-                  <View style={styles.notice}>
-                    <Text style={styles.noticeTitle}>Hymn still needs</Text>
-                    {proposal.interpretation.uncertainties.map((line) => (
-                      <Text key={line} style={styles.body}>• {line}</Text>
-                    ))}
-                  </View>
-                ) : (
-                  <Text style={styles.successText}>
-                    The essential interpretation is ready for your review.
-                  </Text>
-                )}
               </Section>
 
-              <Section title="Your recorded situation">
-                <Text style={styles.cardTitle}>{proposal.context.finance.balance_label}</Text>
-                <Text style={styles.metric}>
-                  {proposal.context.finance.requested_currency || ""}
-                  {" "}
-                  {proposal.context.finance.recorded_liquid_total ?? "Not available"}
-                </Text>
+              <Section title="Here’s how this fits your life right now">
+                {proposal.context.finance.recorded_liquid_total
+                  && proposal.context.finance.recorded_currency ? (
+                    <View style={styles.contextHighlight}>
+                      <Text style={styles.contextLabel}>Recorded liquid balance</Text>
+                      <Text style={styles.metric}>
+                        {proposal.context.finance.recorded_currency}{" "}
+                        {proposal.context.finance.recorded_liquid_total}
+                      </Text>
+                      {!proposal.context.finance.requested_currency ? (
+                        <Text style={styles.helper}>
+                          This is recorded context only. Hymn will not compare it with the purchase until you confirm the purchase currency.
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : (
+                    <View style={styles.notice}>
+                      <Text style={styles.noticeTitle}>Money context is still limited</Text>
+                      <Text style={styles.body}>
+                        Hymn does not have a compatible recorded liquid balance for a reliable comparison.
+                      </Text>
+                    </View>
+                  )}
                 {proposal.context.finance.freshness_warning ? (
                   <View style={styles.warningCard}>
                     <Text style={styles.warningText}>{proposal.context.finance.freshness_warning}</Text>
                   </View>
                 ) : null}
                 <Text style={styles.body}>
-                  {proposal.context.commitments.other_active_goals.length} other active goal(s),{" "}
-                  {proposal.context.commitments.other_active_projects.length} other active project(s),{" "}
-                  and {proposal.context.commitments.open_task_count} open task(s) were recorded.
+                  Hymn found {proposal.context.commitments.other_active_goals.length} other active{" "}
+                  {proposal.context.commitments.other_active_goals.length === 1 ? "goal" : "goals"},{" "}
+                  {proposal.context.commitments.other_active_projects.length} active{" "}
+                  {proposal.context.commitments.other_active_projects.length === 1 ? "project" : "projects"},{" "}
+                  and {proposal.context.commitments.open_task_count} open{" "}
+                  {proposal.context.commitments.open_task_count === 1 ? "task" : "tasks"}.
                 </Text>
-                <Text style={styles.helper}>{proposal.context.honesty}</Text>
                 <Disclosure
                   lines={[
                     ...proposal.context.why.evidence,
-                    `Queried: ${proposal.context.domains_queried.join(", ")}`,
+                    proposal.context.honesty,
                   ]}
-                  title="Why does Hymn think this?"
+                  title="What recorded information did Hymn use?"
                 />
               </Section>
 
-              <Section title="Recommended planning depth">
-                <Text style={styles.cardTitle}>
+              <Section title="How much planning might help">
+                <Text style={styles.depthTitle}>
                   {DEPTH_LABELS[proposal.scale.user_selected_depth || proposal.scale.recommended_depth]}
                 </Text>
                 <Text style={styles.body}>{proposal.scale.summary}</Text>
@@ -905,12 +1112,20 @@ export default function DreamMapScreen({
                     />
                   ))}
                 </View>
-                {proposal.scale.axes.map((axis) => (
-                  <View key={axis.id} style={styles.axisRow}>
-                    <Text style={styles.factLabel}>{axis.id.replaceAll("_", " ")}</Text>
-                    <Text style={styles.body}>{axis.summary}</Text>
-                  </View>
-                ))}
+                {proposal.scale.axes
+                  .filter((axis) => ["financial", "duration", "conflicts"].includes(axis.id))
+                  .map((axis) => (
+                    <View key={axis.id} style={styles.contextLine}>
+                      <Text style={styles.contextLabel}>
+                        {axis.id === "financial"
+                          ? "Money"
+                          : axis.id === "duration"
+                            ? "Timing"
+                            : "Other commitments"}
+                      </Text>
+                      <Text style={styles.body}>{axis.summary}</Text>
+                    </View>
+                  ))}
                 {proposal.scale.calculations.length ? (
                   <Disclosure
                     lines={proposal.scale.calculations.map(
@@ -956,7 +1171,38 @@ export default function DreamMapScreen({
                 </Section>
               ) : null}
 
-              <Section title="Plan Map" testID="dream-plan-map">
+              {!mapOpen && proposal.status !== "applied" ? (
+                <View style={styles.mapInvitation}>
+                  <Text style={styles.eyebrow}>A first route is ready</Text>
+                  <Text style={styles.cardTitle}>
+                    Open a practical map you can reshape before anything is created.
+                  </Text>
+                  <Text style={styles.body}>
+                    {hasOpenQuestions
+                      ? "Anything you are not sure about stays clearly provisional; it will not strand the journey."
+                      : "Your answers are reflected in this draft. You can still change them whenever you need to."}
+                  </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => setMapOpen(true)}
+                    style={styles.primary}
+                    testID="dream-open-map"
+                  >
+                    <Text style={styles.primaryText}>Open my plan map</Text>
+                  </Pressable>
+                </View>
+              ) : null}
+
+              {mapOpen || proposal.status === "applied" ? (
+                <View
+                  onLayout={(event) => setMapOffset(event.nativeEvent.layout.y)}
+                  style={styles.progressiveBlock}
+                >
+              <Section title="Your plan map" testID="dream-plan-map">
+                <View style={styles.northStar}>
+                  <Text style={styles.contextLabel}>North star</Text>
+                  <Text style={styles.cardTitle}>{proposal.original_text}</Text>
+                </View>
                 <View style={styles.modeRow}>
                   <View style={styles.pillRow}>
                     <Pill label="Map view" onPress={() => setViewMode("map")} selected={viewMode === "map"} />
@@ -986,7 +1232,7 @@ export default function DreamMapScreen({
                       style={styles.secondary}
                       testID="dream-accept-all"
                     >
-                      <Text style={styles.secondaryText}>Accept all suggestions</Text>
+                      <Text style={styles.secondaryText}>Use all suggestions</Text>
                     </Pressable>
                   ) : null}
 
@@ -1044,6 +1290,65 @@ export default function DreamMapScreen({
                       </View>
                     </View>
 
+                    {deletingNode === node.id ? (
+                      <View style={styles.deletePanel}>
+                        <Text style={styles.noticeTitle}>Remove “{node.title}”?</Text>
+                        {proposal.map.nodes.some((row) => row.parent_id === node.id) ? (
+                          <Text style={styles.body}>
+                            This item contains other plan items. Keep them by moving them up one level, or remove the whole group.
+                          </Text>
+                        ) : (
+                          <Text style={styles.body}>
+                            This removes the item from the draft only. Nothing active has been created yet.
+                          </Text>
+                        )}
+                        <View style={styles.actionRow}>
+                          {proposal.map.nodes.some((row) => row.parent_id === node.id) ? (
+                            <Pressable
+                              accessibilityRole="button"
+                              disabled={Boolean(busy)}
+                              onPress={() => {
+                                void operate({
+                                  type: "delete",
+                                  node_id: node.id,
+                                  delete_mode: "reparent_children",
+                                  destination_parent_id: node.parent_id,
+                                }).then(() => setDeletingNode(null));
+                              }}
+                              style={styles.secondarySmall}
+                            >
+                              <Text style={styles.secondarySmallText}>Keep its children</Text>
+                            </Pressable>
+                          ) : null}
+                          <Pressable
+                            accessibilityRole="button"
+                            disabled={Boolean(busy)}
+                            onPress={() => {
+                              void operate({
+                                type: "delete",
+                                node_id: node.id,
+                                delete_mode: "remove_subtree",
+                              }).then(() => setDeletingNode(null));
+                            }}
+                            style={styles.dangerSmall}
+                          >
+                            <Text style={styles.dangerSmallText}>
+                              {proposal.map.nodes.some((row) => row.parent_id === node.id)
+                                ? "Remove whole group"
+                                : "Remove item"}
+                            </Text>
+                          </Pressable>
+                          <Pressable
+                            accessibilityRole="button"
+                            onPress={() => setDeletingNode(null)}
+                            style={styles.textButton}
+                          >
+                            <Text style={styles.textButtonText}>Cancel</Text>
+                          </Pressable>
+                        </View>
+                      </View>
+                    ) : null}
+
                     {editingNode === node.id ? (
                       <NodeEditor
                         busy={Boolean(busy)}
@@ -1093,9 +1398,10 @@ export default function DreamMapScreen({
                               const operation = siblingMoveOperation(proposal.map.nodes, node.id, "up");
                               if (operation) void operate(operation);
                             }}
-                            style={styles.iconButton}
+                            style={styles.labeledIconButton}
                           >
                             <Ionicons name="arrow-up" size={17} color={colors.onSurfaceSecondary} />
+                            <Text style={styles.iconButtonLabel}>Up</Text>
                           </Pressable>
                           <Pressable
                             accessibilityLabel={`Move ${node.title} down`}
@@ -1103,9 +1409,10 @@ export default function DreamMapScreen({
                               const operation = siblingMoveOperation(proposal.map.nodes, node.id, "down");
                               if (operation) void operate(operation);
                             }}
-                            style={styles.iconButton}
+                            style={styles.labeledIconButton}
                           >
                             <Ionicons name="arrow-down" size={17} color={colors.onSurfaceSecondary} />
+                            <Text style={styles.iconButtonLabel}>Down</Text>
                           </Pressable>
                           <Pressable
                             accessibilityLabel={`Move ${node.title} to another parent`}
@@ -1196,26 +1503,25 @@ export default function DreamMapScreen({
                 ) : null}
               </Section>
 
-              <Section title="Before anything is created">
-                <Text style={styles.body}>{proposal.creation_preview.summary}</Text>
-                <Text style={styles.cardTitle}>{proposal.creation_preview.source_effect}</Text>
-                {(Object.keys(proposal.creation_preview.counts) as DreamNodeKind[]).map((kind) => (
-                  <View key={kind} style={styles.previewRow}>
-                    <Text style={styles.body}>{NODE_LABELS[kind]}</Text>
-                    <Text style={styles.previewCount}>{proposal.creation_preview.counts[kind]}</Text>
-                  </View>
-                ))}
-              </Section>
-
               {proposal.status === "applied" && proposal.applied_plan ? (
                 <View style={styles.successCard}>
                   <Ionicons name="checkmark-circle" size={24} color={colors.success} />
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.noticeTitle}>Your plan is active</Text>
+                    <Text style={styles.noticeTitle}>Plan attached</Text>
                     <Text style={styles.body}>
-                      Required check-ins were created as future requests, not fake completed updates.
+                      Hymn created this plan once. Refreshing or retrying will not duplicate it.
                     </Text>
+                    {proposal.applied_plan.created_counts ? (
+                      <Text style={styles.helper}>
+                        {proposal.applied_plan.created_counts.phase} phases ·{" "}
+                        {proposal.applied_plan.created_counts.milestone} milestones/outcomes ·{" "}
+                        {proposal.applied_plan.created_counts.task} tasks ·{" "}
+                        {proposal.applied_plan.created_counts.checkin_requirement} required check-ins
+                      </Text>
+                    ) : null}
+                    {applyNotice ? <Text style={styles.savedText}>{applyNotice}</Text> : null}
                     <Pressable
+                      accessibilityRole="button"
                       onPress={returnToSource}
                       style={styles.secondary}
                     >
@@ -1224,23 +1530,105 @@ export default function DreamMapScreen({
                   </View>
                 </View>
               ) : (
-                <Pressable
-                  disabled={Boolean(busy) || acceptedPlanNodes(proposal.map.nodes).length === 0}
-                  onPress={apply}
-                  style={[
-                    styles.primary,
-                    (Boolean(busy) || acceptedPlanNodes(proposal.map.nodes).length === 0)
-                      && styles.disabled,
-                  ]}
-                  testID="dream-apply"
-                >
-                  {busy === "apply" ? (
-                    <ActivityIndicator color={colors.onBrandPrimary} />
+                <>
+                  {!reviewOpen ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      disabled={Boolean(busy)}
+                      onPress={openReview}
+                      style={[styles.primary, Boolean(busy) && styles.disabled]}
+                      testID="dream-review-plan"
+                    >
+                      <Text style={styles.primaryText}>Review this plan</Text>
+                    </Pressable>
                   ) : (
-                    <Text style={styles.primaryText}>Review and apply this plan</Text>
+                    <View
+                      onLayout={(event) => setReviewOffset(event.nativeEvent.layout.y)}
+                      style={styles.applyReview}
+                      testID="dream-apply-review"
+                    >
+                      <Text style={styles.eyebrow}>Final review</Text>
+                      <Text style={styles.sectionTitle}>Here’s what Hymn will create</Text>
+                      <Text style={styles.body}>
+                        Only accepted, modified, and user-added items will be included. Rejected and deferred suggestions stay in the draft history.
+                      </Text>
+                      {decisionCounts ? (
+                        <View style={styles.decisionGrid}>
+                          <Pill label={`${decisionCounts.accepted} accepted`} />
+                          <Pill label={`${decisionCounts.modified} modified`} />
+                          <Pill label={`${decisionCounts.user_added} you added`} />
+                          <Pill label={`${decisionCounts.deferred} deferred`} />
+                          <Pill label={`${decisionCounts.rejected} rejected`} />
+                          <Pill label={`${decisionCounts.proposed} undecided`} />
+                        </View>
+                      ) : null}
+                      <View style={styles.previewGroup}>
+                        <Text style={styles.cardTitle}>{creationEffectCopy(proposal)}</Text>
+                        {(Object.keys(proposal.creation_preview.counts) as DreamNodeKind[]).map((kind) => (
+                          <View key={kind} style={styles.previewRow}>
+                            <Text style={styles.body}>{NODE_LABELS[kind]}</Text>
+                            <Text style={styles.previewCount}>{proposal.creation_preview.counts[kind]}</Text>
+                          </View>
+                        ))}
+                      </View>
+                      {!applyReadiness.ready ? (
+                        <View style={styles.warningCard} accessibilityRole="alert">
+                          <Text style={styles.warningText}>{applyReadiness.reason}</Text>
+                        </View>
+                      ) : (
+                        <Text style={styles.successText}>
+                          This revision is structurally ready. Nothing will be created until you press Apply.
+                        </Text>
+                      )}
+                      {applyNotice ? (
+                        <Text
+                          accessibilityLiveRegion="polite"
+                          style={styles.savedText}
+                        >
+                          {applyNotice}
+                        </Text>
+                      ) : null}
+                      <View style={styles.actionRow}>
+                        <Pressable
+                          accessibilityRole="button"
+                          disabled={Boolean(busy) || !applyReadiness.ready}
+                          onPress={() => void apply()}
+                          style={[
+                            styles.primary,
+                            { flex: 1 },
+                            (Boolean(busy) || !applyReadiness.ready) && styles.disabled,
+                          ]}
+                          testID="dream-apply"
+                        >
+                          {busy === "apply" ? (
+                            <ActivityIndicator color={colors.onBrandPrimary} />
+                          ) : (
+                            <Text style={styles.primaryText}>Apply this plan</Text>
+                          )}
+                        </Pressable>
+                        <Pressable
+                          accessibilityRole="button"
+                          disabled={Boolean(busy)}
+                          onPress={() => {
+                            setReviewOpen(false);
+                            requestAnimationFrame(() => {
+                              scrollRef.current?.scrollTo({
+                                y: Math.max(0, mapOffset - spacing.lg),
+                                animated: !reducedMotion,
+                              });
+                            });
+                          }}
+                          style={styles.secondarySmall}
+                        >
+                          <Text style={styles.secondarySmallText}>Keep editing</Text>
+                        </Pressable>
+                      </View>
+                    </View>
                   )}
-                </Pressable>
+                </>
               )}
+                </View>
+              ) : null}
             </>
           )}
         </ScrollView>
@@ -1262,10 +1650,17 @@ const styles = StyleSheet.create({
     letterSpacing: 0.8, textTransform: "uppercase",
   },
   headerTitle: { color: colors.onSurface, fontFamily: fonts.display, fontSize: 24 },
-  scroll: { padding: spacing.lg, paddingBottom: 80, gap: spacing.lg },
+  scroll: {
+    alignSelf: "center", gap: spacing.lg, maxWidth: 920,
+    padding: spacing.lg, paddingBottom: 80, width: "100%",
+  },
   hero: {
     backgroundColor: colors.brandTertiary, borderRadius: radius.lg,
     padding: spacing.xl, gap: spacing.md,
+  },
+  conversationHero: {
+    backgroundColor: colors.brandTertiary, borderRadius: radius.lg,
+    gap: spacing.md, padding: spacing.xl,
   },
   heroTitle: { color: colors.onSurface, fontFamily: fonts.display, fontSize: 30, lineHeight: 36 },
   quote: { color: colors.onSurfaceSecondary, fontFamily: fonts.display, fontSize: 19, lineHeight: 27 },
@@ -1314,8 +1709,35 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg, borderWidth: 1, padding: spacing.lg, gap: spacing.md,
   },
   sectionTitle: { color: colors.onSurface, fontFamily: fonts.display, fontSize: 24 },
+  sectionIntro: { color: colors.onSurfaceSecondary, fontSize: 14, lineHeight: 21 },
   cardTitle: { color: colors.onSurface, fontSize: 16, fontWeight: "700" },
+  depthTitle: { color: colors.onSurface, fontFamily: fonts.display, fontSize: 27 },
   metric: { color: colors.onSurface, fontFamily: fonts.display, fontSize: 28 },
+  questionCard: {
+    backgroundColor: colors.surfaceSecondary, borderColor: colors.border,
+    borderRadius: radius.md, borderWidth: 1, gap: spacing.sm, padding: spacing.lg,
+  },
+  questionCardAnswered: {
+    backgroundColor: colors.brandTertiary, borderColor: colors.brandPrimary,
+  },
+  questionTitle: { color: colors.onSurface, fontSize: 17, fontWeight: "700" },
+  questionAnswer: { color: colors.onSurface, fontSize: 15, lineHeight: 22 },
+  questionInputs: { gap: spacing.sm },
+  moneyInputs: { flexDirection: "row", gap: spacing.sm },
+  currencyInput: { maxWidth: 100, textAlign: "center" },
+  savedText: { color: colors.success, fontSize: 13, fontWeight: "600", lineHeight: 19 },
+  contextHighlight: {
+    backgroundColor: colors.surfaceSecondary, borderRadius: radius.md,
+    gap: spacing.xs, padding: spacing.lg,
+  },
+  contextLabel: {
+    color: colors.onSurfaceSecondary, fontSize: 12, fontWeight: "700",
+    letterSpacing: 0.5, textTransform: "uppercase",
+  },
+  contextLine: {
+    borderTopColor: colors.border, borderTopWidth: 1,
+    gap: spacing.xs, paddingTop: spacing.sm,
+  },
   pillRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm, marginTop: spacing.sm },
   pill: {
     borderColor: colors.borderStrong, borderRadius: radius.pill, borderWidth: 1,
@@ -1355,8 +1777,27 @@ const styles = StyleSheet.create({
   warningCard: { backgroundColor: "#FFF4E5", borderRadius: radius.md, padding: spacing.md },
   warningText: { color: "#7A4D16", fontSize: 13, lineHeight: 19 },
   axisRow: { borderTopColor: colors.border, borderTopWidth: 1, gap: 4, paddingTop: spacing.sm },
+  mapInvitation: {
+    backgroundColor: colors.surfaceSecondary, borderColor: colors.borderStrong,
+    borderRadius: radius.lg, borderWidth: 1, gap: spacing.md, padding: spacing.xl,
+  },
+  progressiveBlock: { gap: spacing.lg },
+  northStar: {
+    backgroundColor: colors.brandTertiary, borderRadius: radius.md,
+    gap: spacing.xs, padding: spacing.md,
+  },
   modeRow: { alignItems: "center", flexDirection: "row", justifyContent: "space-between" },
   movePanel: { backgroundColor: colors.brandTertiary, borderRadius: radius.md, padding: spacing.md },
+  deletePanel: {
+    backgroundColor: "#FBEDE9", borderRadius: radius.md,
+    gap: spacing.sm, marginTop: spacing.sm, padding: spacing.md,
+  },
+  dangerSmall: {
+    alignItems: "center", backgroundColor: colors.error,
+    borderRadius: radius.md, justifyContent: "center",
+    minHeight: 42, paddingHorizontal: spacing.md,
+  },
+  dangerSmallText: { color: colors.onSurfaceInverse, fontSize: 13, fontWeight: "700" },
   nodeCard: {
     backgroundColor: colors.surfaceSecondary, borderColor: colors.border,
     borderRadius: radius.md, borderWidth: 1, gap: spacing.sm, padding: spacing.md,
@@ -1395,6 +1836,15 @@ const styles = StyleSheet.create({
     justifyContent: "space-between", paddingVertical: spacing.sm,
   },
   previewCount: { color: colors.onSurface, fontSize: 16, fontWeight: "700" },
+  applyReview: {
+    backgroundColor: colors.brandTertiary, borderColor: colors.brandPrimary,
+    borderRadius: radius.lg, borderWidth: 1, gap: spacing.md, padding: spacing.xl,
+  },
+  decisionGrid: { flexDirection: "row", flexWrap: "wrap", gap: spacing.xs },
+  previewGroup: {
+    backgroundColor: colors.surface, borderRadius: radius.md,
+    gap: spacing.sm, padding: spacing.md,
+  },
   successCard: {
     alignItems: "flex-start", backgroundColor: "#EDF5EE", borderRadius: radius.lg,
     flexDirection: "row", gap: spacing.md, padding: spacing.lg,

@@ -59,6 +59,16 @@ export type DreamFact = {
   uncertainty?: string | null;
 };
 
+export type DreamClarificationQuestion = {
+  id: string;
+  kind: "money" | "date" | "text";
+  prompt: string;
+  why: string;
+  fact_keys: string[];
+  status: "missing" | "answered" | "unknown";
+  value: unknown;
+};
+
 export type DreamCandidate = {
   journey_shape: JourneyShape;
   label: string;
@@ -112,12 +122,15 @@ export type DreamProposal = {
     alternatives: DreamCandidate[];
     facts: DreamFact[];
     uncertainties: string[];
+    questions: DreamClarificationQuestion[];
     why: { summary: string; evidence: string[] };
   };
   context: {
     source?: { type: string; id: string; title?: string; deadline?: string } | null;
     finance: {
       requested_currency?: string | null;
+      profile_currency?: string | null;
+      recorded_currency?: string | null;
       compatible_liquid_accounts: {
         id: string;
         name: string;
@@ -172,6 +185,14 @@ export type DreamProposal = {
   applied_plan?: {
     plan_map_id: string;
     proposal_revision: number;
+    accepted_node_ids?: string[];
+    created_counts?: {
+      plan: number;
+      phase: number;
+      milestone: number;
+      task: number;
+      checkin_requirement: number;
+    };
     return_to: DreamReturnTo;
     applied_at: string;
     already_applied?: boolean;
@@ -310,6 +331,110 @@ export function sourceLabel(origin: DreamFact["origin"]): string {
   return "Hymn inferred this";
 }
 
+export function factByKey(
+  proposal: DreamProposal,
+  key: string,
+): DreamFact | undefined {
+  return proposal.interpretation.facts.find((fact) => fact.key === key);
+}
+
+export function purchaseConversationSummary(proposal: DreamProposal): string {
+  const object = factDisplayValue(
+    factByKey(proposal, "desired_object") || {
+      key: "desired_object",
+      value: null,
+      value_type: "text",
+      origin: "inferred",
+    },
+  );
+  if (
+    proposal.interpretation.primary.journey_shape === "purchase"
+    && object !== "Not known yet"
+  ) {
+    const cleaned = object.trim();
+    const lower = cleaned.toLowerCase();
+    const alreadyQualified = /^(a|an|the|some|my|our)\s/.test(lower);
+    const objectPhrase = alreadyQualified
+      ? cleaned
+      : `${/^[aeiou]/i.test(cleaned) ? "an" : "a"} ${cleaned}`;
+    return `You want to buy ${objectPhrase}. Let’s work out what that would take for you.`;
+  }
+  return `You want to make “${proposal.original_text}” possible. Let’s work out a useful path together.`;
+}
+
+export function journeyChipLabel(shape: JourneyShape): string {
+  const labels: Record<JourneyShape, string> = {
+    professional_qualification: "Professional qualification",
+    learn_skill: "Learn a skill",
+    complete_course: "Complete a course",
+    learn_subject: "Learn a subject",
+    read_book: "Read a book",
+    purchase: "Purchase",
+    trip: "Trip",
+    meeting_event: "Meeting or event",
+    financial_target: "Financial target",
+    health_wellbeing: "Health or wellbeing",
+    custom: "Custom journey",
+  };
+  return labels[shape];
+}
+
+export type DreamApplyReadiness = {
+  ready: boolean;
+  reason: string | null;
+  acceptedNodeIds: string[];
+};
+
+export function dreamApplyReadiness(nodes: DreamNode[]): DreamApplyReadiness {
+  const accepted = acceptedPlanNodes(nodes);
+  if (!accepted.length) {
+    return {
+      ready: false,
+      reason: "Accept at least one plan item before applying.",
+      acceptedNodeIds: [],
+    };
+  }
+  const acceptedIds = new Set(accepted.map((node) => node.id));
+  const orphan = accepted.find(
+    (node) => node.parent_id && !acceptedIds.has(node.parent_id),
+  );
+  if (orphan) {
+    return {
+      ready: false,
+      reason: `Accept the parent of “${orphan.title}” before applying.`,
+      acceptedNodeIds: accepted.map((node) => node.id),
+    };
+  }
+  const incompleteCheckin = accepted.find(
+    (node) =>
+      node.kind === "checkin_requirement"
+      && (!node.checkin?.question.trim() || !node.parent_id),
+  );
+  if (incompleteCheckin) {
+    return {
+      ready: false,
+      reason: `Finish the required check-in “${incompleteCheckin.title}” before applying.`,
+      acceptedNodeIds: accepted.map((node) => node.id),
+    };
+  }
+  return {
+    ready: true,
+    reason: null,
+    acceptedNodeIds: accepted.map((node) => node.id),
+  };
+}
+
+export function dreamDecisionCounts(nodes: DreamNode[]): Record<DreamDecisionState | "user_added", number> {
+  return {
+    proposed: nodes.filter((node) => node.decision_state === "proposed").length,
+    accepted: nodes.filter((node) => node.decision_state === "accepted").length,
+    modified: nodes.filter((node) => node.decision_state === "modified").length,
+    rejected: nodes.filter((node) => node.decision_state === "rejected").length,
+    deferred: nodes.filter((node) => node.decision_state === "deferred").length,
+    user_added: nodes.filter((node) => node.origin === "user").length,
+  };
+}
+
 export function researchActionLabel(state: ResearchState): string {
   if (state === "research_recommended") return "Add requirements manually";
   if (state === "research_failed") return "Continue without research";
@@ -321,12 +446,11 @@ export function researchActionLabel(state: ResearchState): string {
 export function mapMainSurfaceText(proposal: DreamProposal): string {
   return [
     proposal.original_text,
-    proposal.interpretation.primary.label,
-    proposal.interpretation.primary.reason,
-    ...proposal.interpretation.facts.flatMap((fact) => [
-      fact.key.replaceAll("_", " "),
-      factDisplayValue(fact),
-      sourceLabel(fact.origin),
+    purchaseConversationSummary(proposal),
+    journeyChipLabel(proposal.interpretation.primary.journey_shape),
+    ...proposal.interpretation.questions.flatMap((question) => [
+      question.prompt,
+      question.status === "unknown" ? "Not sure yet" : "",
     ]),
     proposal.scale.summary,
     ...proposal.scale.axes.map((axis) => axis.summary),

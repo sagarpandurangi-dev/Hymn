@@ -181,6 +181,39 @@ def test_corrections_are_authoritative_without_mutating_original_text_fact():
     assert facts["desired_outcome"]["value"] == original["facts"][0]["value"]
 
 
+def test_home_purchase_questions_support_answers_and_not_sure_paths():
+    interpretation = _interpret("I want to purchase a home")
+    questions = dream_engine._clarification_questions(interpretation)
+    assert [question["prompt"] for question in questions] == [
+        "What price range are you considering?",
+        "When would you like to buy?",
+    ]
+    assert all(question["status"] == "missing" for question in questions)
+
+    answered = dream_engine.apply_fact_corrections(
+        interpretation,
+        None,
+        {"amount": "25000000", "currency": "INR", "deadline": "2031-12-31"},
+    )
+    assert all(
+        question["status"] == "answered"
+        for question in dream_engine._clarification_questions(answered)
+    )
+    assert answered["uncertainties"] == []
+
+    unknown = dream_engine.apply_fact_corrections(
+        interpretation,
+        None,
+        {},
+        ["amount", "currency", "deadline"],
+    )
+    assert all(
+        question["status"] == "unknown"
+        for question in dream_engine._clarification_questions(unknown)
+    )
+    assert unknown["uncertainties"] == []
+
+
 def test_relative_financial_burden_is_person_specific_and_currency_safe():
     million = _interpret("Buy an iPhone for $1,000")
     light = dream_engine.relative_scale(
@@ -680,6 +713,109 @@ def test_api_draft_is_owned_non_domain_persistent_and_stale_safe(api_context):
     assert replay_stale.status_code == 409
 
 
+def test_home_purchase_answers_persist_recompute_context_and_unknowns_remain_usable(
+    api_context,
+):
+    database = api_context["db"]
+    user_id = api_context["primary"]["id"]
+    database.users.update_one(
+        {"id": user_id},
+        {"$set": {"portfolio_reporting_currency": "INR"}},
+    )
+    account_id = str(uuid.uuid4())
+    database.financial_accounts.insert_one({
+        "id": account_id,
+        "user_id": user_id,
+        "account_type": "bank",
+        "name": "TEST home planning balance",
+        "currency": "INR",
+        "current_value": Decimal128("5000000.00"),
+        "liquidity_type": "liquid",
+        "fixed_or_flexible": "flexible",
+        "notes": "",
+        "created_at": "2026-07-27T00:00:00+00:00",
+        "updated_at": "2026-07-27T00:00:00+00:00",
+    })
+    try:
+        response = _api_analyze(api_context, {
+            "source_type": "intent",
+            "text": "I want to purchase a home",
+        })
+        assert response.status_code == 200, response.text
+        proposal = response.json()
+        assert proposal["interpretation"]["primary"]["journey_shape"] == "purchase"
+        assert [
+            row["status"] for row in proposal["interpretation"]["questions"]
+        ] == ["missing", "missing"]
+        assert proposal["context"]["finance"]["recorded_currency"] == "INR"
+        assert proposal["context"]["finance"]["requested_currency"] is None
+
+        answered = requests.patch(
+            f"{API}/dreams/{proposal['id']}/interpretation",
+            json={
+                "expected_revision": proposal["revision"],
+                "fact_corrections": {
+                    "amount": "25000000",
+                    "currency": "INR",
+                    "deadline": "2031-12-31",
+                },
+            },
+            headers=api_context["primary"]["headers"],
+            timeout=20,
+        )
+        assert answered.status_code == 200, answered.text
+        saved = answered.json()
+        assert all(
+            row["status"] == "answered"
+            for row in saved["interpretation"]["questions"]
+        )
+        assert saved["context"]["finance"]["requested_currency"] == "INR"
+        assert saved["context"]["finance"]["recorded_liquid_total"] == "5000000.00"
+
+        changed = requests.patch(
+            f"{API}/dreams/{proposal['id']}/interpretation",
+            json={
+                "expected_revision": saved["revision"],
+                "fact_corrections": {
+                    "amount": "22000000",
+                    "deadline": "2032-06-30",
+                },
+            },
+            headers=api_context["primary"]["headers"],
+            timeout=20,
+        )
+        assert changed.status_code == 200, changed.text
+        changed_facts = {
+            row["key"]: row for row in changed.json()["interpretation"]["facts"]
+        }
+        assert changed_facts["amount"]["value"] == "22000000.00"
+        assert changed_facts["deadline"]["value"] == "2032-06-30"
+        assert changed_facts["amount"]["origin"] == "user_corrected"
+
+        separate = _api_analyze(api_context, {
+            "source_type": "intent",
+            "text": "I want to purchase a home",
+        }).json()
+        unknown = requests.patch(
+            f"{API}/dreams/{separate['id']}/interpretation",
+            json={
+                "expected_revision": separate["revision"],
+                "not_sure_fields": ["amount", "currency", "deadline"],
+            },
+            headers=api_context["primary"]["headers"],
+            timeout=20,
+        )
+        assert unknown.status_code == 200, unknown.text
+        unknown_body = unknown.json()
+        assert all(
+            row["status"] == "unknown"
+            for row in unknown_body["interpretation"]["questions"]
+        )
+        assert unknown_body["map"]["nodes"]
+    finally:
+        database.financial_accounts.delete_one({"id": account_id})
+
+
 def test_api_apply_is_idempotent_and_requirements_are_not_checkins(api_context):
     database = api_context["db"]
     response = _api_analyze(api_context, {
@@ -696,23 +832,43 @@ def test_api_apply_is_idempotent_and_requirements_are_not_checkins(api_context):
         headers=api_context["primary"]["headers"],
         timeout=15,
     ).json()
+    accepted_ids = [
+        node["id"] for node in accepted["map"]["nodes"]
+        if node["decision_state"] in {"accepted", "modified"}
+    ]
+    apply_payload = {
+        "expected_revision": accepted["revision"],
+        "accepted_node_ids": accepted_ids,
+    }
     before_checkins = database.checkins.count_documents({
         "user_id": api_context["primary"]["id"],
     })
     first = requests.post(
         f"{API}/dreams/{proposal['id']}/apply",
+        json=apply_payload,
         headers=api_context["primary"]["headers"],
         timeout=20,
     )
     assert first.status_code == 200, first.text
     second = requests.post(
         f"{API}/dreams/{proposal['id']}/apply",
+        json=apply_payload,
         headers=api_context["primary"]["headers"],
         timeout=20,
     )
     assert second.status_code == 200, second.text
     assert second.json()["already_applied"] is True
     assert first.json()["plan_map_id"] == second.json()["plan_map_id"]
+    assert first.json()["accepted_node_ids"] == accepted_ids
+    for kind, count in accepted["creation_preview"]["counts"].items():
+        assert first.json()["created_counts"][kind] == count
+    stale = requests.post(
+        f"{API}/dreams/{proposal['id']}/apply",
+        json={**apply_payload, "expected_revision": accepted["revision"] - 1},
+        headers=api_context["primary"]["headers"],
+        timeout=20,
+    )
+    assert stale.status_code == 409
     assert database.active_plan_maps.count_documents({
         "proposal_id": proposal["id"],
     }) == 1
