@@ -924,6 +924,8 @@ async def list_goals(current_user: dict = Depends(get_current_user)):
 
 @api_router.post("/goals", response_model=GoalResponse, status_code=201)
 async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current_user)):
+    if body.commitment_type not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     if body.status not in GOAL_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
     if body.checkin_cadence and body.checkin_cadence not in CHECKIN_CADENCES:
@@ -1092,6 +1094,8 @@ async def list_projects(current_user: dict = Depends(get_current_user)):
 async def create_project(body: ProjectCreate, current_user: dict = Depends(get_current_user)):
     if body.status not in PROJECT_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(PROJECT_STATUSES)}")
+    if body.commitment_type not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         "id": str(uuid.uuid4()),
@@ -1218,6 +1222,8 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         raise HTTPException(status_code=400, detail=f"assigned_to_type must be one of {sorted(TASK_ASSIGNMENT_TYPES)}")
     if body.assigned_to_type == "external" and not (body.assigned_to_name or body.assigned_to_phone):
         raise HTTPException(status_code=400, detail="External assignment requires assigned_to_name or assigned_to_phone")
+    if body.commitment_type not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     await _validate_task_origin(current_user["id"], body.origin, body.expected_outcome_id, body.project_id)
     # component_id is deprecated — always null after the Decomposition Engine reform.
     validated_component_id: Optional[str] = None
