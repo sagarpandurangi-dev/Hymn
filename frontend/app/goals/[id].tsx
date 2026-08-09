@@ -6,6 +6,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import ConfirmModal from "@/src/components/ConfirmModal";
+import { TaskListWithGrouping } from "@/src/components/TaskListWithGrouping";
 
 type Goal = {
   id: string; title: string; domain_id: string; domain_name: string;
@@ -246,36 +247,13 @@ export default function GoalDetailScreen() {
                 <Ionicons name="add-circle-outline" size={22} color={colors.brandPrimary} />
               </Pressable>
             </View>
-            {tasks.length === 0 ? (
-              <Text style={styles.emptyLine}>No tasks yet.</Text>
-            ) : (
-              tasks.map((t) => (
-                <Pressable
-                  key={t.id}
-                  onPress={() => router.push(`/tasks/${t.id}`)}
-                  style={styles.eoRow}
-                  testID={`task-row-${t.id}`}
-                >
-                  <Ionicons
-                    name={t.status === "done" ? "checkmark-circle" : "ellipse-outline"}
-                    size={18}
-                    color={t.status === "done" ? colors.success : colors.onSurfaceTertiary}
-                  />
-                  <View style={{ flex: 1 }}>
-                    <Text
-                      style={[styles.eoTitle, t.status === "done" && { textDecorationLine: "line-through", color: colors.onSurfaceTertiary }]}
-                      numberOfLines={1}
-                    >
-                      {t.title}
-                    </Text>
-                    <Text style={styles.eoMeta}>
-                      {t.priority} · {t.status}{t.due_date ? ` · due ${formatDateShort(t.due_date)}` : ""}
-                    </Text>
-                  </View>
-                  <Ionicons name="chevron-forward" size={16} color={colors.onSurfaceTertiary} />
-                </Pressable>
-              ))
-            )}
+            <TaskListWithGrouping
+              tasks={tasks}
+              onOpenTask={(tid) => router.push(`/tasks/${tid}`)}
+              onChanged={load}
+              testIDPrefix="task"
+              emptyText="No tasks yet."
+            />
           </View>
 
           {/* ── CHECK-INS ── */}

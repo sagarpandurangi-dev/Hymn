@@ -85,8 +85,6 @@ export default function RootLayout() {
           <Stack.Screen name="settings/overlay" />
           <Stack.Screen name="settings/decomposition" />
           <Stack.Screen name="me" />
-          <Stack.Screen name="knowledge/new" options={{ presentation: "modal", gestureEnabled: false }} />
-          <Stack.Screen name="knowledge/[id]" />
           <Stack.Screen name="portfolio/setup" options={{ gestureEnabled: false }} />
           <Stack.Screen name="portfolio/index" />
         </Stack>

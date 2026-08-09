@@ -148,9 +148,10 @@ export const api = {
   deleteProject: (id: string) =>
     request<{ detail: string }>(`/projects/${id}`, { method: "DELETE", auth: true }),
 
-  listTasks: (params?: { goalId?: string; includeCompleted?: boolean }) => {
+  listTasks: (params?: { goalId?: string; projectId?: string; includeCompleted?: boolean }) => {
     const parts: string[] = [];
     if (params?.goalId) parts.push(`goal_id=${encodeURIComponent(params.goalId)}`);
+    if (params?.projectId) parts.push(`project_id=${encodeURIComponent(params.projectId)}`);
     if (params?.includeCompleted === false) parts.push("include_completed=false");
     const qs = parts.length ? `?${parts.join("&")}` : "";
     return request<
@@ -173,9 +174,10 @@ export const api = {
   deleteTask: (id: string) =>
     request<{ detail: string }>(`/tasks/${id}`, { method: "DELETE", auth: true }),
 
-  listCheckins: (params?: { goalId?: string; q?: string }) => {
+  listCheckins: (params?: { goalId?: string; projectId?: string; q?: string }) => {
     const bits: string[] = [];
     if (params?.goalId) bits.push(`goal_id=${encodeURIComponent(params.goalId)}`);
+    if (params?.projectId) bits.push(`project_id=${encodeURIComponent(params.projectId)}`);
     if (params?.q && params.q.trim()) bits.push(`q=${encodeURIComponent(params.q.trim())}`);
     const qs = bits.length ? `?${bits.join("&")}` : "";
     return request<
@@ -279,71 +281,14 @@ export const api = {
     ),
 
   listLearningJourneys: () =>
+    // Deprecated: use listGoals + filter by domain_name === "Knowledge".
     request<
       { id: string; goal_id: string; journey_type: string; has_stages: boolean; title: string; notes: string; deadline: string; status: string; checkin_cadence: string; domain_id: string; domain_name: string; expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number; created_at: string; updated_at: string }[]
-    >("/knowledge/journeys", { auth: true }),
-
-  getLearningJourney: (id: string) =>
-    request<
-      { id: string; goal_id: string; journey_type: string; has_stages: boolean; title: string; notes: string; deadline: string; status: string; checkin_cadence: string; domain_id: string; domain_name: string; expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number; created_at: string; updated_at: string }
-    >(`/knowledge/journeys/${id}`, { auth: true }),
-
-  updateLearningJourney: (id: string, payload: { journey_type?: string; has_stages?: boolean }) =>
-    request<any>(`/knowledge/journeys/${id}`, { method: "PUT", body: payload, auth: true }),
-
-  deleteLearningJourney: (id: string) =>
-    request<{ detail: string }>(`/knowledge/journeys/${id}`, { method: "DELETE", auth: true }),
-
-  createLearningJourney: (payload: {
-    journey_type: "professional_qualification" | "skill" | "course" | "subject" | "book" | "custom";
-    title: string;
-    has_stages: boolean;
-    stages: { name: string }[];
-    why: string;
-    target_completion_date: string;
-    first_outcome: { title: string; target_value?: string; unit?: string; outcome_type?: string };
-    first_task: { title: string; due_date?: string; priority?: string };
-    checkin_cadence: "daily" | "weekly" | "monthly" | "manual";
-  }) =>
-    request<{ id: string; goal_id: string; journey_type: string; has_stages: boolean; title: string; deadline: string; status: string; checkin_cadence: string }>(
-      "/knowledge/journeys",
-      { method: "POST", body: payload, auth: true },
+    >("/goals", { auth: true }).then((goals: any[]) =>
+      goals
+        .filter((g) => (g.domain_name || "").toLowerCase() === "knowledge")
+        .map((g) => ({ ...g, goal_id: g.id, has_stages: false })),
     ),
-
-  // ---------- Stages ----------
-  listStages: (journeyId: string) =>
-    request<{ id: string; journey_id: string; name: string; sequence: number }[]>(
-      `/knowledge/journeys/${journeyId}/stages`,
-      { auth: true },
-    ),
-  createStage: (payload: { journey_id: string; name: string }) =>
-    request<{ id: string; journey_id: string; name: string; sequence: number }>(
-      "/knowledge/stages",
-      { method: "POST", body: payload, auth: true },
-    ),
-  updateStage: (id: string, payload: { name?: string }) =>
-    request<any>(`/knowledge/stages/${id}`, { method: "PUT", body: payload, auth: true }),
-  deleteStage: (id: string) =>
-    request<{ detail: string }>(`/knowledge/stages/${id}`, { method: "DELETE", auth: true }),
-  moveStage: (id: string, direction: "up" | "down") =>
-    request<{ detail: string }>(`/knowledge/stages/${id}/move?direction=${direction}`, { method: "POST", auth: true }),
-
-  // ---------- Components ----------
-  listComponents: (journeyId: string) =>
-    request<
-      { id: string; journey_id: string; stage_id: string | null; parent_component_id: string | null; name: string; type: string; sequence: number; status: string; progress: number; notes: string }[]
-    >(`/knowledge/journeys/${journeyId}/components`, { auth: true }),
-  createComponent: (payload: { journey_id: string; stage_id?: string | null; parent_component_id?: string | null; name: string; type?: string; status?: string; progress?: number; notes?: string }) =>
-    request<{ id: string; journey_id: string; stage_id: string | null; parent_component_id: string | null; name: string; type: string; sequence: number; status: string; progress: number; notes: string }>(
-      "/knowledge/components",
-      { method: "POST", body: payload, auth: true },
-    ),
-  updateComponent: (id: string, payload: { name?: string; type?: string; status?: string; progress?: number; notes?: string }) =>
-    request<any>(`/knowledge/components/${id}`, { method: "PUT", body: payload, auth: true }),
-  deleteComponent: (id: string) =>
-    request<{ detail: string }>(`/knowledge/components/${id}`, { method: "DELETE", auth: true }),
-  moveComponent: (id: string, direction: "up" | "down") =>
-    request<{ detail: string }>(`/knowledge/components/${id}/move?direction=${direction}`, { method: "POST", auth: true }),
 
   // ============================================================================
   // FINANCE ENGINE
@@ -459,32 +404,17 @@ export const api = {
   sharedExpenseIPaid: (payload: { total_amount: string | number; currency: string; participants: string[]; event_date: string; description?: string; prepare_repayment_message?: boolean }) =>
     request<any>("/finance/shared-expenses/i-paid", { method: "POST", body: payload, auth: true }),
 
-  // -- Planning Engine --
-  planningAnalyze: (payload: { target_type: "goal" | "project" | "journey"; target_id: string }) =>
-    request<any>("/planning/analyze", { method: "POST", body: payload, auth: true }),
-  planningGetProposal: (id: string) =>
-    request<any>(`/planning/proposals/${id}`, { auth: true }),
-  planningListProposals: (target_type?: string, target_id?: string) => {
-    const params = new URLSearchParams();
-    if (target_type) params.append("target_type", target_type);
-    if (target_id) params.append("target_id", target_id);
-    const qs = params.toString() ? `?${params.toString()}` : "";
-    return request<any[]>(`/planning/proposals${qs}`, { auth: true });
-  },
-  planningConfirm: (
-    id: string,
-    confirmations: Array<{ field: string; action: "confirm" | "edit" | "reject" | "mark_unknown"; value?: any; note?: string }>,
-  ) => request<any>(`/planning/proposals/${id}/confirm`, { method: "POST", body: { confirmations }, auth: true }),
-  planningGenerate: (id: string) =>
-    request<any>(`/planning/proposals/${id}/generate`, { method: "POST", auth: true }),
-  planningSelectTradeoff: (id: string, tradeoff_id: string) =>
-    request<any>(`/planning/proposals/${id}/select-tradeoff`, { method: "POST", body: { tradeoff_id }, auth: true }),
-  planningApprove: (id: string) =>
-    request<any>(`/planning/proposals/${id}/approve`, { method: "POST", auth: true }),
-  planningReject: (id: string) =>
-    request<any>(`/planning/proposals/${id}/reject`, { method: "POST", auth: true }),
-  planningPause: (id: string, future_allocations: "retain" | "reduce" | "release") =>
-    request<any>(`/planning/proposals/${id}/pause`, { method: "POST", body: { future_allocations }, auth: true }),
-  planningReassess: (payload: { target_type: "goal" | "project" | "journey"; target_id: string }) =>
-    request<any>("/planning/reassess", { method: "POST", body: payload, auth: true }),
+  // -- Planning Engine (Conversational) --
+  planningGetConversation: (target_type: "goal" | "project", target_id: string) =>
+    request<any>(`/planning/${target_type}/${target_id}/conversation`, { auth: true }),
+  planningSendMessage: (target_type: "goal" | "project", target_id: string, content: string) =>
+    request<any>(`/planning/${target_type}/${target_id}/messages`, {
+      method: "POST", body: { content }, auth: true,
+    }),
+  planningReset: (target_type: "goal" | "project", target_id: string) =>
+    request<any>(`/planning/${target_type}/${target_id}/reset`, { method: "POST", auth: true }),
+  planningMaterialize: (conversation_id: string, message_id: string) =>
+    request<any>(`/planning/conversations/${conversation_id}/materialize`, {
+      method: "POST", body: { message_id }, auth: true,
+    }),
 };

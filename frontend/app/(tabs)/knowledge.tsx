@@ -7,16 +7,16 @@ import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
 
-type Journey = {
+type Goal = {
   id: string;
-  goal_id: string;
-  journey_type: string;
-  has_stages: boolean;
   title: string;
+  domain_id: string;
+  domain_name: string;
   notes: string;
   deadline: string;
   status: string;
   checkin_cadence: string;
+  journey_type?: string;
   expected_outcomes_total: number;
   expected_outcomes_completed: number;
   completion_pct: number;
@@ -27,6 +27,15 @@ const STATUS_COLORS: Record<string, string> = {
   paused: colors.warning,
   completed: colors.success,
   abandoned: colors.onSurfaceTertiary,
+};
+
+const JOURNEY_LABEL: Record<string, string> = {
+  professional_qualification: "Qualification",
+  skill: "Skill",
+  course: "Course",
+  subject: "Subject",
+  book: "Book",
+  custom: "Custom",
 };
 
 function formatDate(iso: string): string {
@@ -44,33 +53,23 @@ function cadenceLabel(c: string): string {
   return c.charAt(0).toUpperCase() + c.slice(1);
 }
 
-const JOURNEY_TYPE_LABEL: Record<string, string> = {
-  professional_qualification: "Qualification",
-  skill: "Skill",
-  course: "Course",
-  subject: "Subject",
-  book: "Book",
-  custom: "Custom",
-};
-
-function journeyTypeLabel(t: string): string {
-  return JOURNEY_TYPE_LABEL[t] || "Learning Journey";
-}
-
 export default function KnowledgeScreen() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [journeys, setJourneys] = useState<Journey[]>([]);
+  const [goals, setGoals] = useState<Goal[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const items = await api.listLearningJourneys();
-      setJourneys(items as Journey[]);
+      const all = (await api.listGoals()) as Goal[];
+      const knowledgeGoals = all
+        .filter((g) => (g.domain_name || "").toLowerCase() === "knowledge")
+        .sort((a, b) => (a.status === "active" ? -1 : 1) - (b.status === "active" ? -1 : 1));
+      setGoals(knowledgeGoals);
     } catch (e: any) {
-      setError(e?.message || "Could not load learning journeys");
+      setError(e?.message || "Could not load journeys");
     } finally {
       setLoading(false);
     }
@@ -93,7 +92,7 @@ export default function KnowledgeScreen() {
         </View>
         <View style={styles.headerActions}>
           <Pressable
-            onPress={() => router.push("/knowledge/new")}
+            onPress={() => router.push("/goals/add?domain=Knowledge")}
             testID="knowledge-add-button"
             hitSlop={12}
             style={styles.addBtn}
@@ -113,12 +112,16 @@ export default function KnowledgeScreen() {
             <Text style={styles.retryText}>Retry</Text>
           </Pressable>
         </View>
-      ) : journeys.length === 0 ? (
+      ) : goals.length === 0 ? (
         <View style={styles.emptyWrap}>
           <Ionicons name="school-outline" size={44} color={colors.onSurfaceTertiary} />
           <Text style={styles.emptyTitle}>No journeys yet.</Text>
           <Text style={styles.emptyText}>What do you want to learn?</Text>
-          <Pressable onPress={() => router.push("/knowledge/new")} style={styles.emptyCta} testID="knowledge-empty-add-button">
+          <Pressable
+            onPress={() => router.push("/goals/add?domain=Knowledge")}
+            style={styles.emptyCta}
+            testID="knowledge-empty-add-button"
+          >
             <Text style={styles.emptyCtaText}>Start a journey</Text>
           </Pressable>
         </View>
@@ -127,41 +130,41 @@ export default function KnowledgeScreen() {
           contentContainerStyle={styles.scroll}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.brandPrimary} />}
         >
-          {journeys.map((j) => (
+          {goals.map((g) => (
             <Pressable
-              key={j.id}
-              onPress={() => router.push(`/knowledge/${j.id}`)}
+              key={g.id}
+              onPress={() => router.push(`/goals/${g.id}`)}
               style={styles.card}
-              testID={`journey-row-${j.id}`}
+              testID={`journey-row-${g.id}`}
             >
               <View style={styles.cardTop}>
                 <Text style={styles.tag}>
-                  {j.journey_type ? journeyTypeLabel(j.journey_type).toUpperCase() : "LEARNING JOURNEY"}
+                  {(g.journey_type && JOURNEY_LABEL[g.journey_type]?.toUpperCase()) || "LEARNING JOURNEY"}
                 </Text>
                 <View style={styles.statusPill}>
-                  <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[j.status] || colors.brandPrimary }]} />
-                  <Text style={styles.statusText}>{j.status}</Text>
+                  <View style={[styles.statusDot, { backgroundColor: STATUS_COLORS[g.status] || colors.brandPrimary }]} />
+                  <Text style={styles.statusText}>{g.status}</Text>
                 </View>
               </View>
-              <Text style={styles.cardTitle} numberOfLines={2}>{j.title}</Text>
-              {j.notes ? <Text style={styles.cardDesc} numberOfLines={2}>{j.notes}</Text> : null}
+              <Text style={styles.cardTitle} numberOfLines={2}>{g.title}</Text>
+              {g.notes ? <Text style={styles.cardDesc} numberOfLines={2}>{g.notes}</Text> : null}
               <View style={styles.progressBarTrack}>
-                <View style={[styles.progressBarFill, { width: `${Math.min(j.completion_pct, 100)}%` }]} />
+                <View style={[styles.progressBarFill, { width: `${Math.min(g.completion_pct, 100)}%` }]} />
               </View>
               <View style={styles.metaRow}>
-                <Text style={styles.metaText}>{j.expected_outcomes_completed}/{j.expected_outcomes_total} outcomes</Text>
-                {j.checkin_cadence ? (
+                <Text style={styles.metaText}>{g.expected_outcomes_completed}/{g.expected_outcomes_total} outcomes</Text>
+                {g.checkin_cadence ? (
                   <>
                     <Text style={styles.metaDot}>·</Text>
                     <Ionicons name="repeat-outline" size={12} color={colors.onSurfaceSecondary} />
-                    <Text style={styles.metaText}>{cadenceLabel(j.checkin_cadence)}</Text>
+                    <Text style={styles.metaText}>{cadenceLabel(g.checkin_cadence)}</Text>
                   </>
                 ) : null}
-                {j.deadline ? (
+                {g.deadline ? (
                   <>
                     <Text style={styles.metaDot}>·</Text>
                     <Ionicons name="calendar-outline" size={12} color={colors.onSurfaceSecondary} />
-                    <Text style={styles.metaText}>by {formatDate(j.deadline)}</Text>
+                    <Text style={styles.metaText}>by {formatDate(g.deadline)}</Text>
                   </>
                 ) : null}
               </View>

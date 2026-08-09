@@ -6,11 +6,30 @@ import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import ConfirmModal from "@/src/components/ConfirmModal";
+import { TaskListWithGrouping } from "@/src/components/TaskListWithGrouping";
+
+type Task = {
+  id: string; title: string; due_date: string; priority: string; status: string;
+};
+
+type Checkin = {
+  id: string; type: string; title: string; date: string; time: string; notes: string;
+};
+
+function formatDateShort(iso: string): string {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso + "T00:00:00");
+    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  } catch { return iso; }
+}
 
 export default function ProjectDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [p, setP] = useState<any>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [checkins, setCheckins] = useState<Checkin[]>([]);
   const [loading, setLoading] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -18,8 +37,16 @@ export default function ProjectDetailScreen() {
 
   const load = useCallback(async () => {
     if (!id) return;
-    try { setP(await api.getProject(id)); }
-    finally { setLoading(false); }
+    try {
+      const [pr, ts, cs] = await Promise.all([
+        api.getProject(id),
+        api.listTasks({ projectId: id }),
+        api.listCheckins({ projectId: id }),
+      ]);
+      setP(pr);
+      setTasks(ts as Task[]);
+      setCheckins(cs as Checkin[]);
+    } finally { setLoading(false); }
   }, [id]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -75,6 +102,60 @@ export default function ProjectDetailScreen() {
             <Ionicons name="git-network-outline" size={18} color={colors.onBrandPrimary} />
             <Text style={styles.planBtnText}>Plan with Hymn</Text>
           </Pressable>
+
+          {/* ── TASKS ── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.blockLabel}>TASKS</Text>
+              <Pressable
+                onPress={() => router.push(`/tasks/add?projectId=${p.id}`)}
+                testID="project-detail-add-task"
+                hitSlop={8}
+              >
+                <Ionicons name="add-circle-outline" size={22} color={colors.brandPrimary} />
+              </Pressable>
+            </View>
+            <TaskListWithGrouping
+              tasks={tasks}
+              onOpenTask={(tid) => router.push(`/tasks/${tid}`)}
+              onChanged={load}
+              testIDPrefix="task"
+              emptyText="No tasks yet."
+            />
+          </View>
+
+          {/* ── CHECK-INS ── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.blockLabel}>CHECK-INS</Text>
+              <Pressable
+                onPress={() => router.push("/checkin/project")}
+                testID="project-detail-add-checkin"
+                hitSlop={8}
+              >
+                <Ionicons name="add-circle-outline" size={22} color={colors.brandPrimary} />
+              </Pressable>
+            </View>
+            {checkins.length === 0 ? (
+              <Text style={styles.emptyLine}>No check-ins yet.</Text>
+            ) : (
+              checkins.slice(0, 20).map((c) => (
+                <Pressable
+                  key={c.id}
+                  onPress={() => router.push(`/checkin/${c.id}`)}
+                  style={styles.checkinRow}
+                  testID={`checkin-row-${c.id}`}
+                >
+                  <View style={styles.checkinDot} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.rowTitle} numberOfLines={1}>{c.title || "(untitled)"}</Text>
+                    <Text style={styles.rowMeta}>{formatDateShort(c.date)}{c.time ? ` · ${c.time}` : ""}</Text>
+                  </View>
+                  <Ionicons name="chevron-forward" size={16} color={colors.onSurfaceTertiary} />
+                </Pressable>
+              ))
+            )}
+          </View>
         </ScrollView>
       ) : null}
 
@@ -109,5 +190,16 @@ const styles = StyleSheet.create({
     borderRadius: radius.md, marginTop: spacing.lg,
   },
   planBtnText: { color: colors.onBrandPrimary, fontFamily: fonts.displayBold, fontSize: 14 },
-  _u: { borderRadius: radius.pill },
+  section: { marginTop: spacing.xl },
+  sectionHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.sm },
+  blockLabel: { fontSize: 10, color: colors.onSurfaceTertiary, letterSpacing: 1.5 },
+  emptyLine: { color: colors.onSurfaceTertiary, fontSize: 13, marginTop: spacing.xs },
+  checkinRow: {
+    flexDirection: "row", alignItems: "center", gap: spacing.sm,
+    backgroundColor: colors.surfaceSecondary, borderRadius: radius.md,
+    paddingVertical: spacing.md, paddingHorizontal: spacing.lg, marginTop: spacing.sm,
+  },
+  checkinDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.brandPrimary },
+  rowTitle: { fontSize: 14, color: colors.onSurface, fontWeight: "500" },
+  rowMeta: { fontSize: 11, color: colors.onSurfaceTertiary, marginTop: 2 },
 });
