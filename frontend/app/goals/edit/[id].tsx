@@ -23,6 +23,7 @@ export default function EditGoalScreen() {
           deadline: g.deadline,
           status: g.status,
           notes: g.notes,
+          commitment_type: (g as any).commitment_type || "postponable",
         });
       } finally { setLoading(false); }
     })();

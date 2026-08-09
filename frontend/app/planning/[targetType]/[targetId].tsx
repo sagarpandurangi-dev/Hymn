@@ -18,10 +18,19 @@ import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
 type Proposal = {
   summary?: string;
+  feasibility_note?: string;
   expected_outcomes?: { title: string; target_value?: string; unit?: string; deadline?: string; outcome_type?: string }[];
-  tasks?: { title: string; expected_outcome_title?: string; due_date?: string; priority?: string; notes?: string }[];
+  tasks?: { title: string; expected_outcome_title?: string; due_date?: string; priority?: string; commitment_type?: string; notes?: string }[];
+  time_commitments?: {
+    title: string; day_of_week: string; start_time: string; end_time: string;
+    commitment_type?: string; flexibility?: string; notes?: string;
+  }[];
+  existing_item_changes?: {
+    kind: "goal" | "project" | "task"; id: string;
+    action: "postpone" | "cancel"; new_due_date?: string; reason?: string;
+  }[];
   checkin_cadence?: string;
-  target_updates?: { deadline?: string; notes?: string };
+  target_updates?: { deadline?: string; notes?: string; commitment_type?: string };
 };
 
 type Message = {
@@ -272,6 +281,12 @@ function MessageBubble({
             <Text style={styles.proposalTitle}>Proposed changes</Text>
           </View>
           {proposal.summary ? <Text style={styles.proposalSummary}>{proposal.summary}</Text> : null}
+          {proposal.feasibility_note ? (
+            <View style={styles.feasibilityNote}>
+              <Ionicons name="warning-outline" size={14} color={colors.warning} />
+              <Text style={styles.feasibilityText}>{proposal.feasibility_note}</Text>
+            </View>
+          ) : null}
           {proposal.expected_outcomes && proposal.expected_outcomes.length > 0 ? (
             <View style={styles.proposalSection}>
               <Text style={styles.proposalSectionLabel}>
@@ -291,11 +306,56 @@ function MessageBubble({
                 {proposal.tasks.length} task{proposal.tasks.length !== 1 ? "s" : ""}
               </Text>
               {proposal.tasks.slice(0, 8).map((t, i) => (
-                <Text key={i} style={styles.proposalItem}>• {t.title}{t.due_date ? `  (${t.due_date})` : ""}</Text>
+                <Text key={i} style={styles.proposalItem}>
+                  • {t.title}{t.due_date ? `  (${t.due_date})` : ""}
+                  {t.commitment_type === "exclusive" ? "  🔒" : ""}
+                </Text>
               ))}
               {proposal.tasks.length > 8 ? (
                 <Text style={styles.proposalMore}>+ {proposal.tasks.length - 8} more</Text>
               ) : null}
+            </View>
+          ) : null}
+          {proposal.time_commitments && proposal.time_commitments.length > 0 ? (
+            <View style={styles.proposalSection}>
+              <Text style={styles.proposalSectionLabel}>
+                {proposal.time_commitments.length} life pattern{proposal.time_commitments.length !== 1 ? "s" : ""}
+              </Text>
+              {proposal.time_commitments.map((tc, i) => (
+                <Text key={i} style={styles.proposalItem}>
+                  • {tc.title} · {tc.day_of_week} {tc.start_time}–{tc.end_time}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+          {proposal.existing_item_changes && proposal.existing_item_changes.length > 0 ? (
+            <View style={styles.proposalSection}>
+              <Text style={styles.proposalSectionLabel}>Trade-offs</Text>
+              {proposal.existing_item_changes.map((c, i) => (
+                <View key={i} style={styles.tradeoffRow}>
+                  <View
+                    style={[
+                      styles.tradeoffBadge,
+                      c.action === "cancel" ? { backgroundColor: colors.error + "22" } : { backgroundColor: colors.warning + "22" },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.tradeoffBadgeText,
+                        { color: c.action === "cancel" ? colors.error : colors.warning },
+                      ]}
+                    >
+                      {c.action === "cancel" ? "CANCEL" : "POSTPONE"}
+                    </Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.proposalItem} numberOfLines={2}>
+                      {c.kind} · {c.reason || "trade-off"}
+                      {c.action === "postpone" && c.new_due_date ? ` → ${c.new_due_date}` : ""}
+                    </Text>
+                  </View>
+                </View>
+              ))}
             </View>
           ) : null}
           {proposal.checkin_cadence ? (
@@ -374,6 +434,15 @@ const styles = StyleSheet.create({
   proposalSectionLabel: { fontSize: 11, color: colors.onSurfaceTertiary, letterSpacing: 1, textTransform: "uppercase" },
   proposalItem: { fontSize: 13, color: colors.onSurface, lineHeight: 18 },
   proposalMore: { fontSize: 12, color: colors.onSurfaceSecondary, fontStyle: "italic" },
+  feasibilityNote: {
+    flexDirection: "row", alignItems: "flex-start", gap: 6,
+    backgroundColor: colors.warning + "18", borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm, paddingVertical: 6,
+  },
+  feasibilityText: { color: colors.warning, fontSize: 12, flex: 1, lineHeight: 17 },
+  tradeoffRow: { flexDirection: "row", alignItems: "flex-start", gap: 6, marginTop: 2 },
+  tradeoffBadge: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, alignSelf: "flex-start" },
+  tradeoffBadgeText: { fontSize: 9, fontWeight: "700", letterSpacing: 0.5 },
   applyBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,
     backgroundColor: colors.brandPrimary, paddingVertical: 10, borderRadius: radius.pill,

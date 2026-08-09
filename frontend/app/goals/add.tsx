@@ -6,6 +6,7 @@ import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing, GOAL_STATUSES } from "@/src/lib/theme";
 import DateTimeField from "@/src/components/DateTimeField";
 import { usePostCreationDecomposition } from "@/src/lib/usePostCreationDecomposition";
+import CommitmentTypeToggle from "@/src/components/CommitmentTypeToggle";
 
 type Domain = { id: string; name: string };
 
@@ -13,8 +14,9 @@ type Props = {
   mode: "add" | "edit";
   initial?: {
     title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string;
+    commitment_type?: "postponable" | "exclusive";
   } | null;
-  onSubmit: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string }) => Promise<void>;
+  onSubmit: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; commitment_type: "postponable" | "exclusive" }) => Promise<void>;
   headerTitle: string;
   submitLabel: string;
   testIDPrefix: string;
@@ -29,6 +31,7 @@ export function GoalForm({ initial, onSubmit, headerTitle, submitLabel, testIDPr
   const [deadline, setDeadline] = useState(initial?.deadline || "");
   const [status, setStatus] = useState<string>(initial?.status || "active");
   const [notes, setNotes] = useState(initial?.notes || "");
+  const [commitmentType, setCommitmentType] = useState<"postponable" | "exclusive">(initial?.commitment_type || "postponable");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,6 +60,7 @@ export function GoalForm({ initial, onSubmit, headerTitle, submitLabel, testIDPr
         deadline: deadline.trim(),
         status,
         notes: notes.trim(),
+        commitment_type: commitmentType,
       });
     } catch (e: any) {
       setError(e?.message || "Could not save");
@@ -138,6 +142,9 @@ export function GoalForm({ initial, onSubmit, headerTitle, submitLabel, testIDPr
               );
             })}
           </ScrollView>
+
+          <Text style={styles.label}>Commitment</Text>
+          <CommitmentTypeToggle value={commitmentType} onChange={setCommitmentType} testID={`${testIDPrefix}-commitment`} />
 
           <Text style={styles.label}>Notes</Text>
           <TextInput

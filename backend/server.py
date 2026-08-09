@@ -103,6 +103,7 @@ GOAL_STATUSES = {"active", "paused", "completed", "abandoned"}
 DEFAULT_DOMAIN_NAMES = ["Knowledge", "Health", "Money", "Soul"]
 CHECKIN_CADENCES = {"daily", "weekly", "monthly", "manual"}
 KNOWLEDGE_DOMAIN_NAME = "Knowledge"
+COMMITMENT_TYPES = {"postponable", "exclusive"}
 
 
 class GoalCreate(BaseModel):
@@ -114,6 +115,7 @@ class GoalCreate(BaseModel):
     notes: str = ""
     checkin_cadence: str = ""  # "" | daily | weekly | monthly | manual
     journey_type: str = ""  # optional tag surfaced in Knowledge domain UIs
+    commitment_type: str = "postponable"  # postponable | exclusive
 
 
 class GoalUpdate(BaseModel):
@@ -125,6 +127,7 @@ class GoalUpdate(BaseModel):
     notes: Optional[str] = None
     checkin_cadence: Optional[str] = None
     journey_type: Optional[str] = None
+    commitment_type: Optional[str] = None
 
 
 class GoalResponse(BaseModel):
@@ -138,6 +141,7 @@ class GoalResponse(BaseModel):
     notes: str
     checkin_cadence: str
     journey_type: str = ""
+    commitment_type: str = "postponable"
     created_at: str
     updated_at: str
     expected_outcomes_total: int = 0
@@ -277,6 +281,7 @@ class ProjectCreate(BaseModel):
     start_date: str = ""
     target_end_date: str = ""
     notes: str = ""
+    commitment_type: str = "postponable"
 
 
 class ProjectUpdate(BaseModel):
@@ -286,6 +291,7 @@ class ProjectUpdate(BaseModel):
     start_date: Optional[str] = None
     target_end_date: Optional[str] = None
     notes: Optional[str] = None
+    commitment_type: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -296,6 +302,7 @@ class ProjectResponse(BaseModel):
     start_date: str
     target_end_date: str
     notes: str
+    commitment_type: str = "postponable"
     created_at: str
     updated_at: str
 
@@ -319,6 +326,7 @@ class TaskCreate(BaseModel):
     assigned_to_type: str = "self"
     assigned_to_name: str = ""
     assigned_to_phone: str = ""
+    commitment_type: str = "postponable"
 
 
 class TaskUpdate(BaseModel):
@@ -331,6 +339,7 @@ class TaskUpdate(BaseModel):
     assigned_to_type: Optional[str] = None
     assigned_to_name: Optional[str] = None
     assigned_to_phone: Optional[str] = None
+    commitment_type: Optional[str] = None
 
 
 class TaskDefer(BaseModel):
@@ -358,6 +367,7 @@ class TaskResponse(BaseModel):
     assigned_to_type: str
     assigned_to_name: str
     assigned_to_phone: str
+    commitment_type: str = "postponable"
     # Deferment fields — nullable / zero on newly created tasks. `original_due_date`
     # is captured on the FIRST defer (or seeded from due_date if present) so the
     # 14-day cap can be applied consistently across subsequent defers.
@@ -528,6 +538,7 @@ def goal_to_response(g: dict, domain_name: str, stats: Optional[dict] = None) ->
         notes=g.get("notes", "") or "",
         checkin_cadence=g.get("checkin_cadence", "") or "",
         journey_type=g.get("journey_type", "") or "",
+        commitment_type=g.get("commitment_type", "postponable") or "postponable",
         created_at=g.get("created_at", ""),
         updated_at=g.get("updated_at", ""),
         expected_outcomes_total=total,
@@ -570,6 +581,7 @@ def project_to_response(p: dict) -> ProjectResponse:
         start_date=p.get("start_date", "") or "",
         target_end_date=p.get("target_end_date", "") or "",
         notes=p.get("notes", "") or "",
+        commitment_type=p.get("commitment_type", "postponable") or "postponable",
         created_at=p.get("created_at", ""),
         updated_at=p.get("updated_at", ""),
     )
@@ -590,6 +602,7 @@ def task_to_response(t: dict) -> TaskResponse:
         assigned_to_type=t.get("assigned_to_type", "self"),
         assigned_to_name=t.get("assigned_to_name", "") or "",
         assigned_to_phone=t.get("assigned_to_phone", "") or "",
+        commitment_type=t.get("commitment_type", "postponable") or "postponable",
         deferred_until=t.get("deferred_until"),
         original_due_date=t.get("original_due_date"),
         defer_count=int(t.get("defer_count") or 0),
@@ -930,6 +943,7 @@ async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current
         "notes": (body.notes or "").strip(),
         "checkin_cadence": (body.checkin_cadence or "").strip(),
         "journey_type": (body.journey_type or "").strip(),
+        "commitment_type": body.commitment_type if body.commitment_type in COMMITMENT_TYPES else "postponable",
         "created_at": now,
         "updated_at": now,
     }
@@ -958,6 +972,8 @@ async def update_goal(goal_id: str, body: GoalUpdate, current_user: dict = Depen
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
     if "checkin_cadence" in updates and updates["checkin_cadence"] and updates["checkin_cadence"] not in CHECKIN_CADENCES:
         raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)} or empty")
+    if "commitment_type" in updates and updates["commitment_type"] not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     if "domain_id" in updates:
         d = await db.domains.find_one({"id": updates["domain_id"], "user_id": current_user["id"]})
         if not d:
@@ -1086,6 +1102,7 @@ async def create_project(body: ProjectCreate, current_user: dict = Depends(get_c
         "start_date": (body.start_date or "").strip(),
         "target_end_date": (body.target_end_date or "").strip(),
         "notes": (body.notes or "").strip(),
+        "commitment_type": body.commitment_type if body.commitment_type in COMMITMENT_TYPES else "postponable",
         "created_at": now,
         "updated_at": now,
     }
@@ -1110,6 +1127,8 @@ async def update_project(project_id: str, body: ProjectUpdate, current_user: dic
     updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
     if "status" in updates and updates["status"] not in PROJECT_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(PROJECT_STATUSES)}")
+    if "commitment_type" in updates and updates["commitment_type"] not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     for k in ("title", "description", "start_date", "target_end_date", "notes"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
@@ -1218,6 +1237,7 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         "assigned_to_type": body.assigned_to_type,
         "assigned_to_name": (body.assigned_to_name or "").strip() if body.assigned_to_type == "external" else "",
         "assigned_to_phone": (body.assigned_to_phone or "").strip() if body.assigned_to_type == "external" else "",
+        "commitment_type": body.commitment_type if body.commitment_type in COMMITMENT_TYPES else "postponable",
         # Deferment state. `original_due_date` is seeded from the initial
         # `due_date` (if present) so subsequent defers compare against the
         # user's original intent, not the last-deferred date. `defer_count`
@@ -1329,6 +1349,8 @@ async def update_task(task_id: str, body: TaskUpdate, current_user: dict = Depen
         raise HTTPException(status_code=400, detail=f"Priority must be one of {sorted(TASK_PRIORITIES)}")
     if "assigned_to_type" in updates and updates["assigned_to_type"] not in TASK_ASSIGNMENT_TYPES:
         raise HTTPException(status_code=400, detail=f"assigned_to_type must be one of {sorted(TASK_ASSIGNMENT_TYPES)}")
+    if "commitment_type" in updates and updates["commitment_type"] not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     if updates.get("assigned_to_type") == "self":
         # Clear external contact when switching back to self.
         updates["assigned_to_name"] = ""

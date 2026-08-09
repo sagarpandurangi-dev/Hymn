@@ -6,6 +6,7 @@ import { api } from "@/src/lib/api";
 import { colors, spacing, TASK_PRIORITIES, TASK_STATUSES, TASK_ASSIGNMENT_TYPES } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
+import CommitmentTypeToggle from "@/src/components/CommitmentTypeToggle";
 
 type Project = { id: string; title: string };
 type Goal = { id: string; title: string };
@@ -18,6 +19,7 @@ type Props = {
     title: string; due_date: string; priority: string; status: string; notes: string;
     origin: string; expected_outcome_id: string | null; project_id: string | null;
     assigned_to_type?: string; assigned_to_name?: string; assigned_to_phone?: string;
+    commitment_type?: "postponable" | "exclusive";
   } | null;
   mode: "add" | "edit";
   headerTitle: string;
@@ -40,6 +42,7 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
   const [assignedType, setAssignedType] = useState<string>(initial?.assigned_to_type || "self");
   const [assignedName, setAssignedName] = useState<string>(initial?.assigned_to_name || "");
   const [assignedPhone, setAssignedPhone] = useState<string>(initial?.assigned_to_phone || "");
+  const [commitmentType, setCommitmentType] = useState<"postponable" | "exclusive">(initial?.commitment_type || "postponable");
   const [projects, setProjects] = useState<Project[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [eos, setEos] = useState<EO[]>([]);
@@ -76,7 +79,7 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
     }
     setBusy(true);
     try {
-      const payload: any = { title: title.trim(), due_date: dueDate.trim(), priority, status, notes: notes.trim() };
+      const payload: any = { title: title.trim(), due_date: dueDate.trim(), priority, status, notes: notes.trim(), commitment_type: commitmentType };
       payload.assigned_to_type = assignedType;
       payload.assigned_to_name = assignedType === "external" ? assignedName.trim() : "";
       payload.assigned_to_phone = assignedType === "external" ? assignedPhone.trim() : "";
@@ -191,6 +194,9 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
 
           <Text style={s.label}>Notes</Text>
           <TextInput style={s.notes} value={notes} onChangeText={setNotes} multiline textAlignVertical="top" testID={`${testIDPrefix}-notes-input`} />
+
+          <Text style={s.label}>Commitment</Text>
+          <CommitmentTypeToggle value={commitmentType} onChange={setCommitmentType} testID={`${testIDPrefix}-commitment`} />
 
           <Text style={s.label}>Assigned To</Text>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>

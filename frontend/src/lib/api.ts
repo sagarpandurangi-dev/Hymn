@@ -104,14 +104,14 @@ export const api = {
     request<
       { id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence: string; created_at: string; updated_at: string }[]
     >("/goals", { auth: true }),
-  createGoal: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence?: string }) =>
+  createGoal: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>("/goals", { method: "POST", body: payload, auth: true }),
   getGoal: (id: string) =>
     request<{ id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence: string; created_at: string; updated_at: string; expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number }>(
       `/goals/${id}`,
       { auth: true },
     ),
-  updateGoal: (id: string, payload: { title?: string; domain_id?: string; target_outcome?: string; deadline?: string; status?: string; notes?: string; checkin_cadence?: string }) =>
+  updateGoal: (id: string, payload: { title?: string; domain_id?: string; target_outcome?: string; deadline?: string; status?: string; notes?: string; checkin_cadence?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>(`/goals/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteGoal: (id: string) =>
     request<{ detail: string }>(`/goals/${id}`, { method: "DELETE", auth: true }),
@@ -136,14 +136,14 @@ export const api = {
     request<
       { id: string; title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string }[]
     >("/projects", { auth: true }),
-  createProject: (payload: { title: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string }) =>
+  createProject: (payload: { title: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>("/projects", { method: "POST", body: payload, auth: true }),
   getProject: (id: string) =>
     request<{ id: string; title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string }>(
       `/projects/${id}`,
       { auth: true },
     ),
-  updateProject: (id: string, payload: { title?: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string }) =>
+  updateProject: (id: string, payload: { title?: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>(`/projects/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteProject: (id: string) =>
     request<{ detail: string }>(`/projects/${id}`, { method: "DELETE", auth: true }),
@@ -158,14 +158,14 @@ export const api = {
       { id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }[]
     >(`/tasks${qs}`, { auth: true });
   },
-  createTask: (payload: { title: string; due_date?: string; priority?: string; status?: string; notes?: string; origin: string; expected_outcome_id?: string | null; project_id?: string | null }) =>
+  createTask: (payload: { title: string; due_date?: string; priority?: string; status?: string; notes?: string; origin: string; expected_outcome_id?: string | null; project_id?: string | null; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>("/tasks", { method: "POST", body: payload, auth: true }),
   getTask: (id: string) =>
     request<{ id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }>(
       `/tasks/${id}`,
       { auth: true },
     ),
-  updateTask: (id: string, payload: { title?: string; due_date?: string; priority?: string; status?: string; notes?: string }) =>
+  updateTask: (id: string, payload: { title?: string; due_date?: string; priority?: string; status?: string; notes?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>(`/tasks/${id}`, { method: "PUT", body: payload, auth: true }),
   deferTask: (id: string, deferred_until: string) =>
     request<{ id: string; deferred_until: string | null; defer_count: number }>(
