@@ -1923,6 +1923,7 @@ from finance_manager import (
 )  # noqa: E402
 from finance_advanced import advanced_router as finance_advanced_router, ensure_finance_advanced_indexes  # noqa: E402
 from planning_engine import planning_router, ensure_planning_indexes  # noqa: E402
+import goal_merge  # noqa: F401,E402  (registers merge endpoints on planning_router)
 
 api_router.include_router(portfolio_router)
 api_router.include_router(finance_router)

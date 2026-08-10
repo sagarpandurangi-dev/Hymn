@@ -417,4 +417,16 @@ export const api = {
     request<any>(`/planning/conversations/${conversation_id}/materialize`, {
       method: "POST", body: { message_id }, auth: true,
     }),
+
+  // -- Goal Merge Wizard (manual) --
+  mergePreview: (goal_ids: string[]) =>
+    request<any>("/planning/merge/preview", { method: "POST", body: { goal_ids }, auth: true }),
+  mergeApply: (payload: {
+    goal_ids: string[];
+    survivor_id: string;
+    outcome_rules: { outcome_id: string; action: "keep" | "nest" | "delete"; parent_outcome_id?: string | null }[];
+    delete_duplicate_ids?: string[];
+    tradeoffs?: { kind: "goal" | "project" | "task"; id: string; action: "postpone" | "cancel"; new_due_date?: string }[];
+  }) =>
+    request<any>("/planning/merge/apply", { method: "POST", body: payload, auth: true }),
 };

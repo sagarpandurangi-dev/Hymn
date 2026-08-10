@@ -87,6 +87,7 @@ export default function RootLayout() {
           <Stack.Screen name="me" />
           <Stack.Screen name="portfolio/setup" options={{ gestureEnabled: false }} />
           <Stack.Screen name="portfolio/index" />
+          <Stack.Screen name="goals/merge" options={{ presentation: "modal", gestureEnabled: false }} />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>
