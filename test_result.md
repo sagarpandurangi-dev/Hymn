@@ -5,38 +5,21 @@
 #====================================================================================================
 
 user_problem_statement: |
-  Enhance the planning chatbot (Goals + Projects) to be portfolio-aware:
-  1) Take existing goals / projects / tasks / weekly time commitments into
-     account. If capacity is tight, warn the user and propose specific
-     items to postpone or cancel.
-  2) Introduce commitment_type ("postponable" | "exclusive") on Goals,
-     Projects, and Tasks. The assistant must never suggest postponing or
-     cancelling an "exclusive" item (movie ticket, exam, surgery).
-  3) When the user mentions a recurring life pattern (job, pilates,
-     school pickup), auto-add it as a time commitment in the next
-     Proposed Changes card if enough info; otherwise ask a single
-     clarifying question.
+  Give the planning chat full write capabilities across Projects, Tasks,
+  and Check-ins. Concrete examples:
+    * "Check in 6-7am every day of this month as studies against Become
+       CA goal" → Hymn auto-creates the daily check-ins.
+    * If two or more Goals or Projects appear to be duplicates, the chat
+      should propose consolidating them. On Apply, Hymn deterministically
+      picks the richest survivor by metadata density and merges the rest
+      into it.
+  Locked user choices for this iteration:
+    (1) Consolidation: single-tap Apply; server picks the richest survivor.
+    (2) Recurring check-ins: materialize creates a real check-in document
+        per day within [start_date, end_date] (backfill allowed).
 
 backend:
-  - task: "commitment_type field on Goal, Project, Task"
-    implemented: true
-    working: true
-    file: "backend/server.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-      - working: true
-        agent: "main"
-        comment: |
-          Added COMMITMENT_TYPES = {"postponable", "exclusive"} and:
-            * GoalCreate/Update/Response + create + update endpoints
-            * ProjectCreate/Update/Response + create + update endpoints
-            * TaskCreate/Update/Response + create + update endpoints
-          All default to "postponable". Update paths validate against the
-          allowed set (400 on invalid).
-
-  - task: "Portfolio-aware planning context"
+  - task: "Recurring check-in expansion (checkin_recurrences → per-day docs)"
     implemented: true
     working: true
     file: "backend/planning_engine.py"
@@ -47,17 +30,14 @@ backend:
       - working: true
         agent: "main"
         comment: |
-          _read_context now pulls (in addition to the target's own
-          outcomes/tasks/checkins):
-            * All OTHER active/paused goals + projects with their
-              commitment_type, deadlines, cadences.
-            * Currently-effective weekly time commitments.
-            * Rough weekly capacity: committed_hours/week and estimated
-              free hours (168 - committed).
-            * Total open task count with due dates (workload heat).
-          _context_prelude serializes this into a compact system prelude.
+          New _iter_dates helper walks [start_date, end_date] inclusive,
+          filtered by an optional days_of_week set (empty list = every day).
+          Materialize resolves the anchor (goal via expected_outcome_title,
+          project via project_id, life = free-floating) and inserts one
+          checkin doc per matching date with source="system". Live test:
+          7-day recurrence emitted by Claude → 7 documents persisted.
 
-  - task: "Expanded HYMN_PROPOSAL schema (time_commitments, existing_item_changes, feasibility_note, commitment_type on tasks/target)"
+  - task: "One-off check-in creation from proposals.checkins"
     implemented: true
     working: true
     file: "backend/planning_engine.py"
@@ -68,45 +48,15 @@ backend:
       - working: true
         agent: "main"
         comment: |
-          Updated system prompt with CAPACITY & PORTFOLIO AWARENESS +
-          LIFE PATTERNS sections. New proposal fields:
-            * feasibility_note (short line if capacity is tight)
-            * time_commitments (recurring weekly patterns)
-            * existing_item_changes (postpone|cancel with new_due_date +
-              reason). NEVER touches items whose commitment_type is
-              "exclusive".
-            * tasks[].commitment_type
-            * target_updates.commitment_type
+          Validates type ∈ {goal, project, life}, resolves anchor
+          (expected_outcome for goal, project_id for project), inserts
+          checkins docs with source="system" and outcome_type stamped
+          from the EO for goal check-ins.
 
-  - task: "Atomic materialization of new proposal fields"
+  - task: "existing_item_updates — free-form patches on goals/projects/tasks"
     implemented: true
     working: true
     file: "backend/planning_engine.py"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-      - working: true
-        agent: "main"
-        comment: |
-          _materialize_proposal now also:
-            * Creates time_commitments (validated day/hh:mm range) with
-              source_type="system".
-            * Applies postpone/cancel actions on other portfolio items
-              — but ONLY if commitment_type != "exclusive". Postpone
-              updates deadline/target_end_date and moves status to
-              "paused"; cancel sets "abandoned" (or "cancelled" for
-              tasks).
-            * Persists task commitment_type and target commitment_type.
-          Compensating cleanup restored on failure.
-          Live smoke test confirmed 8 time commitments + 1 task created
-          in a single atomic pass. materialized_summary now enumerates
-          all touched item types.
-
-  - task: "commitment_type validation in update endpoints"
-    implemented: true
-    working: true
-    file: "backend/server.py"
     stuck_count: 0
     priority: "medium"
     needs_retesting: false
@@ -114,43 +64,72 @@ backend:
       - working: true
         agent: "main"
         comment: |
-          PUT /api/goals/{id}, /api/projects/{id}, /api/tasks/{id} now
-          return 400 when commitment_type is anything other than
-          "postponable" or "exclusive".
+          Accepts patches for {title, notes, priority, status, due_date,
+          deadline}. Rejects unknown keys and invalid enum values.
+          Refuses to touch items with commitment_type="exclusive"
+          (server-side backstop, matches existing_item_changes rule).
+          Never applied to the target the user is currently planning.
+
+  - task: "Duplicate consolidation with richness-based survivor"
+    implemented: true
+    working: true
+    file: "backend/planning_engine.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          _richness_score sums field completeness (2 pts per non-empty
+          metadata field) + attached artifact counts (3 pts per EO,
+          1 pt per task, 1 pt per check-in). Highest wins; tie-break by
+          older created_at.
+          Materialize reparents child docs BEFORE deleting losers:
+            * Goals: expected_outcomes.goal_id + checkins.goal_id → survivor
+            * Projects: tasks.project_id + checkins.project_id → survivor
+          Notes / descriptions merged (append loser content if not
+          already present). Losers deleted. Exclusive items are removed
+          from the candidate set BEFORE scoring — never destroyed.
+          Live test: 2 pairs of dups collapsed to 1 survivor each on
+          Apply. Smoke test with programmatically-injected proposal
+          confirmed EO/task reparenting works.
+
+  - task: "Duplicate hints injected into the LLM context prelude"
+    implemented: true
+    working: true
+    file: "backend/planning_engine.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Naive title-similarity clustering (normalized title + 4-word
+          prefix). Any cluster of 2+ items is emitted as a
+          "POSSIBLE DUPLICATES" line the assistant can act on.
+          Confirmed live: LLM read the hints and proposed
+          consolidations without user prompting.
+
+  - task: "Extended materialize summary + result payload"
+    implemented: true
+    working: true
+    file: "backend/planning_engine.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+      - working: true
+        agent: "main"
+        comment: |
+          Response now returns created_checkins, applied_existing_updates,
+          applied_consolidations arrays. Summary string enumerates every
+          non-empty bucket. Live example: "Added 7 check-ins,
+          consolidated 2 duplicates in 2 groups."
 
 frontend:
-  - task: "CommitmentTypeToggle component"
-    implemented: true
-    working: true
-    file: "frontend/src/components/CommitmentTypeToggle.tsx"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-      - working: true
-        agent: "main"
-        comment: |
-          Simple two-chip toggle (Postponable / Exclusive) with iconography
-          (swap vs lock) and a one-line contextual help caption. Reused
-          across all three forms.
-
-  - task: "GoalForm + ProjectForm + TaskForm accept commitment_type"
-    implemented: true
-    working: true
-    file: "frontend/app/goals/add.tsx, frontend/app/projects/add.tsx, frontend/app/tasks/add.tsx (+ edit screens)"
-    stuck_count: 0
-    priority: "high"
-    needs_retesting: false
-    status_history:
-      - working: true
-        agent: "main"
-        comment: |
-          Added CommitmentTypeToggle above the Notes field on all three
-          forms. Edit screens pre-fill from the fetched entity's current
-          commitment_type. Payloads flow through to the API. Types
-          extended on api.ts (create/update Goal, Project, Task).
-
-  - task: "Chat proposal card renders new sections"
+  - task: "Chat proposal card — new sections"
     implemented: true
     working: true
     file: "frontend/app/planning/[targetType]/[targetId].tsx"
@@ -161,29 +140,28 @@ frontend:
       - working: true
         agent: "main"
         comment: |
-          Extended Proposal type + MessageBubble to render:
-            * feasibility_note (yellow warning banner with icon).
-            * time_commitments section — "N life patterns" list.
-            * existing_item_changes — "Trade-offs" section with colored
-              POSTPONE / CANCEL badges + optional new due date + reason.
-            * commitment_type=exclusive tasks marked with 🔒 icon.
-          Live smoke test on test@hymn.app: assistant flagged 8-goal
-          portfolio, proposed pausing 3 test/placeholder items, captured
-          user's Job + Pilates schedule as 8 time commitments, asked one
-          clarifying question about ceramics class timing. Apply worked.
+          Proposal type + card extended with:
+            * "N check-ins" section (one-off) with date + time
+            * "Recurring check-ins" section listing rule with day filter
+              or "(every day)"
+            * "N updates" section listing kind + which fields
+            * "Consolidations" section — cyan MERGE badge per group with
+              "Hymn will keep the richest and merge the rest." caption
+          Verified via screenshot on test@hymn.app: 7-day recurrence
+          rendered + 2 consolidation cards rendered.
 
 metadata:
   created_by: "main_agent"
-  version: "3.1"
-  test_sequence: 17
+  version: "3.2"
+  test_sequence: 18
   run_ui: false
 
 test_plan:
   current_focus:
-    - "Portfolio-aware planning context"
-    - "Expanded HYMN_PROPOSAL schema"
-    - "Atomic materialization of new proposal fields"
-    - "commitment_type field on Goal, Project, Task"
+    - "Recurring check-in expansion"
+    - "Duplicate consolidation with richness-based survivor"
+    - "existing_item_updates safety on exclusive items"
+    - "Chat proposal card — new sections"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -191,31 +169,24 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      Portfolio-aware Planning Copilot shipped. Smoke-tested end-to-end
-      with test@hymn.app / TestPass123!.
-
-      Backend flow validated live:
-        * Chat context now includes other active goals/projects, time
-          commitments, weekly capacity estimate, and open task count.
-        * LLM responded with feasibility warning, named specific
-          low-value items in the portfolio to consider pausing, extracted
-          8 recurring life patterns (Job × 5 weekdays + Pilates × 3 days)
-          from the user's message, and asked one clarifying question for
-          missing info (ceramics class times).
-        * Materialize atomically created 8 time_commitments +
-          1 task in one apply.
-
-      Suggested test coverage:
-        1) POST /api/planning/{goal|project}/{id}/messages that includes
-           a recurring life pattern → assistant emits time_commitments
-           in the proposal.
-        2) POST /api/planning/conversations/{id}/materialize on that
-           proposal → time_commitments docs appear in
-           db.time_commitments with source_type="system".
-        3) Set commitment_type="exclusive" on a Goal → send a planning
-           message describing tight capacity → assistant should NOT
-           include an existing_item_change referencing that Goal.
-        4) 400 on PUT /api/goals/{id} { "commitment_type": "invalid" }.
-        5) UI: CommitmentTypeToggle renders on the add + edit forms of
-           Goal, Project, and Task. On task detail / list, exclusive
-           items surface visually.
+      Chat now has full write access across Tasks / Check-ins /
+      Goals-Projects updates + duplicate consolidation, per user request.
+      Live end-to-end smoke on test@hymn.app / TestPass123!:
+        * Assistant emitted 7-day 06:00 recurrence + spotted duplicate
+          Goal + Project pairs (from context duplicate hints) and
+          proposed consolidations.
+        * Apply → "Added 7 check-ins, consolidated 2 duplicates in
+          2 groups." DB confirmed: 7 system checkins persisted, dup
+          goal + dup project each reduced 2 → 1.
+        * Programmatic smoke test (throwaway) confirmed all three code
+          paths (recurring checkins, existing_item_updates, consolidation
+          with EO+task reparenting) work.
+      Recommended additional coverage from testing_agent:
+        1. Direct 400 tests for badly-formed proposal fields.
+        2. Consolidation with EXCLUSIVE dup — that candidate should be
+           dropped from the score set and never deleted.
+        3. Recurrence spanning multiple days_of_week filter (e.g.
+           weekdays only) → correct number of check-ins created.
+        4. Update targeting an exclusive item → no-op (silent skip).
+        5. Frontend: cadence line, "Update" section render, MERGE badge
+           colour, count display.

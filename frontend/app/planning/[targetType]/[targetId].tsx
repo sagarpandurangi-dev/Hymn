@@ -21,6 +21,18 @@ type Proposal = {
   feasibility_note?: string;
   expected_outcomes?: { title: string; target_value?: string; unit?: string; deadline?: string; outcome_type?: string }[];
   tasks?: { title: string; expected_outcome_title?: string; due_date?: string; priority?: string; commitment_type?: string; notes?: string }[];
+  checkins?: { type: string; title: string; date: string; time: string; expected_outcome_title?: string; project_id?: string; notes?: string }[];
+  checkin_recurrences?: {
+    type: string; title: string; start_date: string; end_date: string;
+    days_of_week?: string[]; time: string; expected_outcome_title?: string; project_id?: string; notes?: string;
+  }[];
+  existing_item_updates?: {
+    kind: "goal" | "project" | "task"; id: string;
+    patch: Record<string, string>;
+  }[];
+  consolidations?: {
+    kind: "goal" | "project"; candidate_ids: string[]; reason?: string;
+  }[];
   time_commitments?: {
     title: string; day_of_week: string; start_time: string; end_time: string;
     commitment_type?: string; flexibility?: string; notes?: string;
@@ -353,6 +365,62 @@ function MessageBubble({
                       {c.kind} · {c.reason || "trade-off"}
                       {c.action === "postpone" && c.new_due_date ? ` → ${c.new_due_date}` : ""}
                     </Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : null}
+          {proposal.checkins && proposal.checkins.length > 0 ? (
+            <View style={styles.proposalSection}>
+              <Text style={styles.proposalSectionLabel}>
+                {proposal.checkins.length} check-in{proposal.checkins.length !== 1 ? "s" : ""}
+              </Text>
+              {proposal.checkins.slice(0, 6).map((c, i) => (
+                <Text key={i} style={styles.proposalItem}>• {c.title}  ({c.date} {c.time})</Text>
+              ))}
+              {proposal.checkins.length > 6 ? (
+                <Text style={styles.proposalMore}>+ {proposal.checkins.length - 6} more</Text>
+              ) : null}
+            </View>
+          ) : null}
+          {proposal.checkin_recurrences && proposal.checkin_recurrences.length > 0 ? (
+            <View style={styles.proposalSection}>
+              <Text style={styles.proposalSectionLabel}>Recurring check-ins</Text>
+              {proposal.checkin_recurrences.map((r, i) => (
+                <Text key={i} style={styles.proposalItem}>
+                  • {r.title} · {r.start_date} → {r.end_date} at {r.time}
+                  {r.days_of_week && r.days_of_week.length > 0 && r.days_of_week.length < 7
+                    ? `  (${r.days_of_week.map((d) => d.slice(0, 3)).join(", ")})`
+                    : "  (every day)"}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+          {proposal.existing_item_updates && proposal.existing_item_updates.length > 0 ? (
+            <View style={styles.proposalSection}>
+              <Text style={styles.proposalSectionLabel}>
+                {proposal.existing_item_updates.length} update{proposal.existing_item_updates.length !== 1 ? "s" : ""}
+              </Text>
+              {proposal.existing_item_updates.map((u, i) => (
+                <Text key={i} style={styles.proposalItem}>
+                  • {u.kind}: {Object.keys(u.patch).join(", ")}
+                </Text>
+              ))}
+            </View>
+          ) : null}
+          {proposal.consolidations && proposal.consolidations.length > 0 ? (
+            <View style={styles.proposalSection}>
+              <Text style={styles.proposalSectionLabel}>Consolidations</Text>
+              {proposal.consolidations.map((c, i) => (
+                <View key={i} style={styles.tradeoffRow}>
+                  <View style={[styles.tradeoffBadge, { backgroundColor: colors.brandPrimary + "22" }]}>
+                    <Text style={[styles.tradeoffBadgeText, { color: colors.brandPrimary }]}>MERGE</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.proposalItem} numberOfLines={3}>
+                      {c.candidate_ids.length} {c.kind}s: {c.reason || "duplicate detected"}
+                    </Text>
+                    <Text style={styles.proposalMore}>Hymn will keep the richest and merge the rest.</Text>
                   </View>
                 </View>
               ))}
