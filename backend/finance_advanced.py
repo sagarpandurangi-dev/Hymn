@@ -812,13 +812,9 @@ async def record_override(body: OverrideRecordPayload, current_user: dict = Depe
     return {"id": doc["id"]}
 
 
-@advanced_router.get("/overrides")
-async def list_overrides(current_user: dict = Depends(get_current_user)):
-    db = get_db()
-    docs = await db.override_decisions.find(
-        {"user_id": current_user["id"]}, {"_id": 0},
-    ).sort("decision_timestamp", -1).to_list(length=500)
-    return docs
+# NOTE: `GET /finance/overrides` (list) removed per finance audit — no UI
+# consumer. `POST /finance/overrides` above is still used by the commitment
+# creation flow when a user proceeds despite a warning.
 
 
 # ============================================================================
@@ -1088,139 +1084,10 @@ async def scenario_evaluate(scenario_id: str, current_user: dict = Depends(get_c
 
 
 # ============================================================================
-# 17 \u2014 Shared expense helper
+# NOTE: Shared-expenses helpers (POST /finance/shared-expenses/i-owe and
+# POST /finance/shared-expenses/i-paid) were removed per finance audit —
+# no UI consumer. Re-introduce with a fresh UX design if needed.
 # ============================================================================
-
-class SharedExpenseIOwe(BaseModel):
-    total_amount: Any
-    currency: str
-    other_paid_by: str   # display name of who paid
-    my_share: Any
-    description: Optional[str] = ""
-    due_date: str
-    priority: str = "medium"
-    create_task: bool = True
-
-
-@advanced_router.post("/shared-expenses/i-owe")
-async def shared_expense_i_owe(body: SharedExpenseIOwe, current_user: dict = Depends(get_current_user)):
-    """When someone else paid and the user owes a share (§17). Creates a
-    Reserved Financial Commitment for the user's share plus a repay Task.
-    Every write targets ``resource_allocations`` exclusively —
-    ``financial_commitments`` is never touched."""
-    db = get_db()
-    _require_currency(body.currency, "currency")
-    _require_date_str(body.due_date, "due_date")
-    _require_in(body.priority, PRIORITIES, "priority")
-    now = _now()
-    share_stored = _money_to_stored(body.my_share, "my_share")
-    commitment_id = _uuid()
-    task_id = _uuid() if body.create_task else None
-    doc = {
-        "id": commitment_id,
-        "user_id": current_user["id"],
-        "title": f"Repay {body.other_paid_by}",
-        "description": (body.description or "").strip(),
-        "amount": share_stored,
-        "currency": body.currency,
-        "due_date": body.due_date,
-        "original_due_date": body.due_date,
-        "priority": body.priority,
-        "domain_id": None, "goal_id": None, "project_id": None,
-        "task_id": task_id,
-        "source": "shared_expense",
-    }
-    # Insert as Reserved directly — §17 requires the amount be reserved
-    # immediately when another person paid.
-    alloc_id = await _insert_commitment_allocation(
-        db, current_user["id"], commitment_id,
-        fc_state="reserved", alloc_status="reserved", doc=doc,
-    )
-    if task_id:
-        await db.tasks.insert_one({
-            "id": task_id, "user_id": current_user["id"],
-            "title": f"Repay {body.other_paid_by}",
-            "notes": f"Shared expense repayment linked to commitment {commitment_id}",
-            "priority": body.priority, "status": "todo", "due_date": body.due_date,
-            "goal_id": None, "project_id": None, "expected_outcome_id": None, "domain_id": None,
-            "financial_commitment_id": commitment_id,
-            "created_at": now, "updated_at": now,
-        })
-    await _audit(
-        db, current_user["id"], "financial_commitment", commitment_id, "created",
-        source="manual",
-        new_value={"kind": "shared_expense_i_owe", "amount": _money_from_stored(share_stored),
-                   "currency": body.currency, "paid_by": body.other_paid_by, "task_id": task_id,
-                   "allocation_id": alloc_id},
-    )
-    return {"commitment_id": commitment_id, "task_id": task_id}
-
-
-class SharedExpenseIPaid(BaseModel):
-    total_amount: Any
-    currency: str
-    participants: List[str]  # display names — the payer is the current user
-    event_date: str
-    description: Optional[str] = ""
-    prepare_repayment_message: bool = False
-
-
-@advanced_router.post("/shared-expenses/i-paid")
-async def shared_expense_i_paid(body: SharedExpenseIPaid, current_user: dict = Depends(get_current_user)):
-    """User paid a shared expense. Creates one outflow Actual Financial Event
-    for the total and returns per-person expected inflow lines (\u00a717).
-    Does NOT increase cash for owed amounts until repayment is confirmed."""
-    db = get_db()
-    _require_currency(body.currency, "currency")
-    _require_date_str(body.event_date, "event_date")
-    _require(len(body.participants) > 0, "at least one other participant required")
-    total_stored = _money_to_stored(body.total_amount, "total_amount")
-    total_dec = _decimal_from_stored(total_stored)
-    share = (total_dec / (len(body.participants) + 1)).quantize(Decimal("0.01"))
-    # 1. Outflow event for the total the user paid
-    ev_id = _uuid()
-    await db.financial_events.insert_one({
-        "id": ev_id, "user_id": current_user["id"],
-        "amount": total_stored, "currency": body.currency,
-        "direction": "outflow", "event_date": body.event_date,
-        "description": (body.description or "Shared expense").strip(),
-        "source": "manual", "source_reference": None,
-        "confirmation_status": "confirmed",
-        "checkin_id": None, "commitment_id": None,
-        "created_at": _now(),
-    })
-    # 2. Per-participant expected inflow ledger \u2014 stored in expected_incomes
-    #    with classification "expected" and included_in_forecast=false. The user
-    #    must confirm inclusion or mark received.
-    lines = []
-    for name in body.participants:
-        income_id = _uuid()
-        await db.expected_incomes.insert_one({
-            "id": income_id, "user_id": current_user["id"],
-            "title": f"Repayment from {name}",
-            "description": (body.description or "").strip(),
-            "amount": Decimal128(share),
-            "currency": body.currency,
-            "expected_date": body.event_date,
-            "classification": "expected",
-            "included_in_forecast": False,
-            "received": False, "received_event_id": None,
-            "created_at": _now(), "updated_at": _now(),
-        })
-        lines.append({"participant": name, "amount": _quantize_out(share), "expected_income_id": income_id})
-
-    result = {
-        "outflow_event_id": ev_id,
-        "per_participant_amount": _quantize_out(share),
-        "expected_inflow_lines": lines,
-    }
-    if body.prepare_repayment_message:
-        # NEVER auto-send. Return a draft the user can share externally.
-        message = "Hey! Splitting the shared expense:\n" + "\n".join(
-            f"- {l['participant']}: {body.currency} {l['amount']}" for l in lines
-        )
-        result["draft_repayment_message"] = message
-    return result
 
 
 # ============================================================================

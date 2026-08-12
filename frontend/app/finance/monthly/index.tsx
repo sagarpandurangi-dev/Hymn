@@ -4,8 +4,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
-import { colors, radius, spacing } from "@/src/lib/theme";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
+import { FoldAmount, FoldCard, FoldRow, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeSpace, financeType } from "@/src/lib/finance/theme";
 import { currentMonthIso, formatMoney, monthLabel } from "@/src/lib/finance/format";
 
 function addMonth(m: string, delta: number): string {
@@ -35,37 +36,44 @@ export default function MonthlyBrowse() {
   const goto = (m: string) => setMonth(m);
 
   return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}>
-      <FinanceHeader title="Monthly Commitments" subtitle={`${currency}`} />
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader title="Monthly commitments" subtitle={currency} />
       <View style={styles.nav}>
-        <Pressable onPress={() => goto(addMonth(month, -1))} hitSlop={12} testID="month-prev">
-          <Ionicons name="chevron-back" size={22} color={colors.onSurface} />
+        <Pressable onPress={() => goto(addMonth(month, -1))} hitSlop={12} testID="month-prev" style={styles.navBtn}>
+          <Ionicons name="chevron-back" size={18} color={financeColors.ink} />
         </Pressable>
         <Text style={styles.monthLabel}>{monthLabel(month)}</Text>
-        <Pressable onPress={() => goto(addMonth(month, 1))} hitSlop={12} testID="month-next">
-          <Ionicons name="chevron-forward" size={22} color={colors.onSurface} />
+        <Pressable onPress={() => goto(addMonth(month, 1))} hitSlop={12} testID="month-next" style={styles.navBtn}>
+          <Ionicons name="chevron-forward" size={18} color={financeColors.ink} />
         </Pressable>
       </View>
-      {loading ? <ActivityIndicator style={{ marginTop: spacing.xxxl }} /> : (
+      {loading ? <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} /> : (
         <ScrollView contentContainerStyle={styles.scroll}>
-          {[
-            { label: "Recurring Income", val: data?.recurring_income, bucket: "income" },
-            { label: "Recurring Expenses", val: data?.recurring_expenses, bucket: "expense" },
-            { label: "Debt Payments", val: data?.debt_payments, bucket: "debt_payment" },
-            { label: "Savings", val: data?.savings, bucket: "saving" },
-            { label: "Investments", val: data?.investments, bucket: "investment" },
-          ].map((r) => (
-            <Pressable key={r.label} style={styles.row} onPress={() => router.push(`/finance/monthly-drill?currency=${currency}&month=${month}&bucket=${r.bucket}`)} testID={`monthly-${r.bucket}`}>
-              <Text style={styles.rowLabel}>{r.label}</Text>
-              <Text style={styles.rowValue}>{currency} {formatMoney(r.val || "0")}</Text>
-              <Ionicons name="chevron-forward" size={14} color={colors.onSurfaceTertiary} />
-            </Pressable>
-          ))}
-          <View style={styles.freeRow}>
-            <Text style={styles.freeLabel}>Monthly Free Cash</Text>
-            <Text style={styles.freeValue}>{currency} {formatMoney(data?.monthly_free_cash || "0")}</Text>
+          <FoldCard>
+            {[
+              { label: "Recurring income", val: data?.recurring_income, bucket: "income", tone: "positive" as const },
+              { label: "Recurring expenses", val: data?.recurring_expenses, bucket: "expense", tone: "ink" as const },
+              { label: "Debt payments", val: data?.debt_payments, bucket: "debt_payment", tone: "ink" as const },
+              { label: "Savings", val: data?.savings, bucket: "saving", tone: "ink" as const },
+              { label: "Investments", val: data?.investments, bucket: "investment", tone: "ink" as const },
+            ].map((r, idx) => (
+              <FoldRow
+                key={r.label}
+                first={idx === 0}
+                label={r.label}
+                right={<FoldAmount currency={currency} value={formatMoney(r.val || "0")} tone={r.tone} />}
+                onPress={() => router.push(`/finance/monthly-drill?currency=${currency}&month=${month}&bucket=${r.bucket}`)}
+                chevron
+                testID={`monthly-${r.bucket}`}
+              />
+            ))}
+          </FoldCard>
+
+          <View style={styles.freeCash}>
+            <Text style={styles.freeCashLabel}>Free cash</Text>
+            <FoldAmount currency={currency} value={formatMoney(data?.monthly_free_cash || "0")} size="xl" tone="positive" />
           </View>
-          <Text style={styles.footNote}>Free Cash = Income − Expenses − Debt − Savings − Investments</Text>
+          <Text style={styles.formula}>Free cash = income − expenses − debt − savings − investments</Text>
         </ScrollView>
       )}
     </SafeAreaView>
@@ -73,15 +81,26 @@ export default function MonthlyBrowse() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.surface },
-  nav: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: spacing.xl, paddingBottom: spacing.md },
-  monthLabel: { fontSize: 16, fontWeight: "700", color: colors.onSurface },
-  scroll: { padding: spacing.xl, paddingTop: 0, gap: spacing.sm, paddingBottom: spacing.xxxl },
-  row: { flexDirection: "row", alignItems: "center", padding: spacing.md, backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm, gap: spacing.md },
-  rowLabel: { flex: 1, fontSize: 14, color: colors.onSurface, fontWeight: "500" },
-  rowValue: { fontSize: 14, color: colors.onSurface, fontWeight: "700" },
-  freeRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.md, backgroundColor: colors.onSurface, borderRadius: radius.md, marginTop: spacing.md },
-  freeLabel: { fontSize: 14, color: colors.onSurfaceInverse, fontWeight: "600" },
-  freeValue: { fontSize: 18, color: colors.onSurfaceInverse, fontWeight: "700" },
-  footNote: { fontSize: 11, color: colors.onSurfaceTertiary, textAlign: "center", marginTop: spacing.sm, fontStyle: "italic" },
+  nav: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: financeSpace.xl,
+    paddingBottom: financeSpace.md,
+  },
+  navBtn: { width: 34, height: 34, alignItems: "center", justifyContent: "center", borderRadius: 999, backgroundColor: "#FFFFFF", borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  monthLabel: { fontFamily: "Georgia", fontSize: 18, fontWeight: "700", color: financeColors.ink, letterSpacing: -0.2 },
+  scroll: { padding: financeSpace.xl, paddingTop: 0, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
+  freeCash: {
+    marginTop: financeSpace.md,
+    backgroundColor: "#FFFFFF",
+    borderRadius: 10,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: financeColors.cardBorder,
+    padding: financeSpace.lg,
+    alignItems: "center",
+    gap: financeSpace.xs,
+  },
+  freeCashLabel: { ...financeType.sectionLabel } as any,
+  formula: { fontSize: 11.5, color: financeColors.inkMuted, textAlign: "center", fontStyle: "italic", letterSpacing: 0.3 },
 });

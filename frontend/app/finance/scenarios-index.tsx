@@ -4,8 +4,9 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
-import { colors, radius, spacing } from "@/src/lib/theme";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
+import { FoldCard, FoldRow, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
 
 export default function ScenariosIndex() {
   const router = useRouter();
@@ -31,22 +32,46 @@ export default function ScenariosIndex() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}>
-      <FinanceHeader title="Scenarios" subtitle="Sandbox — never touches real data" right={<Pressable onPress={create} hitSlop={12} testID="sc-new"><Ionicons name="add" size={22} color={colors.onSurface} /></Pressable>} />
-      {loading ? <ActivityIndicator style={{ marginTop: spacing.xxxl }} /> : (
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader
+        title="Scenarios"
+        subtitle="Sandbox · never touches real data"
+        right={
+          <Pressable onPress={create} hitSlop={12} testID="sc-new" style={styles.iconBtn}>
+            <Ionicons name="add" size={20} color={financeColors.ink} />
+          </Pressable>
+        }
+      />
+      {loading ? <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} /> : (
         <ScrollView contentContainerStyle={styles.scroll}>
-          {rows.length === 0 && <Text style={styles.empty}>No scenarios yet. Tap + to create one.</Text>}
-          {rows.map((s) => (
-            <View key={s.id} style={styles.row}>
-              <Pressable style={{ flex: 1 }} onPress={() => router.push(`/finance/scenarios-detail?id=${s.id}`)}>
-                <Text style={styles.title}>{s.name}</Text>
-                <Text style={styles.meta}>{s.currency} · updated {s.updated_at?.slice(0, 10)}</Text>
-              </Pressable>
-              <Pressable onPress={() => { setRenameFor(s); setRenameText(s.name); }} hitSlop={12} testID={`sc-rename-${s.id}`}><Ionicons name="pencil-outline" size={16} color={colors.onSurfaceSecondary} /></Pressable>
-              <Pressable onPress={() => duplicate(s.id)} hitSlop={12} testID={`sc-dup-${s.id}`}><Ionicons name="copy-outline" size={16} color={colors.onSurfaceSecondary} /></Pressable>
-              <Pressable onPress={() => remove(s.id)} hitSlop={12} testID={`sc-del-${s.id}`}><Ionicons name="trash-outline" size={16} color={colors.error} /></Pressable>
-            </View>
-          ))}
+          {rows.length === 0 ? (
+            <FoldCard><Text style={styles.empty}>No scenarios yet. Tap + to create one.</Text></FoldCard>
+          ) : (
+            <FoldCard>
+              {rows.map((s, idx) => (
+                <FoldRow
+                  key={s.id}
+                  first={idx === 0}
+                  onPress={() => router.push(`/finance/scenarios-detail?id=${s.id}`)}
+                  label={s.name}
+                  meta={`${s.currency} · updated ${s.updated_at?.slice(0, 10)}`}
+                  right={
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: financeSpace.md }}>
+                      <Pressable onPress={() => { setRenameFor(s); setRenameText(s.name); }} hitSlop={10} testID={`sc-rename-${s.id}`}>
+                        <Ionicons name="pencil-outline" size={15} color={financeColors.inkMuted} />
+                      </Pressable>
+                      <Pressable onPress={() => duplicate(s.id)} hitSlop={10} testID={`sc-dup-${s.id}`}>
+                        <Ionicons name="copy-outline" size={15} color={financeColors.inkMuted} />
+                      </Pressable>
+                      <Pressable onPress={() => remove(s.id)} hitSlop={10} testID={`sc-del-${s.id}`}>
+                        <Ionicons name="trash-outline" size={15} color={financeColors.danger} />
+                      </Pressable>
+                    </View>
+                  }
+                />
+              ))}
+            </FoldCard>
+          )}
         </ScrollView>
       )}
       <Modal visible={!!renameFor} animationType="slide" transparent onRequestClose={() => setRenameFor(null)}>
@@ -63,16 +88,13 @@ export default function ScenariosIndex() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.surface },
-  scroll: { padding: spacing.xl, gap: spacing.sm, paddingBottom: spacing.xxxl },
-  empty: { fontSize: 13, color: colors.onSurfaceSecondary, fontStyle: "italic", padding: spacing.xl, textAlign: "center" },
-  row: { flexDirection: "row", alignItems: "center", gap: spacing.md, padding: spacing.md, backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm },
-  title: { fontSize: 14, color: colors.onSurface, fontWeight: "600" },
-  meta: { fontSize: 11, color: colors.onSurfaceSecondary, marginTop: 2 },
-  sheetWrap: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
-  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, padding: spacing.xl, paddingBottom: spacing.xxxl, gap: spacing.md },
-  sheetTitle: { fontSize: 16, fontWeight: "700", color: colors.onSurface },
-  input: { backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md, fontSize: 15, color: colors.onSurface },
-  primary: { backgroundColor: colors.onSurface, paddingVertical: spacing.md, borderRadius: radius.pill, alignItems: "center" },
-  primaryText: { color: colors.onSurfaceInverse, fontSize: 14, fontWeight: "700" },
+  scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
+  empty: { fontSize: 13, color: financeColors.inkMuted, padding: financeSpace.xl, textAlign: "center", fontStyle: "italic" },
+  iconBtn: { width: 32, height: 32, alignItems: "center", justifyContent: "center" },
+  sheetWrap: { flex: 1, backgroundColor: "rgba(20,20,18,0.4)", justifyContent: "flex-end" },
+  sheetCard: { backgroundColor: financeColors.page, borderTopLeftRadius: financeRadius.lg, borderTopRightRadius: financeRadius.lg, padding: financeSpace.xl, paddingBottom: financeSpace.xxxl, gap: financeSpace.md },
+  sheetTitle: { ...financeType.screenTitle, fontSize: 18 } as any,
+  input: { backgroundColor: "#FFFFFF", borderRadius: financeRadius.sm, paddingHorizontal: financeSpace.lg, paddingVertical: financeSpace.md, fontSize: 15, color: financeColors.ink, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  primary: { backgroundColor: financeColors.ink, paddingVertical: financeSpace.md, borderRadius: financeRadius.pill, alignItems: "center" },
+  primaryText: { color: "#FBFBF6", fontSize: 13, fontWeight: "700", letterSpacing: 0.4 },
 });

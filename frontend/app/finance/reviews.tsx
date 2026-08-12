@@ -3,8 +3,9 @@ import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
-import { colors, radius, spacing } from "@/src/lib/theme";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
+import { FoldAmount, FoldCard, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
 import { dateLabel, formatMoney } from "@/src/lib/finance/format";
 
 export default function ReviewsScreen() {
@@ -25,22 +26,32 @@ export default function ReviewsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}>
-      <FinanceHeader title="Reviews" subtitle="Every 15 days for Reserved commitments" />
-      {loading ? <ActivityIndicator style={{ marginTop: spacing.xxxl }} /> : (
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader title="Reviews" subtitle="Every 15 days · reserved commitments" />
+      {loading ? <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} /> : (
         <ScrollView contentContainerStyle={styles.scroll}>
-          {rows.length === 0 && <Text style={styles.empty}>Nothing due right now.</Text>}
-          {rows.map((c) => (
-            <View key={c.id} style={styles.card}>
-              <Text style={styles.title}>{c.title}</Text>
-              <Text style={styles.meta}>{c.currency} {formatMoney(c.amount)} · due {dateLabel(c.due_date)}</Text>
-              <Text style={styles.body}>Is this Financial Commitment still expected to happen?</Text>
-              <View style={styles.actions}>
-                <Pressable style={styles.primary} onPress={() => keep(c.id)} testID={`rv-keep-${c.id}`}><Text style={styles.primaryText}>Yes, keep reserved</Text></Pressable>
-                <Pressable style={styles.secondary} onPress={() => router.push(`/finance/commitments/${c.id}`)} testID={`rv-open-${c.id}`}><Text style={styles.secondaryText}>Complete / Cancel / Postpone</Text></Pressable>
-              </View>
-            </View>
-          ))}
+          {rows.length === 0 ? (
+            <FoldCard><Text style={styles.empty}>Nothing due right now.</Text></FoldCard>
+          ) : (
+            rows.map((c) => (
+              <FoldCard key={c.id} style={styles.card}>
+                <View style={styles.head}>
+                  <Text style={styles.title} numberOfLines={2}>{c.title}</Text>
+                  <FoldAmount currency={c.currency} value={formatMoney(c.amount)} size="md" />
+                </View>
+                <Text style={styles.meta}>Due {dateLabel(c.due_date)}</Text>
+                <Text style={styles.body}>Is this financial commitment still expected to happen?</Text>
+                <View style={styles.actions}>
+                  <Pressable style={styles.primary} onPress={() => keep(c.id)} testID={`rv-keep-${c.id}`}>
+                    <Text style={styles.primaryText}>Keep reserved</Text>
+                  </Pressable>
+                  <Pressable style={styles.secondary} onPress={() => router.push(`/finance/commitments/${c.id}`)} testID={`rv-open-${c.id}`}>
+                    <Text style={styles.secondaryText}>Complete / Cancel / Postpone</Text>
+                  </Pressable>
+                </View>
+              </FoldCard>
+            ))
+          )}
         </ScrollView>
       )}
     </SafeAreaView>
@@ -48,16 +59,16 @@ export default function ReviewsScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.surface },
-  scroll: { padding: spacing.xl, gap: spacing.md, paddingBottom: spacing.xxxl },
-  empty: { fontSize: 13, color: colors.onSurfaceSecondary, fontStyle: "italic", padding: spacing.xl, textAlign: "center" },
-  card: { padding: spacing.lg, backgroundColor: colors.surfaceSecondary, borderRadius: radius.md, gap: spacing.xs },
-  title: { fontSize: 15, color: colors.onSurface, fontWeight: "700" },
-  meta: { fontSize: 12, color: colors.onSurfaceSecondary },
-  body: { fontSize: 13, color: colors.onSurface, marginTop: spacing.sm },
-  actions: { flexDirection: "row", gap: spacing.sm, marginTop: spacing.sm, flexWrap: "wrap" },
-  primary: { backgroundColor: colors.onSurface, paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill },
-  primaryText: { color: colors.onSurfaceInverse, fontSize: 13, fontWeight: "700" },
-  secondary: { paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border },
-  secondaryText: { color: colors.onSurface, fontSize: 13, fontWeight: "600" },
+  scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
+  empty: { fontSize: 13, color: financeColors.inkMuted, padding: financeSpace.xl, textAlign: "center", fontStyle: "italic" },
+  card: { padding: financeSpace.lg, gap: financeSpace.xs },
+  head: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: financeSpace.md },
+  title: { ...financeType.rowLabel, fontSize: 15, fontWeight: "700", flex: 1 } as any,
+  meta: { fontSize: 12, color: financeColors.inkMuted, marginTop: 2 },
+  body: { ...financeType.body, marginTop: financeSpace.sm } as any,
+  actions: { flexDirection: "row", flexWrap: "wrap", gap: financeSpace.sm, marginTop: financeSpace.md },
+  primary: { backgroundColor: financeColors.ink, paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill },
+  primaryText: { color: "#FBFBF6", fontSize: 12.5, fontWeight: "700", letterSpacing: 0.4 },
+  secondary: { paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  secondaryText: { color: financeColors.ink, fontSize: 12.5, fontWeight: "600", letterSpacing: 0.3 },
 });

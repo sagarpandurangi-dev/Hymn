@@ -1307,10 +1307,10 @@ async def _reserved_totals(db, user_id: str) -> dict:
     return out
 
 
-@finance_router.get("/reserved")
-async def get_reserved(current_user: dict = Depends(get_current_user)):
-    db = get_db()
-    return {"by_currency": await _reserved_totals(db, current_user["id"])}
+# NOTE: `GET /finance/reserved` (dead route) removed per finance audit — the
+# same data ships in `GET /finance/dashboard`. The `_reserved_totals` helper
+# above is still used internally by the dashboard and available-liquidity
+# computations and MUST stay.
 
 
 # ============================================================================
@@ -1357,10 +1357,9 @@ async def _available_liquidity(db, user_id: str) -> list:
     return out
 
 
-@finance_router.get("/available-liquidity")
-async def get_available_liquidity(current_user: dict = Depends(get_current_user)):
-    db = get_db()
-    return {"by_currency": await _available_liquidity(db, current_user["id"])}
+# NOTE: `GET /finance/available-liquidity` (dead route) removed per finance
+# audit — the same data ships in `GET /finance/dashboard`. The
+# `_available_liquidity` helper stays because it is invoked by the dashboard.
 
 
 # ============================================================================
@@ -1470,52 +1469,12 @@ async def get_forecast(current_user: dict = Depends(get_current_user)):
 
 
 # ============================================================================
-# Scenarios (light — apply one hypothetical delta and re-run forecast math)
+# NOTE: `POST /finance/scenarios` (in-place one-shot scenario) removed per
+# finance audit. Superseded by the persistent scenario flow in
+# `finance_advanced.py`: `POST /finance/scenarios/save`,
+# `PUT /finance/scenarios/detail/{id}`,
+# `POST /finance/scenarios/detail/{id}/evaluate`.
 # ============================================================================
-
-class ScenarioPayload(BaseModel):
-    currency: str
-    # Optional lever knobs — all default no-op.
-    additional_monthly_expense: Optional[Any] = None
-    additional_monthly_income: Optional[Any] = None
-    additional_reservation: Optional[Any] = None
-    reservation_due_month: Optional[str] = None
-
-
-@finance_router.post("/scenarios")
-async def evaluate_scenario(
-    body: ScenarioPayload, current_user: dict = Depends(get_current_user),
-):
-    db = get_db()
-    _require_currency(body.currency, "currency")
-    base = await _forecast_12_months(db, current_user["id"])
-    target = next((x for x in base["by_currency"] if x["currency"] == body.currency), None)
-    if not target:
-        return {"currency": body.currency, "confidence": "high", "months": [], "diff": []}
-    extra_exp = _decimal_from_stored(body.additional_monthly_expense or 0)
-    extra_inc = _decimal_from_stored(body.additional_monthly_income or 0)
-    extra_res = _decimal_from_stored(body.additional_reservation or 0)
-    res_month = body.reservation_due_month
-
-    rolling_delta_liquid = Decimal(0)
-    rolling_delta_nw = Decimal(0)
-    rows = []
-    for m in target["months"]:
-        month_income_delta = extra_inc
-        month_outflow_delta = extra_exp
-        month_res_delta = extra_res if (res_month and m["month"] == res_month) else Decimal(0)
-        rolling_delta_liquid += month_income_delta - month_outflow_delta - month_res_delta
-        rolling_delta_nw += month_income_delta - month_outflow_delta
-        rows.append({
-            "month": m["month"],
-            "original_projected_liquid": m["projected_liquid_end_of_month"],
-            "scenario_projected_liquid": _quantize_out(
-                _decimal_from_stored(m["projected_liquid_end_of_month"]) + rolling_delta_liquid),
-            "original_projected_net_worth": m["projected_net_worth_end_of_month"],
-            "scenario_projected_net_worth": _quantize_out(
-                _decimal_from_stored(m["projected_net_worth_end_of_month"]) + rolling_delta_nw),
-        })
-    return {"currency": body.currency, "months": rows}
 
 
 # ============================================================================

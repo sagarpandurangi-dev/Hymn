@@ -297,11 +297,7 @@ export const api = {
   getFinancePosition: () => request<any>("/finance/position", { auth: true }),
   getFinanceMonthly: (month: string, currency: string) =>
     request<any>(`/finance/monthly?month=${encodeURIComponent(month)}&currency=${encodeURIComponent(currency)}`, { auth: true }),
-  getFinanceReserved: () => request<any>("/finance/reserved", { auth: true }),
-  getFinanceAvailableLiquidity: () => request<any>("/finance/available-liquidity", { auth: true }),
   getFinanceForecast: () => request<any>("/finance/forecast", { auth: true }),
-  runFinanceScenario: (payload: { currency: string; additional_monthly_expense?: string | number; additional_monthly_income?: string | number; additional_reservation?: string | number; reservation_due_month?: string }) =>
-    request<any>("/finance/scenarios", { method: "POST", body: payload, auth: true }),
 
   listFinancialCommitments: (params?: { state?: string; currency?: string; include_terminal?: boolean }) => {
     const parts: string[] = [];
@@ -381,7 +377,6 @@ export const api = {
   runDecisionAssessment: (payload: { amount: string | number; currency: string; due_date: string; priority: string }) =>
     request<any>("/finance/decision-assessment", { method: "POST", body: payload, auth: true }),
   recordOverride: (payload: any) => request<any>("/finance/overrides", { method: "POST", body: payload, auth: true }),
-  listOverrides: () => request<any[]>("/finance/overrides", { auth: true }),
 
   rebalanceCandidates: (currency: string, exclude_id?: string) =>
     request<any[]>(`/finance/rebalance-candidates?currency=${encodeURIComponent(currency)}${exclude_id ? `&exclude_id=${encodeURIComponent(exclude_id)}` : ""}`, { auth: true }),
@@ -398,11 +393,6 @@ export const api = {
     request<{ detail: string }>(`/finance/scenarios/detail/${id}`, { method: "DELETE", auth: true }),
   evaluateScenario: (id: string) =>
     request<any>(`/finance/scenarios/detail/${id}/evaluate`, { method: "POST", auth: true }),
-
-  sharedExpenseIOwe: (payload: { total_amount: string | number; currency: string; other_paid_by: string; my_share: string | number; description?: string; due_date: string; priority?: string; create_task?: boolean }) =>
-    request<any>("/finance/shared-expenses/i-owe", { method: "POST", body: payload, auth: true }),
-  sharedExpenseIPaid: (payload: { total_amount: string | number; currency: string; participants: string[]; event_date: string; description?: string; prepare_repayment_message?: boolean }) =>
-    request<any>("/finance/shared-expenses/i-paid", { method: "POST", body: payload, auth: true }),
 
   // -- Planning Engine (Conversational) --
   planningGetConversation: (target_type: "goal" | "project", target_id: string) =>

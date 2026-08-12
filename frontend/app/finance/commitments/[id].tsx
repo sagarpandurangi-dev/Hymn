@@ -4,12 +4,20 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
-import { colors, radius, spacing } from "@/src/lib/theme";
 import DateTimeField from "@/src/components/DateTimeField";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
-import { dateLabel, formatMoney, stateColor, stateLabel } from "@/src/lib/finance/format";
+import { FoldAmount, FoldCard, FoldHero, FoldPill, FoldRow, FoldSectionHeader, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
+import { dateLabel, formatMoney } from "@/src/lib/finance/format";
 
 type Action = "complete" | "cancel" | "postpone" | "keep-active" | null;
+
+const STATE_TONE: Record<string, "neutral" | "info" | "ok" | "err" | "warn"> = {
+  draft: "neutral", reserved: "info", completed: "ok", cancelled: "neutral", expired: "err",
+};
+const STATE_LABEL: Record<string, string> = {
+  draft: "Draft", reserved: "Reserved", completed: "Completed", cancelled: "Cancelled", expired: "Expired",
+};
 
 export default function CommitmentDetail() {
   const router = useRouter();
@@ -52,9 +60,7 @@ export default function CommitmentDetail() {
       } else if (a === "keep-active") {
         await api.keepActiveFinancialCommitment(c.id);
       }
-      setAction(null);
-      setActualAmount("");
-      setNewDue("");
+      setAction(null); setActualAmount(""); setNewDue("");
       await load();
     } catch (e: any) {
       Alert.alert("Action failed", e?.message || "");
@@ -69,7 +75,10 @@ export default function CommitmentDetail() {
   };
 
   if (loading || !c) return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}><FinanceHeader title="Financial Commitment" /><ActivityIndicator style={{ marginTop: spacing.xxxl }} /></SafeAreaView>
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader title="Commitment" />
+      <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} />
+    </SafeAreaView>
   );
 
   const canComplete = c.state === "reserved" || c.state === "expired";
@@ -79,57 +88,72 @@ export default function CommitmentDetail() {
   const canKeepActive = c.state === "expired";
 
   return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}>
-      <FinanceHeader title="Financial Commitment" subtitle={c.title} />
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader title="Commitment" subtitle={c.title} />
       <ScrollView contentContainerStyle={styles.scroll}>
-        <View style={styles.headerCard}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-            <View style={[styles.chip, { backgroundColor: stateColor(c.state) }]}><Text style={styles.chipText}>{stateLabel(c.state)}</Text></View>
-            {c.is_overdue && <View style={[styles.chip, { backgroundColor: colors.error }]}><Text style={styles.chipText}>OVERDUE</Text></View>}
-          </View>
-          <Text style={styles.title}>{c.title}</Text>
-          {c.description ? <Text style={styles.desc}>{c.description}</Text> : null}
-          <Text style={styles.big}>{c.currency} {formatMoney(c.amount)}</Text>
-          <Text style={styles.meta}>Due {dateLabel(c.due_date)} · priority {c.priority}</Text>
-          {c.original_due_date !== c.due_date && <Text style={styles.meta}>Original due: {dateLabel(c.original_due_date)} · postponed {c.postpone_count}x</Text>}
-          {c.task_id && (
-            <Pressable style={styles.linkRow} onPress={() => router.push(`/tasks/${c.task_id}`)}>
-              <Ionicons name="link-outline" size={14} color={colors.brandPrimary} />
-              <Text style={styles.linkText}>View linked task</Text>
-            </Pressable>
-          )}
+        <View style={styles.pillRow}>
+          <FoldPill label={STATE_LABEL[c.state] || c.state} tone={STATE_TONE[c.state] || "neutral"} />
+          {c.is_overdue ? <FoldPill label="Overdue" tone="err" /> : null}
         </View>
 
-        {c.state === "completed" && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Completion</Text>
-            <Row label="Actual amount" val={`${c.currency} ${formatMoney(c.actual_amount)}`} />
-            <Row label="Variance" val={`${c.currency} ${formatMoney(c.variance)}`} />
-            <Row label="Unused reservation returned" val={`${c.currency} ${formatMoney(c.unused_reservation)}`} />
-            <Row label="Overrun" val={`${c.currency} ${formatMoney(c.overrun_amount)}`} />
-            <Row label="Completed at" val={c.completed_at?.slice(0, 10) || ""} />
+        <Text style={styles.title}>{c.title}</Text>
+        {c.description ? <Text style={styles.desc}>{c.description}</Text> : null}
+
+        <FoldHero currency={c.currency} amount={formatMoney(c.amount)} size="xl" caption={`Due ${dateLabel(c.due_date)} · ${c.priority} priority`} />
+        {c.original_due_date && c.original_due_date !== c.due_date ? (
+          <Text style={styles.meta}>Original due {dateLabel(c.original_due_date)} · postponed {c.postpone_count}×</Text>
+        ) : null}
+
+        {c.task_id ? (
+          <FoldCard>
+            <Pressable style={styles.linkRow} onPress={() => router.push(`/tasks/${c.task_id}`)}>
+              <Ionicons name="link-outline" size={14} color={financeColors.accent} />
+              <Text style={styles.linkText}>View linked task</Text>
+              <Ionicons name="chevron-forward" size={14} color={financeColors.inkFaint} style={{ marginLeft: "auto" }} />
+            </Pressable>
+          </FoldCard>
+        ) : null}
+
+        {c.state === "completed" ? (
+          <View>
+            <FoldSectionHeader label="Completion" />
+            <FoldCard>
+              <FoldRow first label="Actual amount" right={<FoldAmount currency={c.currency} value={formatMoney(c.actual_amount)} />} />
+              <FoldRow label="Variance" right={<FoldAmount currency={c.currency} value={formatMoney(c.variance)} />} />
+              <FoldRow label="Unused reservation returned" right={<FoldAmount currency={c.currency} value={formatMoney(c.unused_reservation)} tone="positive" />} />
+              <FoldRow label="Overrun" right={<FoldAmount currency={c.currency} value={formatMoney(c.overrun_amount)} tone={c.overrun_amount && Number(c.overrun_amount) > 0 ? "negative" : "muted"} />} />
+              <FoldRow label="Completed at" right={<Text style={financeType.amount as any}>{c.completed_at?.slice(0, 10) || ""}</Text>} />
+            </FoldCard>
           </View>
-        )}
+        ) : null}
 
         <View style={styles.actionsRow}>
-          {canReserve && <Pressable style={styles.primary} disabled={busy} onPress={reserve} testID="fc-reserve"><Text style={styles.primaryText}>Reserve now</Text></Pressable>}
-          {canComplete && <Pressable style={styles.primary} disabled={busy} onPress={() => setAction("complete")} testID="fc-complete-open"><Text style={styles.primaryText}>Complete</Text></Pressable>}
-          {canPostpone && <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("postpone")} testID="fc-postpone-open"><Text style={styles.secondaryText}>Postpone</Text></Pressable>}
-          {canKeepActive && <Pressable style={styles.secondary} disabled={busy} onPress={() => run("keep-active")} testID="fc-keep-active"><Text style={styles.secondaryText}>Keep active</Text></Pressable>}
-          {canCancel && <Pressable style={styles.danger} disabled={busy} onPress={() => setAction("cancel")} testID="fc-cancel-open"><Text style={styles.dangerText}>Cancel</Text></Pressable>}
+          {canReserve ? <Pressable style={styles.primary} disabled={busy} onPress={reserve} testID="fc-reserve"><Text style={styles.primaryText}>Reserve now</Text></Pressable> : null}
+          {canComplete ? <Pressable style={styles.primary} disabled={busy} onPress={() => setAction("complete")} testID="fc-complete-open"><Text style={styles.primaryText}>Complete</Text></Pressable> : null}
+          {canPostpone ? <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("postpone")} testID="fc-postpone-open"><Text style={styles.secondaryText}>Postpone</Text></Pressable> : null}
+          {canKeepActive ? <Pressable style={styles.secondary} disabled={busy} onPress={() => run("keep-active")} testID="fc-keep-active"><Text style={styles.secondaryText}>Keep active</Text></Pressable> : null}
+          {canCancel ? <Pressable style={styles.danger} disabled={busy} onPress={() => setAction("cancel")} testID="fc-cancel-open"><Text style={styles.dangerText}>Cancel</Text></Pressable> : null}
         </View>
 
-        <View style={styles.section}>
-          <Pressable onPress={() => router.push(`/finance/audit/financial_commitment/${c.id}`)}>
-            <Text style={styles.sectionTitle}>Audit trail · tap for full history</Text>
-          </Pressable>
-          {audit.slice(0, 6).map((e) => (
-            <View key={e.id} style={styles.auditRow}>
-              <Text style={styles.auditAction}>{e.action}</Text>
-              <Text style={styles.auditMeta}>{e.timestamp?.slice(0, 16).replace("T", " ")} · {e.source}</Text>
-            </View>
-          ))}
-          {audit.length === 0 && <Text style={styles.empty}>No history yet.</Text>}
+        <View>
+          <FoldSectionHeader
+            label="Audit trail"
+            action={{ label: "Full history", onPress: () => router.push(`/finance/audit/financial_commitment/${c.id}`) }}
+          />
+          {audit.length === 0 ? (
+            <FoldCard><Text style={styles.empty}>No history yet.</Text></FoldCard>
+          ) : (
+            <FoldCard>
+              {audit.slice(0, 6).map((e, idx) => (
+                <FoldRow
+                  key={e.id}
+                  first={idx === 0}
+                  label={e.action}
+                  meta={`${e.timestamp?.slice(0, 16).replace("T", " ")} · ${e.source}`}
+                />
+              ))}
+            </FoldCard>
+          )}
         </View>
       </ScrollView>
 
@@ -138,30 +162,36 @@ export default function CommitmentDetail() {
           <View style={styles.sheetCard}>
             <View style={styles.sheetHead}>
               <Text style={styles.sheetTitle}>{action === "complete" ? "Complete" : action === "cancel" ? "Cancel" : action === "postpone" ? "Postpone" : ""}</Text>
-              <Pressable onPress={() => setAction(null)} hitSlop={12}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
+              <Pressable onPress={() => setAction(null)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
-            {action === "complete" && (
+            {action === "complete" ? (
               <>
-                <Text style={styles.sheetBody}>Completing records the actual spend, consumes the amount spent, releases any unused reserved money to the available pool, recalculates your forecasts and preserves full history.</Text>
-                <Text style={styles.label}>Actual amount ({c.currency})</Text>
-                <TextInput value={actualAmount} onChangeText={setActualAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.onSurfaceTertiary} style={styles.input} testID="fc-actual-amount" />
-                <Pressable style={[styles.primary, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("complete")} testID="fc-complete-submit"><Text style={styles.primaryText}>Confirm completion</Text></Pressable>
+                <Text style={styles.sheetBody}>Completing records the actual spend, consumes the amount spent, releases any unused reserved money to the available pool, recalculates forecasts and preserves full history.</Text>
+                <Text style={styles.label}>ACTUAL AMOUNT ({c.currency})</Text>
+                <TextInput value={actualAmount} onChangeText={setActualAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} style={styles.input} testID="fc-actual-amount" />
+                <Pressable style={[styles.primary, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("complete")} testID="fc-complete-submit">
+                  <Text style={styles.primaryText}>Confirm completion</Text>
+                </Pressable>
               </>
-            )}
-            {action === "cancel" && (
+            ) : null}
+            {action === "cancel" ? (
               <>
                 <Text style={styles.sheetBody}>Cancelling releases the full reservation and returns it to the available pool. Future forecast impact will be removed. History remains. The linked task, if any, stays active — cancel it separately if needed.</Text>
-                <Pressable style={[styles.danger, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("cancel")} testID="fc-cancel-submit"><Text style={styles.dangerText}>Confirm cancel</Text></Pressable>
+                <Pressable style={[styles.danger, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("cancel")} testID="fc-cancel-submit">
+                  <Text style={styles.dangerText}>Confirm cancel</Text>
+                </Pressable>
               </>
-            )}
-            {action === "postpone" && (
+            ) : null}
+            {action === "postpone" ? (
               <>
                 <Text style={styles.sheetBody}>Postponing keeps the reservation and moves the due date. Affected forecast months will be recalculated. The original due date remains in the audit trail.</Text>
-                <Text style={styles.label}>New due date</Text>
+                <Text style={styles.label}>NEW DUE DATE</Text>
                 <DateTimeField mode="date" value={newDue} onChange={setNewDue} testID="fc-postpone-date" />
-                <Pressable style={[styles.primary, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("postpone")} testID="fc-postpone-submit"><Text style={styles.primaryText}>Confirm postpone</Text></Pressable>
+                <Pressable style={[styles.primary, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("postpone")} testID="fc-postpone-submit">
+                  <Text style={styles.primaryText}>Confirm postpone</Text>
+                </Pressable>
               </>
-            )}
+            ) : null}
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -169,43 +199,27 @@ export default function CommitmentDetail() {
   );
 }
 
-function Row({ label, val }: { label: string; val: string }) {
-  return <View style={styles.row}><Text style={styles.rowLabel}>{label}</Text><Text style={styles.rowValue}>{val}</Text></View>;
-}
-
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.surface },
-  scroll: { padding: spacing.xl, gap: spacing.lg, paddingBottom: spacing.xxxl },
-  headerCard: { padding: spacing.lg, backgroundColor: colors.surfaceSecondary, borderRadius: radius.md, gap: spacing.xs },
-  title: { fontSize: 20, color: colors.onSurface, fontWeight: "700" },
-  desc: { fontSize: 13, color: colors.onSurfaceSecondary },
-  big: { fontSize: 28, color: colors.onSurface, fontWeight: "700", marginTop: spacing.md },
-  meta: { fontSize: 12, color: colors.onSurfaceSecondary },
-  chip: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: radius.pill, alignSelf: "flex-start", marginRight: 4 },
-  chipText: { fontSize: 10, color: "#fff", fontWeight: "700", letterSpacing: 0.5 },
-  linkRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: spacing.sm },
-  linkText: { color: colors.brandPrimary, fontSize: 13, fontWeight: "600" },
-  section: { gap: spacing.xs, backgroundColor: colors.surfaceSecondary, padding: spacing.md, borderRadius: radius.md },
-  sectionTitle: { fontSize: 12, color: colors.onSurfaceSecondary, letterSpacing: 0.5, marginBottom: spacing.xs },
-  row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: spacing.xs },
-  rowLabel: { fontSize: 13, color: colors.onSurface },
-  rowValue: { fontSize: 14, color: colors.onSurface, fontWeight: "700" },
-  auditRow: { paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },
-  auditAction: { fontSize: 13, color: colors.onSurface, fontWeight: "600" },
-  auditMeta: { fontSize: 11, color: colors.onSurfaceSecondary, marginTop: 2 },
-  empty: { fontSize: 12, color: colors.onSurfaceSecondary, fontStyle: "italic" },
-  actionsRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
-  primary: { backgroundColor: colors.onSurface, paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, alignItems: "center" },
-  primaryText: { color: colors.onSurfaceInverse, fontSize: 14, fontWeight: "700" },
-  secondary: { paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, alignItems: "center" },
-  secondaryText: { color: colors.onSurface, fontSize: 14, fontWeight: "600" },
-  danger: { paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.error, alignItems: "center" },
-  dangerText: { color: colors.error, fontSize: 14, fontWeight: "700" },
-  sheetWrap: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
-  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, padding: spacing.xl, paddingBottom: spacing.xxxl, gap: spacing.md },
+  scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
+  pillRow: { flexDirection: "row", gap: 6, flexWrap: "wrap" },
+  title: { ...financeType.screenTitle, fontSize: 22 } as any,
+  desc: { fontSize: 13, color: financeColors.inkMuted, lineHeight: 19 },
+  meta: { fontSize: 11.5, color: financeColors.inkMuted, letterSpacing: 0.3 },
+  linkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: financeSpace.lg, paddingVertical: 14, backgroundColor: "#FFFFFF" },
+  linkText: { ...financeType.body, color: financeColors.accent, fontWeight: "600" } as any,
+  actionsRow: { flexDirection: "row", flexWrap: "wrap", gap: financeSpace.sm, marginTop: financeSpace.xs },
+  primary: { backgroundColor: financeColors.ink, paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill },
+  primaryText: { color: "#FBFBF6", fontSize: 13, fontWeight: "700", letterSpacing: 0.4 },
+  secondary: { paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  secondaryText: { color: financeColors.ink, fontSize: 13, fontWeight: "600" },
+  danger: { paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.danger },
+  dangerText: { color: financeColors.danger, fontSize: 13, fontWeight: "700" },
+  empty: { fontSize: 12.5, color: financeColors.inkMuted, padding: financeSpace.lg, textAlign: "center", fontStyle: "italic" },
+  sheetWrap: { flex: 1, backgroundColor: "rgba(20,20,18,0.4)", justifyContent: "flex-end" },
+  sheetCard: { backgroundColor: financeColors.page, borderTopLeftRadius: financeRadius.lg, borderTopRightRadius: financeRadius.lg, padding: financeSpace.xl, paddingBottom: financeSpace.xxxl, gap: financeSpace.md },
   sheetHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  sheetTitle: { fontSize: 16, fontWeight: "700", color: colors.onSurface },
-  sheetBody: { fontSize: 13, color: colors.onSurfaceSecondary, lineHeight: 18 },
-  label: { fontSize: 12, color: colors.onSurfaceSecondary, letterSpacing: 0.5 },
-  input: { backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md, fontSize: 15, color: colors.onSurface },
+  sheetTitle: { ...financeType.screenTitle, fontSize: 18 } as any,
+  sheetBody: { ...financeType.body, color: financeColors.inkMuted } as any,
+  label: { ...financeType.sectionLabel } as any,
+  input: { backgroundColor: "#FFFFFF", borderRadius: financeRadius.sm, paddingHorizontal: financeSpace.lg, paddingVertical: financeSpace.md, fontSize: 15, color: financeColors.ink, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
 });

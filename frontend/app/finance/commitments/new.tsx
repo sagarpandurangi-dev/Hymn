@@ -4,18 +4,25 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
-import { colors, radius, spacing } from "@/src/lib/theme";
 import DateTimeField from "@/src/components/DateTimeField";
 import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
 import { CURRENCY_LABEL } from "@/src/lib/portfolio/constants";
+import { FoldAmount, FoldCard, FoldPill, FoldRow, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
 import { dateLabel, formatMoney, stateLabel } from "@/src/lib/finance/format";
 
 const PRIORITIES = ["low", "medium", "high", "critical"];
 
+const CLASSIFICATION_TONE: Record<string, "ok" | "warn" | "err"> = {
+  safe: "ok",
+  warning: "warn",
+  severe: "err",
+};
+
 /**
- * Wizard: collect fields → server-side decision assessment (§23) → user
- * chooses Edit / Rebalance / Proceed → reservation (§7) or override log (§24).
+ * Wizard: fields → server-side decision assessment (§23) →
+ * Edit / Rebalance / Proceed → reservation (§7) or override log (§24).
  */
 export default function NewCommitment() {
   const router = useRouter();
@@ -66,7 +73,6 @@ export default function NewCommitment() {
     if (err) { setError(err); return; }
     setSaving(true);
     try {
-      // 1) Create commitment as draft
       const created = await api.createFinancialCommitment({
         title: title.trim(), description: description.trim(),
         amount, currency, due_date: dueDate, priority,
@@ -74,7 +80,6 @@ export default function NewCommitment() {
         task_due_date: createTask ? (taskDue || undefined) : undefined,
       });
       setCreatedId(created.id);
-      // 2) Run backend decision assessment
       const ass = await api.runDecisionAssessment({ amount, currency, due_date: dueDate, priority });
       setAssessment(ass);
       setAssessOpen(true);
@@ -126,7 +131,6 @@ export default function NewCommitment() {
   };
 
   const applyRebalance = async () => {
-    // Apply user-selected actions manually per §25 — never auto.
     setSaving(true);
     try {
       for (const row of rebalanceRows) {
@@ -134,14 +138,12 @@ export default function NewCommitment() {
         if (action === "cancel") {
           await api.cancelFinancialCommitment(row.id);
         } else if (action === "postpone") {
-          // Postpone by 30 days as a safe default the user can further adjust in commitment detail.
           const d = new Date();
           d.setDate(d.getDate() + 30);
           const iso = d.toISOString().slice(0, 10);
           await api.postponeFinancialCommitment(row.id, iso);
         }
       }
-      // Re-run the assessment with the new state.
       const ass = await api.runDecisionAssessment({ amount, currency, due_date: dueDate, priority });
       setAssessment(ass);
       setRebalanceOpen(false);
@@ -153,53 +155,57 @@ export default function NewCommitment() {
     if (createdId) router.replace(`/finance/commitments/${createdId}`);
   };
 
-  const badgeStyle = (c: string) => c === "safe" ? { backgroundColor: colors.success } : c === "warning" ? { backgroundColor: "#e57c00" } : { backgroundColor: colors.error };
-  const badgeLabel = (c: string) => c === "safe" ? "Safe" : c === "warning" ? "Warning" : "Severe risk";
+  const classificationLabel = (c: string) => c === "safe" ? "Safe" : c === "warning" ? "Warning" : "Severe risk";
 
   return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}>
-      <FinanceHeader title="New Financial Commitment" subtitle="Reserved money for a future decision" />
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader title="New commitment" subtitle="Reserved money for a future decision" />
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          <Text style={styles.label}>Title</Text>
-          <TextInput value={title} onChangeText={setTitle} placeholder="e.g. Laptop upgrade" placeholderTextColor={colors.onSurfaceTertiary} style={styles.input} testID="fc-title" />
-          <Text style={styles.label}>Description (optional)</Text>
-          <TextInput value={description} onChangeText={setDescription} multiline style={[styles.input, { minHeight: 60 }]} testID="fc-desc" />
-          <View style={{ flexDirection: "row", gap: spacing.md }}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.label}>Amount</Text>
-              <TextInput value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.onSurfaceTertiary} style={styles.input} testID="fc-amount" />
+          <FoldCard style={styles.formCard}>
+            <Text style={styles.label}>TITLE</Text>
+            <TextInput value={title} onChangeText={setTitle} placeholder="e.g. Laptop upgrade" placeholderTextColor={financeColors.inkFaint} style={styles.input} testID="fc-title" />
+            <Text style={styles.label}>DESCRIPTION (OPTIONAL)</Text>
+            <TextInput value={description} onChangeText={setDescription} multiline style={[styles.input, { minHeight: 60 }]} testID="fc-desc" />
+            <View style={{ flexDirection: "row", gap: financeSpace.md }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>AMOUNT</Text>
+                <TextInput value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} style={styles.input} testID="fc-amount" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>CURRENCY</Text>
+                <Pressable style={styles.input} onPress={() => setPickerOpen(true)} testID="fc-currency">
+                  <Text style={{ color: financeColors.ink }}>{CURRENCY_LABEL(currency)}</Text>
+                </Pressable>
+              </View>
             </View>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.label}>Currency</Text>
-              <Pressable style={styles.input} onPress={() => setPickerOpen(true)} testID="fc-currency"><Text style={{ color: colors.onSurface }}>{CURRENCY_LABEL(currency)}</Text></Pressable>
+            <Text style={styles.label}>DUE DATE</Text>
+            <DateTimeField mode="date" value={dueDate} onChange={setDueDate} testID="fc-due" />
+            <Text style={styles.label}>PRIORITY</Text>
+            <View style={styles.chipRow}>
+              {PRIORITIES.map((p) => (
+                <Pressable key={p} style={[styles.chip, priority === p && styles.chipSel]} onPress={() => setPriority(p)} testID={`fc-priority-${p}`}>
+                  <Text style={[styles.chipText, priority === p && styles.chipTextSel]}>{p}</Text>
+                </Pressable>
+              ))}
             </View>
-          </View>
-          <Text style={styles.label}>Due date</Text>
-          <DateTimeField mode="date" value={dueDate} onChange={setDueDate} testID="fc-due" />
-          <Text style={styles.label}>Priority</Text>
-          <View style={styles.chipRow}>
-            {PRIORITIES.map((p) => (
-              <Pressable key={p} style={[styles.chip, priority === p && styles.chipSel]} onPress={() => setPriority(p)} testID={`fc-priority-${p}`}>
-                <Text style={[styles.chipText, priority === p && styles.chipTextSel]}>{p}</Text>
-              </Pressable>
-            ))}
-          </View>
-          <View style={styles.switchRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.label}>Create linked task</Text>
-              <Text style={styles.help}>Tracks the work; the reservation stays independent.</Text>
+            <View style={styles.switchRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>CREATE LINKED TASK</Text>
+                <Text style={styles.help}>Tracks the work; the reservation stays independent.</Text>
+              </View>
+              <Switch value={createTask} onValueChange={setCreateTask} testID="fc-create-task" />
             </View>
-            <Switch value={createTask} onValueChange={setCreateTask} testID="fc-create-task" />
-          </View>
-          {createTask && (
-            <>
-              <Text style={styles.label}>Task title</Text>
-              <TextInput value={taskTitle} onChangeText={setTaskTitle} style={styles.input} testID="fc-task-title" />
-              <Text style={styles.label}>Task due (optional)</Text>
-              <DateTimeField mode="date" value={taskDue} onChange={setTaskDue} testID="fc-task-due" />
-            </>
-          )}
+            {createTask ? (
+              <>
+                <Text style={styles.label}>TASK TITLE</Text>
+                <TextInput value={taskTitle} onChangeText={setTaskTitle} style={styles.input} testID="fc-task-title" />
+                <Text style={styles.label}>TASK DUE (OPTIONAL)</Text>
+                <DateTimeField mode="date" value={taskDue} onChange={setTaskDue} testID="fc-task-due" />
+              </>
+            ) : null}
+          </FoldCard>
+
           {error ? <Text style={styles.error}>{error}</Text> : null}
           <Pressable onPress={startAssessment} disabled={saving} style={[styles.cta, saving && { opacity: 0.5 }]} testID="fc-continue">
             <Text style={styles.ctaText}>{saving ? "Preparing…" : "Assess & reserve"}</Text>
@@ -216,43 +222,45 @@ export default function NewCommitment() {
           <View style={styles.sheetCard}>
             <View style={styles.sheetHead}>
               <Text style={styles.sheetTitle}>Decision assessment</Text>
-              <Pressable onPress={editDraft} hitSlop={12}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
+              <Pressable onPress={editDraft} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
-            {assessment && (
-              <View style={{ gap: spacing.xs }}>
-                <View style={[styles.badge, badgeStyle(assessment.classification)]}>
-                  <Text style={styles.badgeText}>{badgeLabel(assessment.classification)}</Text>
-                </View>
-                <Row label="Projected liquid on due date" val={`${currency} ${formatMoney(assessment.projected_liquidity_by_due_date || "0")}`} />
-                {assessment.projected_shortfall ? <Row label="Projected shortfall" val={`${currency} ${formatMoney(assessment.projected_shortfall)}`} strong /> : null}
-                <Row label="Net worth impact" val={`${currency} ${formatMoney(assessment.net_worth_impact || "0")}`} />
-                <Row label="Forecast confidence" val={assessment.forecast_confidence} />
-                {(assessment.assumptions_used || []).length > 0 && (
-                  <Text style={styles.foot}>Assumptions: {assessment.assumptions_used.join(", ")}</Text>
-                )}
-                {assessment.negative_months?.length > 0 && (
-                  <Text style={styles.warnLine}>Negative months: {assessment.negative_months.map((m: any) => m.month).join(", ")}</Text>
-                )}
-                {assessment.displaced_higher_priority?.length > 0 && (
-                  <Text style={styles.warnLine}>Displaces higher-priority: {assessment.displaced_higher_priority.map((c: any) => c.title).join(", ")}</Text>
-                )}
-                {(assessment.affected_commitments || []).length > 0 && (
+            {assessment ? (
+              <View style={{ gap: financeSpace.xs }}>
+                <FoldPill label={classificationLabel(assessment.classification)} tone={CLASSIFICATION_TONE[assessment.classification] || "neutral"} />
+                <FoldCard style={{ marginTop: financeSpace.sm }}>
+                  <FoldRow first label="Projected liquid on due date" right={<FoldAmount currency={currency} value={formatMoney(assessment.projected_liquidity_by_due_date || "0")} />} />
+                  {assessment.projected_shortfall ? (
+                    <FoldRow label="Projected shortfall" right={<FoldAmount currency={currency} value={formatMoney(assessment.projected_shortfall)} tone="negative" />} strong />
+                  ) : null}
+                  <FoldRow label="Net worth impact" right={<FoldAmount currency={currency} value={formatMoney(assessment.net_worth_impact || "0")} />} />
+                  <FoldRow label="Forecast confidence" right={<Text style={financeType.amount as any}>{assessment.forecast_confidence}</Text>} />
+                </FoldCard>
+                {(assessment.assumptions_used || []).length > 0 ? (
+                  <Text style={styles.foot}>Assumptions · {assessment.assumptions_used.join(", ")}</Text>
+                ) : null}
+                {assessment.negative_months?.length > 0 ? (
+                  <Text style={styles.warnLine}>Negative months · {assessment.negative_months.map((m: any) => m.month).join(", ")}</Text>
+                ) : null}
+                {assessment.displaced_higher_priority?.length > 0 ? (
+                  <Text style={styles.warnLine}>Displaces higher-priority · {assessment.displaced_higher_priority.map((c: any) => c.title).join(", ")}</Text>
+                ) : null}
+                {(assessment.affected_commitments || []).length > 0 ? (
                   <>
-                    <Text style={styles.subTitle}>Affected commitments (order: lowest priority → flexible → later due date)</Text>
+                    <Text style={styles.subTitle}>AFFECTED COMMITMENTS</Text>
                     {assessment.affected_commitments.slice(0, 6).map((c: any) => (
                       <Text key={c.id} style={styles.itemLine}>• {c.title} · {c.currency} {formatMoney(c.amount)} · due {dateLabel(c.due_date)} · {c.priority} · {stateLabel(c.state)}</Text>
                     ))}
                   </>
-                )}
+                ) : null}
               </View>
-            )}
-            <View style={{ flexDirection: "row", gap: spacing.sm, flexWrap: "wrap", marginTop: spacing.md }}>
+            ) : null}
+            <View style={{ flexDirection: "row", gap: financeSpace.sm, flexWrap: "wrap", marginTop: financeSpace.md }}>
               <Pressable style={styles.secondary} onPress={editDraft} testID="fc-edit"><Text style={styles.secondaryText}>Edit</Text></Pressable>
               <Pressable style={styles.secondary} onPress={openRebalance} testID="fc-rebalance"><Text style={styles.secondaryText}>Rebalance</Text></Pressable>
               {assessment?.classification === "safe" ? (
                 <Pressable style={styles.primary} onPress={proceedReserve} testID="fc-confirm"><Text style={styles.primaryText}>Confirm & reserve</Text></Pressable>
               ) : (
-                <Pressable style={styles.warnBtn} onPress={() => setConfirmOverrideOpen(true)} testID="fc-proceed-anyway"><Text style={styles.warnBtnText}>Proceed Anyway</Text></Pressable>
+                <Pressable style={styles.warnBtn} onPress={() => setConfirmOverrideOpen(true)} testID="fc-proceed-anyway"><Text style={styles.warnBtnText}>Proceed anyway</Text></Pressable>
               )}
             </View>
           </View>
@@ -265,24 +273,30 @@ export default function NewCommitment() {
           <View style={[styles.sheetCard, { maxHeight: "80%" }]}>
             <View style={styles.sheetHead}>
               <Text style={styles.sheetTitle}>Rebalance</Text>
-              <Pressable onPress={() => setRebalanceOpen(false)} hitSlop={12}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
+              <Pressable onPress={() => setRebalanceOpen(false)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
-            <Text style={styles.sheetBody}>Select commitments to postpone or cancel. Nothing is applied until you confirm below. Linked tasks stay active; cancel them separately if desired.</Text>
-            <ScrollView style={{ maxHeight: 380 }} contentContainerStyle={{ gap: spacing.sm }}>
+            <Text style={styles.sheetBody}>Select commitments to postpone or cancel. Nothing is applied until you confirm. Linked tasks stay active; cancel them separately if desired.</Text>
+            <ScrollView style={{ maxHeight: 380 }} contentContainerStyle={{ gap: financeSpace.sm }}>
               {rebalanceRows.map((r) => (
-                <View key={r.id} style={styles.rebRow}>
+                <FoldCard key={r.id} style={styles.rebCard}>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.rebTitle}>{r.title}</Text>
                     <Text style={styles.rebMeta}>{r.currency} {formatMoney(r.amount)} · due {dateLabel(r.due_date)} · {r.priority} · {r.fixed_or_flexible || "—"}</Text>
                   </View>
                   <View style={{ flexDirection: "row", gap: 6 }}>
-                    <Pressable style={[styles.chipSmall, rebalanceSel[r.id] === "postpone" && styles.chipSel]} onPress={() => setRebalanceSel((s) => ({ ...s, [r.id]: s[r.id] === "postpone" ? undefined : "postpone" }))}><Text style={styles.chipText}>Postpone</Text></Pressable>
-                    <Pressable style={[styles.chipSmall, rebalanceSel[r.id] === "cancel" && { backgroundColor: colors.error }]} onPress={() => setRebalanceSel((s) => ({ ...s, [r.id]: s[r.id] === "cancel" ? undefined : "cancel" }))}><Text style={styles.chipText}>Cancel</Text></Pressable>
+                    <Pressable style={[styles.chipSmall, rebalanceSel[r.id] === "postpone" && styles.chipSel]} onPress={() => setRebalanceSel((s) => ({ ...s, [r.id]: s[r.id] === "postpone" ? undefined : "postpone" }))}>
+                      <Text style={[styles.chipText, rebalanceSel[r.id] === "postpone" && styles.chipTextSel]}>Postpone</Text>
+                    </Pressable>
+                    <Pressable style={[styles.chipSmall, rebalanceSel[r.id] === "cancel" && styles.chipDanger]} onPress={() => setRebalanceSel((s) => ({ ...s, [r.id]: s[r.id] === "cancel" ? undefined : "cancel" }))}>
+                      <Text style={[styles.chipText, rebalanceSel[r.id] === "cancel" && { color: "#FFFFFF" }]}>Cancel</Text>
+                    </Pressable>
                   </View>
-                </View>
+                </FoldCard>
               ))}
             </ScrollView>
-            <Pressable style={[styles.primary, saving && { opacity: 0.5 }]} disabled={saving} onPress={applyRebalance} testID="fc-apply-rebalance"><Text style={styles.primaryText}>Apply selected & re-assess</Text></Pressable>
+            <Pressable style={[styles.primary, saving && { opacity: 0.5 }]} disabled={saving} onPress={applyRebalance} testID="fc-apply-rebalance">
+              <Text style={styles.primaryText}>Apply selected & re-assess</Text>
+            </Pressable>
           </View>
         </View>
       </Modal>
@@ -293,12 +307,14 @@ export default function NewCommitment() {
           <View style={styles.sheetCard}>
             <View style={styles.sheetHead}>
               <Text style={styles.sheetTitle}>Proceed with warning</Text>
-              <Pressable onPress={() => setConfirmOverrideOpen(false)} hitSlop={12}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
+              <Pressable onPress={() => setConfirmOverrideOpen(false)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
             <Text style={styles.sheetBody}>You are proceeding despite a {assessment?.classification === "warning" ? "warning" : "severe risk"} in the forecast. The exact assessment, forecast snapshot and confidence will be logged. Your choice remains final.</Text>
-            <Text style={styles.label}>Optional comment</Text>
-            <TextInput value={overrideComment} onChangeText={setOverrideComment} multiline style={[styles.input, { minHeight: 60 }]} placeholder="Why are you proceeding?" placeholderTextColor={colors.onSurfaceTertiary} testID="fc-override-comment" />
-            <Pressable style={[styles.warnBtn, saving && { opacity: 0.5 }]} disabled={saving} onPress={proceedWithOverride} testID="fc-override-confirm"><Text style={styles.warnBtnText}>Confirm and reserve</Text></Pressable>
+            <Text style={styles.label}>OPTIONAL COMMENT</Text>
+            <TextInput value={overrideComment} onChangeText={setOverrideComment} multiline style={[styles.input, { minHeight: 60 }]} placeholder="Why are you proceeding?" placeholderTextColor={financeColors.inkFaint} testID="fc-override-comment" />
+            <Pressable style={[styles.warnBtn, saving && { opacity: 0.5 }]} disabled={saving} onPress={proceedWithOverride} testID="fc-override-confirm">
+              <Text style={styles.warnBtnText}>Confirm and reserve</Text>
+            </Pressable>
           </View>
         </KeyboardAvoidingView>
       </Modal>
@@ -306,48 +322,49 @@ export default function NewCommitment() {
   );
 }
 
-function Row({ label, val, strong }: { label: string; val: string; strong?: boolean }) {
-  return <View style={styles.factRow}><Text style={styles.factLabel}>{label}</Text><Text style={[styles.factValue, strong && { color: colors.error }]}>{val}</Text></View>;
-}
-
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.surface },
-  scroll: { padding: spacing.xl, gap: spacing.sm, paddingBottom: spacing.xxxl },
-  label: { fontSize: 12, color: colors.onSurfaceSecondary, letterSpacing: 0.5, marginTop: spacing.md, marginBottom: spacing.xs },
-  help: { fontSize: 11, color: colors.onSurfaceSecondary },
-  input: { backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md, fontSize: 15, color: colors.onSurface },
-  chipRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
-  chip: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.pill, backgroundColor: colors.brandTertiary },
-  chipSmall: { paddingHorizontal: spacing.sm, paddingVertical: 4, borderRadius: radius.pill, backgroundColor: colors.brandTertiary },
-  chipSel: { backgroundColor: colors.brandPrimary },
-  chipText: { fontSize: 12, color: colors.onBrandTertiary },
-  chipTextSel: { color: colors.onBrandPrimary, fontWeight: "600" },
-  switchRow: { flexDirection: "row", alignItems: "center", gap: spacing.md, marginTop: spacing.md },
-  error: { color: colors.error, fontSize: 13, marginTop: spacing.md },
-  cta: { backgroundColor: colors.onSurface, paddingVertical: spacing.md, borderRadius: radius.pill, alignItems: "center", marginTop: spacing.lg },
-  ctaText: { color: colors.onSurfaceInverse, fontSize: 15, fontWeight: "700" },
-  note: { textAlign: "center", fontSize: 11, color: colors.onSurfaceTertiary, marginTop: spacing.sm, fontStyle: "italic" },
-  sheetWrap: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
-  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, padding: spacing.xl, paddingBottom: spacing.xxxl, gap: spacing.sm },
+  scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
+  formCard: { padding: financeSpace.lg, gap: 4 },
+  label: { ...financeType.sectionLabel, marginTop: financeSpace.md, marginBottom: financeSpace.xs } as any,
+  help: { fontSize: 11, color: financeColors.inkMuted },
+  input: {
+    backgroundColor: "#FBFBF6",
+    borderRadius: financeRadius.sm,
+    paddingHorizontal: financeSpace.md,
+    paddingVertical: financeSpace.md,
+    fontSize: 15,
+    color: financeColors.ink,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: financeColors.cardBorder,
+  },
+  chipRow: { flexDirection: "row", flexWrap: "wrap", gap: financeSpace.sm, marginTop: 4 },
+  chip: { paddingHorizontal: financeSpace.md, paddingVertical: financeSpace.sm, borderRadius: financeRadius.pill, backgroundColor: "#FBFBF6", borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  chipSmall: { paddingHorizontal: financeSpace.md, paddingVertical: 6, borderRadius: financeRadius.pill, backgroundColor: "#FBFBF6", borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  chipSel: { backgroundColor: financeColors.ink, borderColor: financeColors.ink },
+  chipDanger: { backgroundColor: financeColors.danger, borderColor: financeColors.danger },
+  chipText: { fontSize: 12.5, color: financeColors.ink, fontWeight: "500" },
+  chipTextSel: { color: "#FBFBF6", fontWeight: "700" },
+  switchRow: { flexDirection: "row", alignItems: "center", gap: financeSpace.md, marginTop: financeSpace.md },
+  error: { color: financeColors.danger, fontSize: 13, marginTop: financeSpace.xs, paddingHorizontal: 2 },
+  cta: { backgroundColor: financeColors.ink, paddingVertical: financeSpace.md, borderRadius: financeRadius.pill, alignItems: "center", marginTop: financeSpace.md },
+  ctaText: { color: "#FBFBF6", fontSize: 14, fontWeight: "700", letterSpacing: 0.4 },
+  note: { textAlign: "center", fontSize: 11, color: financeColors.inkFaint, marginTop: financeSpace.sm, fontStyle: "italic", letterSpacing: 0.3 },
+  sheetWrap: { flex: 1, backgroundColor: "rgba(20,20,18,0.4)", justifyContent: "flex-end" },
+  sheetCard: { backgroundColor: financeColors.page, borderTopLeftRadius: financeRadius.lg, borderTopRightRadius: financeRadius.lg, padding: financeSpace.xl, paddingBottom: financeSpace.xxxl, gap: financeSpace.sm },
   sheetHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  sheetTitle: { fontSize: 16, fontWeight: "700", color: colors.onSurface },
-  sheetBody: { fontSize: 13, color: colors.onSurfaceSecondary, lineHeight: 18 },
-  factRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: spacing.xs },
-  factLabel: { fontSize: 13, color: colors.onSurfaceSecondary },
-  factValue: { fontSize: 14, color: colors.onSurface, fontWeight: "700" },
-  badge: { alignSelf: "flex-start", paddingHorizontal: spacing.md, paddingVertical: 4, borderRadius: radius.pill },
-  badgeText: { color: "#fff", fontSize: 12, fontWeight: "700", letterSpacing: 0.5 },
-  primary: { backgroundColor: colors.onSurface, paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, alignItems: "center", flex: 1 },
-  primaryText: { color: colors.onSurfaceInverse, fontSize: 14, fontWeight: "700" },
-  secondary: { paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, alignItems: "center" },
-  secondaryText: { color: colors.onSurface, fontSize: 14, fontWeight: "600" },
-  warnBtn: { backgroundColor: colors.error, paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, alignItems: "center", flex: 1 },
-  warnBtnText: { color: "#fff", fontSize: 14, fontWeight: "700" },
-  foot: { fontSize: 11, color: colors.onSurfaceTertiary, marginTop: spacing.xs, fontStyle: "italic" },
-  warnLine: { fontSize: 12, color: colors.error, fontWeight: "600" },
-  subTitle: { fontSize: 12, color: colors.onSurfaceSecondary, letterSpacing: 0.5, marginTop: spacing.sm },
-  itemLine: { fontSize: 12, color: colors.onSurface },
-  rebRow: { flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.sm, backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm },
-  rebTitle: { fontSize: 13, fontWeight: "600", color: colors.onSurface },
-  rebMeta: { fontSize: 11, color: colors.onSurfaceSecondary, marginTop: 2 },
+  sheetTitle: { ...financeType.screenTitle, fontSize: 18 } as any,
+  sheetBody: { ...financeType.body, color: financeColors.inkMuted } as any,
+  primary: { backgroundColor: financeColors.ink, paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, alignItems: "center", flex: 1 },
+  primaryText: { color: "#FBFBF6", fontSize: 13, fontWeight: "700", letterSpacing: 0.4 },
+  secondary: { paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, alignItems: "center" },
+  secondaryText: { color: financeColors.ink, fontSize: 13, fontWeight: "600" },
+  warnBtn: { backgroundColor: financeColors.danger, paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, alignItems: "center", flex: 1 },
+  warnBtnText: { color: "#FFFFFF", fontSize: 13, fontWeight: "700", letterSpacing: 0.4 },
+  foot: { fontSize: 11, color: financeColors.inkFaint, marginTop: financeSpace.xs, fontStyle: "italic" },
+  warnLine: { fontSize: 12, color: financeColors.danger, fontWeight: "600" },
+  subTitle: { ...financeType.sectionLabel, marginTop: financeSpace.sm } as any,
+  itemLine: { fontSize: 12, color: financeColors.ink, lineHeight: 18 },
+  rebCard: { flexDirection: "row", alignItems: "center", gap: financeSpace.sm, padding: financeSpace.md },
+  rebTitle: { fontSize: 13, fontWeight: "600", color: financeColors.ink },
+  rebMeta: { fontSize: 11, color: financeColors.inkMuted, marginTop: 2 },
 });
