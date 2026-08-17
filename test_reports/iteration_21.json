@@ -1,0 +1,26 @@
+{
+  "summary": "Re-ran the two previously failing tests in /app/backend/tests/test_recurrence.py after main agent's fixes. Both now PASS (2/2, 100%). (1) TestGenerateEndpoint::test_generate_three_and_idempotency — POST /api/tasks/{id}/recurrence/generate {count:3} called twice produces only 3 unique sibling due_dates total (2026-09-08, 2026-09-15, 2026-09-22); second call returns no overlapping due_dates, confirming idempotency guard in _pre_generate_series works. (2) TestInvalidRecurrence[missing cadence] — POST /api/tasks with recurrence={anchor_date:...} (no cadence) now returns HTTP 400 with detail 'recurrence: cadence must be one of [...]' (verified via curl), instead of the previous Pydantic 422. Module-scoped cleanup fixture deleted all TEST_ rows created.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_recurrence.py",
+    "/app/test_reports/pytest/pytest_recurrence_retest.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "updated_files": [],
+  "success_rate": {"backend": "100% (2/2 targeted tests)", "frontend": "N/A - not requested"},
+  "seed_data_creation": "Only the two targeted tests ran; each creates TEST_-prefixed tasks (TEST_Gen idempotent + spawned siblings, TEST_Invalid missing cadence probe). All were removed by the module-scoped _cleanup fixture and an ad-hoc curl probe row was left as one uncreated (400 rejected).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Recurrence idempotency + missing-cadence validation regressions are now covered by test_recurrence.py::TestGenerateEndpoint and TestInvalidRecurrence. Full-suite run of test_recurrence.py was intentionally skipped per request. If a broader regression is needed later, run: pytest /app/backend/tests/test_recurrence.py -v (env var EXPO_PUBLIC_BACKEND_URL is read from frontend/.env in shell).",
+  "rca_of_issue": "Two fixes verified: (a) _pre_generate_series now checks for an existing sibling in the same series_id with the target due_date before inserting, preventing duplicate spawns on repeated generate calls. (b) TaskRecurrenceSpec.cadence is now Optional[str], so a missing cadence bypasses Pydantic strict-string 422 and flows into _normalise_recurrence which raises HTTPException(400) with a helpful list of valid cadences."
+}

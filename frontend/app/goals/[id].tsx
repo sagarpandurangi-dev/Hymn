@@ -35,7 +35,18 @@ const STATUS_COLORS: Record<string, string> = {
 
 function cadenceLabel(c: string): string {
   if (!c) return "";
-  return c.charAt(0).toUpperCase() + c.slice(1);
+  const map: Record<string, string> = {
+    daily: "Daily",
+    alternate_day: "Alternate day",
+    weekly: "Weekly",
+    fortnightly: "Fortnightly",
+    monthly: "Monthly",
+    quarterly: "Quarterly",
+    half_yearly: "Half-yearly",
+    yearly: "Yearly",
+    manual: "Manual",
+  };
+  return map[c] || (c.charAt(0).toUpperCase() + c.slice(1).replace(/_/g, " "));
 }
 
 function formatDateShort(iso: string): string {

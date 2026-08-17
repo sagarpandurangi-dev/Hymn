@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
@@ -7,6 +7,7 @@ import { api } from "@/src/lib/api";
 import { colors, fonts, spacing } from "@/src/lib/theme";
 import ConfirmModal from "@/src/components/ConfirmModal";
 import { formatMoney, stateLabel } from "@/src/lib/finance/format";
+import RecurrenceSheet, { recurrenceLabel } from "@/src/components/RecurrenceSheet";
 
 export default function TaskDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -19,6 +20,10 @@ export default function TaskDetailScreen() {
   // §12 — linked Financial Commitment prompt
   const [linkedCommitment, setLinkedCommitment] = useState<any | null>(null);
   const [promptOpen, setPromptOpen] = useState(false);
+  // Recurrence sheet — shared component; hitting Save calls the dedicated
+  // /recurrence endpoint so we keep concerns separate from PUT /tasks/{id}.
+  const [recOpen, setRecOpen] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -100,6 +105,58 @@ export default function TaskDetailScreen() {
           )}
           {t.notes ? <Text style={styles.notes} testID="task-detail-notes">{t.notes}</Text> : null}
 
+          {/* Recurrence panel — visible when the task belongs to a series
+              OR to give the user an affordance to make it recurring. */}
+          <View style={recStyles.card} testID="task-recurrence-card">
+            <View style={recStyles.headRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={recStyles.eyebrow}>RECURRENCE</Text>
+                {t.recurrence?.cadence ? (
+                  <>
+                    <Text style={recStyles.title}>{recurrenceLabel(t.recurrence.cadence)}</Text>
+                    <Text style={recStyles.meta}>
+                      From {t.recurrence.anchor_date}
+                      {t.recurrence.end_type === "until" && t.recurrence.end_date ? ` · ends ${t.recurrence.end_date}` : ""}
+                      {t.recurrence.end_type === "count" && t.recurrence.occurrences_remaining != null ? ` · ${t.recurrence.occurrences_remaining} left` : ""}
+                      {t.occurrence_index && t.occurrence_index > 1 ? ` · occurrence #${t.occurrence_index}` : ""}
+                    </Text>
+                  </>
+                ) : (
+                  <Text style={recStyles.meta}>Not recurring. Tap “Make recurring” to schedule follow-up occurrences.</Text>
+                )}
+              </View>
+              <Pressable onPress={() => setRecOpen(true)} style={recStyles.editBtn} testID="task-recurrence-edit">
+                <Ionicons name={t.recurrence?.cadence ? "settings-outline" : "repeat"} size={16} color={colors.brandPrimary} />
+                <Text style={recStyles.editText}>{t.recurrence?.cadence ? "Edit" : "Make recurring"}</Text>
+              </Pressable>
+            </View>
+            {t.recurrence?.cadence ? (
+              <Pressable
+                onPress={async () => {
+                  if (!id) return;
+                  setGenBusy(true);
+                  try {
+                    const created = await api.generateTaskOccurrences(id, 4);
+                    Alert.alert(
+                      "Occurrences generated",
+                      created.length === 0
+                        ? "No new occurrences were created — the series has reached its end."
+                        : `${created.length} upcoming task${created.length === 1 ? "" : "s"} created.`,
+                    );
+                    await load();
+                  } catch (e: any) { Alert.alert("Could not generate", e?.message || ""); }
+                  finally { setGenBusy(false); }
+                }}
+                disabled={genBusy}
+                style={[recStyles.genBtn, genBusy && { opacity: 0.5 }]}
+                testID="task-recurrence-generate"
+              >
+                <Ionicons name="add-circle-outline" size={15} color={colors.onSurface} />
+                <Text style={recStyles.genBtnText}>{genBusy ? "Generating…" : "Generate next 4 upcoming"}</Text>
+              </Pressable>
+            ) : null}
+          </View>
+
           <View style={styles.actionsRow}>
             {t.status !== "done" && (
               <Pressable onPress={onMarkDone} style={[styles.actionBtn, { backgroundColor: colors.success }]} testID="task-detail-done-button">
@@ -165,9 +222,48 @@ export default function TaskDetailScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Recurrence configuration bottom sheet */}
+      <RecurrenceSheet
+        visible={recOpen}
+        initial={t?.recurrence || undefined}
+        fallbackAnchor={t?.due_date || undefined}
+        onClose={() => setRecOpen(false)}
+        onSave={async (spec) => {
+          if (!id) return;
+          await api.setTaskRecurrence(id, spec);
+          await load();
+        }}
+        onClear={t?.recurrence?.cadence ? async () => {
+          if (!id) return;
+          await api.clearTaskRecurrence(id);
+          await load();
+        } : undefined}
+        testID="task-recurrence-sheet"
+      />
     </SafeAreaView>
   );
 }
+
+const recStyles = StyleSheet.create({
+  card: {
+    marginTop: spacing.xl,
+    padding: spacing.lg,
+    backgroundColor: colors.surfaceSecondary,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    gap: spacing.sm,
+  },
+  headRow: { flexDirection: "row", alignItems: "flex-start", gap: spacing.md },
+  eyebrow: { fontSize: 10.5, letterSpacing: 1.6, color: colors.onSurfaceSecondary, fontWeight: "700" },
+  title: { fontSize: 16, fontWeight: "700", color: colors.onSurface, marginTop: 4 },
+  meta: { fontSize: 12.5, color: colors.onSurfaceSecondary, marginTop: 4, lineHeight: 17 },
+  editBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: spacing.sm, paddingVertical: 6 },
+  editText: { color: colors.brandPrimary, fontSize: 13, fontWeight: "600" },
+  genBtn: { flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start", paddingHorizontal: spacing.md, paddingVertical: 6, borderRadius: 999, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, marginTop: spacing.xs },
+  genBtnText: { fontSize: 12, color: colors.onSurface, fontWeight: "600" },
+});
 
 const sheetStyles = StyleSheet.create({
   wrap: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },

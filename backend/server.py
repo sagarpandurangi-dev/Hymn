@@ -101,7 +101,20 @@ class DomainResponse(BaseModel):
 
 GOAL_STATUSES = {"active", "paused", "completed", "abandoned"}
 DEFAULT_DOMAIN_NAMES = ["Knowledge", "Health", "Money", "Soul"]
+# Legacy check-in cadence set retained for backward compatibility. The full
+# recurrence vocabulary (adding alternate_day, fortnightly, quarterly,
+# half_yearly, yearly) lives in `backend.recurrence` and is imported below.
 CHECKIN_CADENCES = {"daily", "weekly", "monthly", "manual"}
+from recurrence import (  # noqa: E402  (import kept next to constants for locality)
+    EXTENDED_CHECKIN_CADENCES,
+    RECURRENCE_CADENCES,
+    END_TYPES,
+    parse_iso_date as _parse_iso_date,
+    next_date_str as _next_date_str,
+    normalise_recurrence as _normalise_recurrence,
+    should_spawn_next as _should_spawn_next,
+    is_active_period as _is_active_period,
+)
 KNOWLEDGE_DOMAIN_NAME = "Knowledge"
 COMMITMENT_TYPES = {"postponable", "exclusive"}
 
@@ -113,7 +126,12 @@ class GoalCreate(BaseModel):
     deadline: str = ""  # YYYY-MM-DD (optional)
     status: str = "active"
     notes: str = ""
-    checkin_cadence: str = ""  # "" | daily | weekly | monthly | manual
+    # Extended cadence vocabulary (see backend/recurrence.py). Empty string
+    # keeps a goal without a scheduled check-in.
+    checkin_cadence: str = ""
+    # Anchor day the cadence is computed from (YYYY-MM-DD). Optional; when
+    # empty, the goal's creation date is used at read time.
+    checkin_anchor_date: str = ""
     journey_type: str = ""  # optional tag surfaced in Knowledge domain UIs
     commitment_type: str = "postponable"  # postponable | exclusive
 
@@ -126,6 +144,7 @@ class GoalUpdate(BaseModel):
     status: Optional[str] = None
     notes: Optional[str] = None
     checkin_cadence: Optional[str] = None
+    checkin_anchor_date: Optional[str] = None
     journey_type: Optional[str] = None
     commitment_type: Optional[str] = None
 
@@ -140,6 +159,7 @@ class GoalResponse(BaseModel):
     status: str
     notes: str
     checkin_cadence: str
+    checkin_anchor_date: str = ""
     journey_type: str = ""
     commitment_type: str = "postponable"
     created_at: str
@@ -313,6 +333,28 @@ TASK_PRIORITIES = {"low", "medium", "high"}
 TASK_ORIGINS = {"expected_outcome", "project", "standalone"}
 
 
+class TaskRecurrenceSpec(BaseModel):
+    """Recurrence attached to a single task.
+
+    Fields mirror `recurrence.normalise_recurrence` output. Kept on the
+    task document as a nested object; when set, completing the task auto-
+    spawns the next occurrence per §recurrence-engine (option A, default).
+    An optional `pre_generate_count` fans out N future occurrences at once
+    (option B).
+    """
+    # `cadence` is Optional at the Pydantic level so the endpoint can emit a
+    # 400 with a friendly message (via `_normalise_recurrence`) rather than
+    # Pydantic's 422 when the field is missing. `normalise_recurrence` still
+    # rejects it with 400.
+    cadence: Optional[str] = None
+    anchor_date: Optional[str] = None
+    end_type: str = "never"
+    end_date: Optional[str] = None
+    occurrences_remaining: Optional[int] = None
+    series_id: Optional[str] = None
+    pre_generate_count: int = 0
+
+
 class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     due_date: str = ""
@@ -327,6 +369,7 @@ class TaskCreate(BaseModel):
     assigned_to_name: str = ""
     assigned_to_phone: str = ""
     commitment_type: str = "postponable"
+    recurrence: Optional[TaskRecurrenceSpec] = None
 
 
 class TaskUpdate(BaseModel):
@@ -340,6 +383,12 @@ class TaskUpdate(BaseModel):
     assigned_to_name: Optional[str] = None
     assigned_to_phone: Optional[str] = None
     commitment_type: Optional[str] = None
+    # Set recurrence via PUT — pass null (or DELETE the recurrence endpoint)
+    # to remove it. `set_recurrence` is a discriminator on the wire so we can
+    # tell "leave alone" (field omitted) from "clear" (`set_recurrence=True`
+    # with `recurrence=None`).
+    recurrence: Optional[TaskRecurrenceSpec] = None
+    set_recurrence: Optional[bool] = None
 
 
 class TaskDefer(BaseModel):
@@ -374,6 +423,12 @@ class TaskResponse(BaseModel):
     deferred_until: Optional[str] = None
     original_due_date: Optional[str] = None
     defer_count: int = 0
+    # Recurrence — full spec when the task is part of a series, else None.
+    # `series_id` groups sibling occurrences; `occurrence_index` is 1-based
+    # for the current instance and is set at spawn-time.
+    recurrence: Optional[TaskRecurrenceSpec] = None
+    series_id: Optional[str] = None
+    occurrence_index: int = 1
     created_at: str
     updated_at: str
 
@@ -537,6 +592,7 @@ def goal_to_response(g: dict, domain_name: str, stats: Optional[dict] = None) ->
         status=g.get("status", "active"),
         notes=g.get("notes", "") or "",
         checkin_cadence=g.get("checkin_cadence", "") or "",
+        checkin_anchor_date=g.get("checkin_anchor_date", "") or "",
         journey_type=g.get("journey_type", "") or "",
         commitment_type=g.get("commitment_type", "postponable") or "postponable",
         created_at=g.get("created_at", ""),
@@ -588,6 +644,18 @@ def project_to_response(p: dict) -> ProjectResponse:
 
 
 def task_to_response(t: dict) -> TaskResponse:
+    rec_raw = t.get("recurrence")
+    rec_spec: Optional[TaskRecurrenceSpec] = None
+    if isinstance(rec_raw, dict) and rec_raw.get("cadence"):
+        rec_spec = TaskRecurrenceSpec(
+            cadence=rec_raw.get("cadence", ""),
+            anchor_date=rec_raw.get("anchor_date", "") or "",
+            end_type=rec_raw.get("end_type", "never") or "never",
+            end_date=rec_raw.get("end_date"),
+            occurrences_remaining=rec_raw.get("occurrences_remaining"),
+            series_id=rec_raw.get("series_id"),
+            pre_generate_count=int(rec_raw.get("pre_generate_count") or 0),
+        )
     return TaskResponse(
         id=t["id"],
         title=t.get("title", ""),
@@ -606,6 +674,9 @@ def task_to_response(t: dict) -> TaskResponse:
         deferred_until=t.get("deferred_until"),
         original_due_date=t.get("original_due_date"),
         defer_count=int(t.get("defer_count") or 0),
+        recurrence=rec_spec,
+        series_id=t.get("series_id"),
+        occurrence_index=int(t.get("occurrence_index") or 1),
         created_at=t.get("created_at", ""),
         updated_at=t.get("updated_at", ""),
     )
@@ -928,8 +999,17 @@ async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current
         raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     if body.status not in GOAL_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
-    if body.checkin_cadence and body.checkin_cadence not in CHECKIN_CADENCES:
-        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)} or empty")
+    if body.checkin_cadence and body.checkin_cadence not in EXTENDED_CHECKIN_CADENCES:
+        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(EXTENDED_CHECKIN_CADENCES)} or empty")
+    # Optional anchor date — validated when a non-manual cadence is set. When
+    # the caller does not supply one we fall back to the goal's creation date
+    # at read time (see list_required_checkins). This keeps the field purely
+    # additive and back-compat with existing rows.
+    if body.checkin_anchor_date:
+        try:
+            _parse_iso_date(body.checkin_anchor_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"checkin_anchor_date must be YYYY-MM-DD: {exc}") from exc
     domain = await db.domains.find_one({"id": body.domain_id, "user_id": current_user["id"]})
     if not domain:
         raise HTTPException(status_code=400, detail="Invalid domain")
@@ -944,6 +1024,7 @@ async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current
         "status": body.status,
         "notes": (body.notes or "").strip(),
         "checkin_cadence": (body.checkin_cadence or "").strip(),
+        "checkin_anchor_date": (body.checkin_anchor_date or "").strip(),
         "journey_type": (body.journey_type or "").strip(),
         "commitment_type": body.commitment_type if body.commitment_type in COMMITMENT_TYPES else "postponable",
         "created_at": now,
@@ -972,15 +1053,20 @@ async def update_goal(goal_id: str, body: GoalUpdate, current_user: dict = Depen
     updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
     if "status" in updates and updates["status"] not in GOAL_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
-    if "checkin_cadence" in updates and updates["checkin_cadence"] and updates["checkin_cadence"] not in CHECKIN_CADENCES:
-        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)} or empty")
+    if "checkin_cadence" in updates and updates["checkin_cadence"] and updates["checkin_cadence"] not in EXTENDED_CHECKIN_CADENCES:
+        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(EXTENDED_CHECKIN_CADENCES)} or empty")
+    if "checkin_anchor_date" in updates and updates["checkin_anchor_date"]:
+        try:
+            _parse_iso_date(updates["checkin_anchor_date"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"checkin_anchor_date must be YYYY-MM-DD: {exc}") from exc
     if "commitment_type" in updates and updates["commitment_type"] not in COMMITMENT_TYPES:
         raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     if "domain_id" in updates:
         d = await db.domains.find_one({"id": updates["domain_id"], "user_id": current_user["id"]})
         if not d:
             raise HTTPException(status_code=400, detail="Invalid domain")
-    for k in ("title", "target_outcome", "deadline", "notes", "checkin_cadence", "journey_type"):
+    for k in ("title", "target_outcome", "deadline", "notes", "checkin_cadence", "checkin_anchor_date", "journey_type"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -1228,8 +1314,26 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
     # component_id is deprecated — always null after the Decomposition Engine reform.
     validated_component_id: Optional[str] = None
     now = datetime.now(timezone.utc).isoformat()
+    task_id = str(uuid.uuid4())
+
+    # Recurrence — validate up-front; when set we assign this task the head
+    # of a new series (series_id + occurrence_index=1). Pre-generation of
+    # additional occurrences happens after insert.
+    rec_dict: Optional[dict] = None
+    series_id: Optional[str] = None
+    if body.recurrence is not None:
+        try:
+            rec_dict = _normalise_recurrence(
+                body.recurrence.dict(),
+                fallback_anchor=(body.due_date or "").strip() or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"recurrence: {exc}") from exc
+        series_id = rec_dict.get("series_id") or str(uuid.uuid4())
+        rec_dict["series_id"] = series_id
+
     doc = {
-        "id": str(uuid.uuid4()),
+        "id": task_id,
         "user_id": current_user["id"],
         "title": body.title.strip(),
         "due_date": (body.due_date or "").strip(),
@@ -1251,12 +1355,158 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         "deferred_until": None,
         "original_due_date": (body.due_date or "").strip() or None,
         "defer_count": 0,
+        "recurrence": rec_dict,
+        "series_id": series_id,
+        "occurrence_index": 1 if rec_dict else 1,
         "created_at": now,
         "updated_at": now,
     }
     await db.tasks.insert_one(doc)
+
+    # Pre-generate upcoming occurrences when the user requested option B
+    # (up to 12 to bound the write burst). Each future task is a full clone
+    # with its own id, due_date walked forward, and occurrence_index bumped.
+    if rec_dict and int(rec_dict.get("pre_generate_count") or 0) > 0:
+        await _pre_generate_series(
+            base_task=doc,
+            count=int(rec_dict["pre_generate_count"]),
+        )
+
     doc.pop("_id", None)
     return task_to_response(doc)
+
+
+# ---------------------------------------------------------------------------
+# Recurrence helpers — series expansion & auto-spawn on completion.
+# ---------------------------------------------------------------------------
+_RECURRENCE_MAX_SPAWN = 12
+
+
+async def _pre_generate_series(*, base_task: dict, count: int) -> list:
+    """Materialise up to `count` future occurrences of `base_task`.
+
+    The base task remains occurrence 1. Each spawned task inherits every
+    scalar field, gets a new `id`, `due_date` advanced by one cadence step
+    per iteration, `occurrence_index` incremented, and its own `recurrence`
+    copy (with pre_generate_count zeroed so it doesn't recursively fan out).
+
+    Returns the list of inserted task dicts. Silently stops early when the
+    series reaches its end condition.
+    """
+    if count <= 0 or not base_task.get("recurrence"):
+        return []
+    count = min(count, _RECURRENCE_MAX_SPAWN)
+    now = datetime.now(timezone.utc).isoformat()
+    rec = dict(base_task["recurrence"])
+    rec["pre_generate_count"] = 0  # child occurrences don't re-fan
+    remaining = rec.get("occurrences_remaining")
+    cursor_due = base_task.get("due_date") or rec.get("anchor_date") or ""
+    spawned: list = []
+    for i in range(count):
+        # End-condition checks BEFORE spawning the next.
+        if rec.get("end_type") == "count":
+            try:
+                if int(remaining or 0) <= 1:
+                    break
+            except (TypeError, ValueError):
+                break
+        next_due = _next_date_str(cursor_due, rec)
+        if not next_due:
+            break
+        # Idempotency guard: if a sibling in this series already has the
+        # target due_date, do not create a duplicate. This lets callers
+        # invoke `/recurrence/generate` repeatedly without piling up.
+        if base_task.get("series_id"):
+            dupe = await db.tasks.find_one(
+                {
+                    "user_id": base_task["user_id"],
+                    "series_id": base_task["series_id"],
+                    "due_date": next_due,
+                },
+                {"_id": 0, "id": 1},
+            )
+            if dupe:
+                cursor_due = next_due
+                continue
+        if remaining is not None:
+            try:
+                remaining = int(remaining) - 1
+            except (TypeError, ValueError):
+                remaining = None
+        child_rec = dict(rec)
+        child_rec["occurrences_remaining"] = remaining
+        new_task = {
+            **{k: v for k, v in base_task.items() if k not in {"_id"}},
+            "id": str(uuid.uuid4()),
+            "due_date": next_due,
+            "status": "todo",
+            "original_due_date": next_due,
+            "defer_count": 0,
+            "deferred_until": None,
+            "recurrence": child_rec,
+            "series_id": base_task.get("series_id"),
+            "occurrence_index": int(base_task.get("occurrence_index") or 1) + i + 1,
+            "created_at": now,
+            "updated_at": now,
+        }
+        await db.tasks.insert_one(new_task)
+        spawned.append(new_task)
+        cursor_due = next_due
+    return spawned
+
+
+async def _maybe_spawn_next_occurrence(task_doc: dict) -> Optional[dict]:
+    """When a recurring task transitions to done, spawn the next occurrence.
+
+    Returns the spawned task dict, or None when no spawn happened (either
+    the task has no recurrence, the end condition has been reached, or the
+    next occurrence has already been pre-generated in the same series).
+    """
+    rec = task_doc.get("recurrence") or {}
+    if not rec.get("cadence"):
+        return None
+    if not _should_spawn_next(rec):
+        return None
+    next_due = _next_date_str(task_doc.get("due_date") or "", rec)
+    if not next_due:
+        return None
+    # If a sibling occurrence already exists in this series with the same
+    # due_date, do not spawn again — the pre-generation path has us covered.
+    if task_doc.get("series_id"):
+        existing = await db.tasks.find_one(
+            {
+                "user_id": task_doc["user_id"],
+                "series_id": task_doc["series_id"],
+                "due_date": next_due,
+            },
+            {"_id": 0, "id": 1},
+        )
+        if existing:
+            return None
+    child_rec = dict(rec)
+    child_rec["pre_generate_count"] = 0
+    if rec.get("end_type") == "count":
+        try:
+            child_rec["occurrences_remaining"] = int(rec.get("occurrences_remaining") or 0) - 1
+        except (TypeError, ValueError):
+            child_rec["occurrences_remaining"] = None
+    now = datetime.now(timezone.utc).isoformat()
+    new_task = {
+        **{k: v for k, v in task_doc.items() if k not in {"_id"}},
+        "id": str(uuid.uuid4()),
+        "due_date": next_due,
+        "status": "todo",
+        "original_due_date": next_due,
+        "defer_count": 0,
+        "deferred_until": None,
+        "recurrence": child_rec,
+        "series_id": task_doc.get("series_id"),
+        "occurrence_index": int(task_doc.get("occurrence_index") or 1) + 1,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.tasks.insert_one(new_task)
+    return new_task
 
 
 # --- Task deferment ---------------------------------------------------------
@@ -1348,7 +1598,36 @@ async def update_task(task_id: str, body: TaskUpdate, current_user: dict = Depen
     t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
     if not t:
         raise HTTPException(status_code=404, detail="Task not found")
-    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    raw_updates = body.dict(exclude_unset=True)
+    updates = {k: v for k, v in raw_updates.items() if v is not None}
+
+    # ---- Recurrence handling (accept via PUT for simplicity) ------------
+    # `set_recurrence` is the discriminator: if it is True and `recurrence`
+    # is None, we CLEAR the recurrence. If `recurrence` is a dict, we set/
+    # replace it. Absent field means "no change".
+    should_touch_rec = ("set_recurrence" in raw_updates) or ("recurrence" in raw_updates)
+    rec_dict: Optional[dict] = None
+    clear_rec = False
+    if should_touch_rec:
+        rec_incoming = raw_updates.get("recurrence")
+        set_flag = raw_updates.get("set_recurrence")
+        if rec_incoming is None and (set_flag is True):
+            clear_rec = True
+        elif isinstance(rec_incoming, dict):
+            try:
+                rec_dict = _normalise_recurrence(
+                    rec_incoming,
+                    fallback_anchor=(updates.get("due_date") or t.get("due_date") or "") or None,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"recurrence: {exc}") from exc
+            # Preserve existing series_id when the caller didn't supply one.
+            existing_series = t.get("series_id") or (t.get("recurrence") or {}).get("series_id")
+            rec_dict["series_id"] = rec_dict.get("series_id") or existing_series or str(uuid.uuid4())
+    # Strip from updates dict so we don't try to $set a Pydantic model.
+    updates.pop("recurrence", None)
+    updates.pop("set_recurrence", None)
+
     if "status" in updates and updates["status"] not in TASK_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(TASK_STATUSES)}")
     if "priority" in updates and updates["priority"] not in TASK_PRIORITIES:
@@ -1364,10 +1643,140 @@ async def update_task(task_id: str, body: TaskUpdate, current_user: dict = Depen
     for k in ("title", "due_date", "notes", "assigned_to_name", "assigned_to_phone"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
+
+    # Apply recurrence mutation.
+    if clear_rec:
+        updates["recurrence"] = None
+        updates["series_id"] = None
+        updates["occurrence_index"] = 1
+    elif rec_dict is not None:
+        updates["recurrence"] = rec_dict
+        updates["series_id"] = rec_dict["series_id"]
+        if not t.get("occurrence_index"):
+            updates["occurrence_index"] = 1
+
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.tasks.update_one({"id": task_id, "user_id": current_user["id"]}, {"$set": updates})
     updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+
+    # Auto-spawn next occurrence on completion (option A). This runs after
+    # the update commits so the just-completed task remains as history.
+    prev_status = t.get("status", "todo")
+    new_status = updates.get("status", prev_status)
+    if prev_status != "done" and new_status == "done":
+        try:
+            await _maybe_spawn_next_occurrence(updated)
+        except Exception:  # noqa: BLE001 — best-effort; do not break the PUT.
+            pass
+
+    # If pre_generate_count was set on this PUT (via a fresh recurrence),
+    # materialise siblings now.
+    if rec_dict and int(rec_dict.get("pre_generate_count") or 0) > 0:
+        try:
+            await _pre_generate_series(base_task=updated, count=int(rec_dict["pre_generate_count"]))
+        except Exception:  # noqa: BLE001
+            pass
+
     return task_to_response(updated)
+
+
+# ---------------------------------------------------------------------------
+# Dedicated recurrence endpoints
+# ---------------------------------------------------------------------------
+class RecurrenceSetBody(BaseModel):
+    """Payload for POST /tasks/{id}/recurrence — a fully-specified spec."""
+    cadence: str
+    anchor_date: Optional[str] = None
+    end_type: str = "never"
+    end_date: Optional[str] = None
+    occurrences_remaining: Optional[int] = None
+    pre_generate_count: int = 0
+
+
+@api_router.post("/tasks/{task_id}/recurrence", response_model=TaskResponse)
+async def set_task_recurrence(task_id: str, body: RecurrenceSetBody, current_user: dict = Depends(get_current_user)):
+    """Attach or replace the recurrence configuration on a task.
+
+    When `pre_generate_count > 0` we materialise that many upcoming siblings
+    (option B). Otherwise the task will auto-spawn the next occurrence at
+    completion (option A).
+    """
+    t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        rec = _normalise_recurrence(
+            body.dict(),
+            fallback_anchor=(t.get("due_date") or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"recurrence: {exc}") from exc
+    rec["series_id"] = rec.get("series_id") or t.get("series_id") or str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    await db.tasks.update_one(
+        {"id": task_id, "user_id": current_user["id"]},
+        {"$set": {
+            "recurrence": rec,
+            "series_id": rec["series_id"],
+            "occurrence_index": int(t.get("occurrence_index") or 1),
+            "updated_at": now,
+        }},
+    )
+    updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    if int(rec.get("pre_generate_count") or 0) > 0:
+        try:
+            await _pre_generate_series(base_task=updated, count=int(rec["pre_generate_count"]))
+        except Exception:  # noqa: BLE001
+            pass
+    return task_to_response(updated)
+
+
+@api_router.delete("/tasks/{task_id}/recurrence", response_model=TaskResponse)
+async def clear_task_recurrence(task_id: str, current_user: dict = Depends(get_current_user)):
+    """Remove recurrence from a task. Sibling occurrences remain untouched
+    (delete them individually if desired). The current task loses its
+    `recurrence`, `series_id` and resets `occurrence_index=1`.
+    """
+    t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await db.tasks.update_one(
+        {"id": task_id, "user_id": current_user["id"]},
+        {"$set": {
+            "recurrence": None,
+            "series_id": None,
+            "occurrence_index": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    return task_to_response(updated)
+
+
+class RecurrenceGenerateBody(BaseModel):
+    """Payload for POST /tasks/{id}/recurrence/generate — walk N forward."""
+    count: int = 1
+
+
+@api_router.post("/tasks/{task_id}/recurrence/generate", response_model=List[TaskResponse])
+async def generate_upcoming_occurrences(
+    task_id: str,
+    body: RecurrenceGenerateBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Fan out the next `count` occurrences of a recurring task (option B).
+
+    Existing siblings on the same due_date are NOT duplicated. Returns the
+    newly created tasks (empty list when the series has reached its end).
+    """
+    t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not (t.get("recurrence") or {}).get("cadence"):
+        raise HTTPException(status_code=400, detail="Task has no recurrence configured")
+    count = max(1, min(int(body.count or 1), _RECURRENCE_MAX_SPAWN))
+    spawned = await _pre_generate_series(base_task=t, count=count)
+    return [task_to_response(s) for s in spawned]
 
 
 @api_router.delete("/tasks/{task_id}", status_code=200)
@@ -1651,6 +2060,14 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         await db.tasks.update_one(
             {"id": task_id, "user_id": current_user["id"]}, {"$set": task_updates},
         )
+        # If the check-in completed a recurring task, spawn the next occurrence.
+        if body.complete_task:
+            try:
+                fresh = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]}, {"_id": 0})
+                if fresh and (fresh.get("recurrence") or {}).get("cadence"):
+                    await _maybe_spawn_next_occurrence(fresh)
+            except Exception as _rx:  # pragma: no cover
+                logger.warning("recurrence auto-spawn from checkin failed: %s", _rx)
 
     doc.pop("_id", None)
     return checkin_to_response(doc)
@@ -1704,15 +2121,16 @@ async def list_required_checkins(
 
     user_id = current_user["id"]
 
-    # Only active goals that have a schedulable cadence are candidates. We
-    # filter out manual up front so the response is compact.
+    # All goals with a recurrence-based cadence are candidates. "manual" is
+    # excluded (user drives it themselves). Empty cadence is excluded too.
     goals = await db.goals.find(
         {
             "user_id": user_id,
             "status": "active",
-            "checkin_cadence": {"$in": ["daily", "weekly", "monthly"]},
+            "checkin_cadence": {"$in": sorted(RECURRENCE_CADENCES)},
         },
-        {"_id": 0, "id": 1, "title": 1, "domain_id": 1, "checkin_cadence": 1},
+        {"_id": 0, "id": 1, "title": 1, "domain_id": 1, "checkin_cadence": 1,
+         "checkin_anchor_date": 1, "created_at": 1},
     ).to_list(length=5000)
     if not goals:
         return []
@@ -1728,14 +2146,17 @@ async def list_required_checkins(
     eo_to_goal = {e["id"]: e["goal_id"] for e in eos}
     all_eo_ids = list(eo_to_goal.keys())
 
-    # Pull every relevant checkin for the union of the three periods in one
-    # trip. The daily bound is inside the weekly bound, which is inside the
-    # month prefix — so a week-bounded date range covers all three.
+    # Widened lookup window: yearly cadence needs to look back up to 12
+    # months. We fetch a full year to keep the query bound small — the
+    # per-goal period comparison happens in-process.
+    from datetime import timedelta as _td
+    lookup_lo = (anchor - _td(days=400)).isoformat()
+    lookup_hi = anchor.isoformat()
+
     checkins = await db.checkins.find(
         {
             "user_id": user_id,
-            "date": {"$gte": min(week_start_str, month_prefix + "-01"),
-                     "$lte": max(week_end_str, month_prefix + "-31")},
+            "date": {"$gte": lookup_lo, "$lte": lookup_hi},
             "$or": [
                 {"goal_id": {"$in": goal_ids}},
                 {"expected_outcome_id": {"$in": all_eo_ids}} if all_eo_ids else {"goal_id": None},
@@ -1745,14 +2166,14 @@ async def list_required_checkins(
     ).to_list(length=20000)
 
     # Build per-goal sets of the dates on which a check-in exists.
-    goal_checkin_dates: dict = {gid: set() for gid in goal_ids}
+    goal_checkin_dates: dict = {gid: [] for gid in goal_ids}
     for c in checkins:
         gid = c.get("goal_id") or eo_to_goal.get(c.get("expected_outcome_id") or "")
         if not gid or gid not in goal_checkin_dates:
             continue
         d_val = c.get("date") or ""
         if d_val:
-            goal_checkin_dates[gid].add(d_val)
+            goal_checkin_dates[gid].append(d_val)
 
     # Domain names in one lookup.
     domain_ids = list({g["domain_id"] for g in goals if g.get("domain_id")})
@@ -1761,21 +2182,55 @@ async def list_required_checkins(
     ).to_list(length=1000) if domain_ids else []
     domain_name_by_id = {d["id"]: d["name"] for d in domain_docs}
 
-    def _completed(gid: str, cadence: str) -> bool:
-        dates = goal_checkin_dates.get(gid) or set()
+    def _resolve_anchor(g: dict):
+        """Anchor priority: explicit checkin_anchor_date > goal.created_at date."""
+        raw = (g.get("checkin_anchor_date") or "").strip()
+        if raw:
+            try:
+                return _parse_iso_date(raw)
+            except ValueError:
+                pass
+        created_raw = (g.get("created_at") or "")[:10]
+        if created_raw:
+            try:
+                return _parse_iso_date(created_raw)
+            except ValueError:
+                pass
+        return anchor  # fallback: today
+
+    def _completed(gid: str, cadence: str, g: dict) -> bool:
+        dates = goal_checkin_dates.get(gid) or []
+        # Legacy fast-paths preserve identical semantics to the pre-recurrence
+        # scheduler for the three original cadences.
         if cadence == "daily":
             return day_str in dates
         if cadence == "weekly":
             return any(week_start_str <= x <= week_end_str for x in dates)
         if cadence == "monthly":
             return any((x or "").startswith(month_prefix) for x in dates)
-        return False
+        # Extended cadences: compute the period containing `anchor` and check
+        # for any check-in inside it.
+        anc = _resolve_anchor(g)
+        try:
+            active, p_start, p_end = _is_active_period(anc, cadence, anchor)
+        except ValueError:
+            return False
+        if not active:
+            # Period hasn't started yet — treat as "not due", so it should not
+            # be returned as required either. We express this via `completed`
+            # so the caller skips it.
+            return True
+        ps, pe = p_start.isoformat(), p_end.isoformat()
+        return any(ps <= (x or "") <= pe for x in dates)
 
-    cadence_rank = {"daily": 0, "weekly": 1, "monthly": 2}
+    cadence_rank = {
+        "daily": 0, "alternate_day": 1, "weekly": 2, "fortnightly": 3,
+        "monthly": 4, "quarterly": 5, "half_yearly": 6, "yearly": 7,
+    }
     result = []
     for g in goals:
         cadence = g.get("checkin_cadence") or ""
-        completed = _completed(g["id"], cadence)
+        completed = _completed(g["id"], cadence, g)
         if completed:
             # Spec: return only goals that still need a checkin for the period.
             continue

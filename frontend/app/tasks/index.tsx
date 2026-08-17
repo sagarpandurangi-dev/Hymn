@@ -28,6 +28,15 @@ type Task = {
   deferred_until?: string | null;
   original_due_date?: string | null;
   defer_count?: number;
+  recurrence?: {
+    cadence: string;
+    anchor_date: string;
+    end_type?: string;
+    end_date?: string | null;
+    occurrences_remaining?: number | null;
+  } | null;
+  series_id?: string | null;
+  occurrence_index?: number;
 };
 
 const STATUS_COLORS: Record<string, string> = {
@@ -157,13 +166,21 @@ export default function TasksScreen() {
           <Text style={styles.priority}>{(t.priority || "").toUpperCase()}</Text>
         </View>
         <Text style={styles.title} numberOfLines={2}>{t.title}</Text>
-        {inDeferredList && t.deferred_until ? (
-          <Text style={styles.meta}>
-            deferred to {t.deferred_until} · {t.defer_count || 0}/{MAX_DEFERS} defers used
-          </Text>
-        ) : t.due_date ? (
-          <Text style={styles.meta}>due {t.due_date}</Text>
-        ) : null}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 2 }}>
+          {inDeferredList && t.deferred_until ? (
+            <Text style={styles.meta}>
+              deferred to {t.deferred_until} · {t.defer_count || 0}/{MAX_DEFERS} defers used
+            </Text>
+          ) : t.due_date ? (
+            <Text style={styles.meta}>due {t.due_date}</Text>
+          ) : null}
+          {t.recurrence?.cadence ? (
+            <View style={styles.recPill} testID={`task-recurrence-pill-${t.id}`}>
+              <Ionicons name="repeat" size={10} color={colors.onSurfaceSecondary} />
+              <Text style={styles.recPillText}>{t.recurrence.cadence.replace(/_/g, " ")}</Text>
+            </View>
+          ) : null}
+        </View>
       </View>
       <Pressable
         hitSlop={8}
@@ -294,6 +311,18 @@ const styles = StyleSheet.create({
   priority: { fontSize: 10, color: colors.onSurfaceTertiary, letterSpacing: 1 },
   title: { fontSize: 15, color: colors.onSurface, fontWeight: "500" },
   meta: { fontSize: 12, color: colors.onSurfaceSecondary, marginTop: 2 },
+  recPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 999,
+    backgroundColor: colors.surfaceSecondary,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.border,
+  },
+  recPillText: { fontSize: 10, color: colors.onSurfaceSecondary, fontWeight: "600", letterSpacing: 0.3, textTransform: "capitalize" },
   modalWrap: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
   modalCard: { backgroundColor: colors.surface, padding: spacing.xl, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, gap: spacing.sm, ...(Platform.OS === "ios" ? { paddingBottom: spacing.xxxl } : {}) },
   modalHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },

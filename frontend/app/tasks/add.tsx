@@ -2,11 +2,13 @@ import { useEffect, useState } from "react";
 import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { api } from "@/src/lib/api";
+import { Ionicons } from "@expo/vector-icons";
+import { api, type RecurrenceSpec } from "@/src/lib/api";
 import { colors, spacing, TASK_PRIORITIES, TASK_STATUSES, TASK_ASSIGNMENT_TYPES } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
 import CommitmentTypeToggle from "@/src/components/CommitmentTypeToggle";
+import RecurrenceSheet, { recurrenceLabel } from "@/src/components/RecurrenceSheet";
 
 type Project = { id: string; title: string };
 type Goal = { id: string; title: string };
@@ -43,6 +45,8 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
   const [assignedName, setAssignedName] = useState<string>(initial?.assigned_to_name || "");
   const [assignedPhone, setAssignedPhone] = useState<string>(initial?.assigned_to_phone || "");
   const [commitmentType, setCommitmentType] = useState<"postponable" | "exclusive">(initial?.commitment_type || "postponable");
+  const [recurrence, setRecurrence] = useState<RecurrenceSpec | null>(null);
+  const [recOpen, setRecOpen] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [eos, setEos] = useState<EO[]>([]);
@@ -83,6 +87,7 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
       payload.assigned_to_type = assignedType;
       payload.assigned_to_name = assignedType === "external" ? assignedName.trim() : "";
       payload.assigned_to_phone = assignedType === "external" ? assignedPhone.trim() : "";
+      if (recurrence) payload.recurrence = recurrence;
       if (mode === "add") {
         payload.origin = origin;
         payload.expected_outcome_id = origin === "expected_outcome" ? eoId : null;
@@ -223,6 +228,27 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
           )}
 
           {error ? <Text style={s.errorText} testID={`${testIDPrefix}-error`}>{error}</Text> : null}
+
+          {/* Recurrence — optional. When set, completing this task auto-spawns
+              the next occurrence per the configured cadence. */}
+          <Text style={s.label}>Recurrence</Text>
+          <Pressable
+            onPress={() => setRecOpen(true)}
+            style={[s.input, { flexDirection: "row", alignItems: "center", gap: spacing.sm, minHeight: 48 }]}
+            testID={`${testIDPrefix}-recurrence-toggle`}
+          >
+            <Ionicons name="repeat" size={16} color={colors.onSurfaceSecondary} />
+            <Text style={{ flex: 1, color: recurrence ? colors.onSurface : colors.onSurfaceTertiary, fontSize: 14 }}>
+              {recurrence ? `${recurrenceLabel(recurrence.cadence)} · from ${recurrence.anchor_date}` : "Not recurring — tap to configure"}
+            </Text>
+            {recurrence ? (
+              <Pressable onPress={(e) => { e.stopPropagation?.(); setRecurrence(null); }} hitSlop={10} testID={`${testIDPrefix}-recurrence-clear`}>
+                <Ionicons name="close-circle" size={18} color={colors.onSurfaceTertiary} />
+              </Pressable>
+            ) : (
+              <Ionicons name="chevron-forward" size={14} color={colors.onSurfaceTertiary} />
+            )}
+          </Pressable>
         </ScrollView>
         <View style={s.footer}>
           <Pressable style={[s.cta, busy && s.ctaDisabled]} onPress={save} disabled={busy} testID={`${testIDPrefix}-save-button`}>
@@ -230,6 +256,16 @@ export function TaskForm({ initial, mode, headerTitle, submitLabel, testIDPrefix
           </Pressable>
         </View>
       </KeyboardAvoidingView>
+
+      <RecurrenceSheet
+        visible={recOpen}
+        initial={recurrence}
+        fallbackAnchor={dueDate || undefined}
+        onClose={() => setRecOpen(false)}
+        onSave={async (spec) => setRecurrence(spec)}
+        onClear={recurrence ? async () => setRecurrence(null) : undefined}
+        testID={`${testIDPrefix}-recurrence-sheet`}
+      />
     </SafeAreaView>
   );
 }

@@ -1,0 +1,47 @@
+{
+  "summary": "Backend-only smoke test of the new task/check-in recurrence feature. 15/17 tests passed. Two failures: (1) POST /api/tasks/{id}/recurrence/generate is NOT idempotent by due_date — calling twice creates duplicate sibling tasks on the same date, violating spec §5; (2) missing 'cadence' field returns 422 (Pydantic default) instead of 400 as spec §11 requires. All other recurrence semantics (auto-spawn on completion, pre-generate, end_type=until/count, extended goal cadences, alternate_day period membership in /checkins/required, legacy daily cadence) work correctly.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/tasks/{task_id}/recurrence/generate",
+        "issue": "Not idempotent by due_date. Calling twice with count=3 creates 6 sibling tasks — 3 duplicates on the exact same due_dates (2026-09-08, 2026-09-15, 2026-09-22). Root cause: _pre_generate_series in server.py L1381-1436 does not check for an existing sibling with the same series_id + due_date before insert_one. Contrast with _maybe_spawn_next_occurrence (L1454-1466) which does perform this check. Fix: inside the loop in _pre_generate_series, before insert, query db.tasks.find_one({user_id, series_id, due_date=next_due}) and skip if it exists (also advance cursor_due and continue).",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/tasks (invalid recurrence: missing cadence)",
+        "issue": "Returns 422 (Pydantic validation) instead of 400. Root cause: TaskRecurrenceSpec pydantic model declares 'cadence: str' as required, so Pydantic rejects the payload before HTTPException(status_code=400) in create_task can run. All other invalid-recurrence cases (unknown cadence, until without end_date, count=0, end_date<anchor) correctly return 400 from normalise_recurrence. Fix: either make cadence Optional[str] on TaskRecurrenceSpec (letting normalise_recurrence raise the 400) or add a Pydantic validator that converts to a 400 in the endpoint. Alternatively, update the spec to accept 422 for schema-level violations."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_recurrence.py",
+    "/app/test_reports/pytest/recurrence_results.xml"
+  ],
+  "action_items": [
+    "Fix _pre_generate_series idempotency by adding a per-iteration due_date existence check within the same series_id before inserting the child task (critical, blocks the spec for /recurrence/generate).",
+    "Decide whether 'missing cadence' should return 400 or 422; if 400 is required, make cadence Optional[str] on TaskRecurrenceSpec so normalise_recurrence produces the HTTPException(400)."
+  ],
+  "critical_code_review_comments": [
+    "server.py L1381-1436 (_pre_generate_series): duplicates sibling tasks when called twice; missing idempotency guard that already exists in _maybe_spawn_next_occurrence (L1454-1466). Extract the guard into a shared helper.",
+    "server.py L2107-2115 (/checkins/required): uses $in RECURRENCE_CADENCES which excludes 'manual' and empty-string cadence correctly, but the legacy branch relies on the shared query — good. No issue observed in practice.",
+    "recurrence.py: pure calendar math is well-isolated and testable. normalise_recurrence correctly rejects the four semantic-invalid cases with 400-friendly ValueError."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_recurrence.py (new)",
+    "/app/backend/tests/_cleanup_check.py (helper used to verify DB left clean; sweeps stale TEST_* rows from earlier iterations)"
+  ],
+  "success_rate": {"backend": "88% (15/17)", "frontend": "N/A (skipped per instructions)"},
+  "seed_data_creation": "None persisted. All 12+ tasks, 4 goals, 1 EO, and 1 checkin created by this run were deleted by the module-scoped autouse cleanup fixture. A follow-up sweep also removed 6 stale TEST_* rows from prior iterations (UI_Openings, UI_RuyLopez, p2_UI_task_..., UI_FT, uismoke_74770a, UI_Goal_K). DB verified clean via /app/backend/tests/_cleanup_check.py.",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Test file is /app/backend/tests/test_recurrence.py. Reuse pytest classes as regression suite. Two failing tests: TestGenerateEndpoint::test_generate_three_and_idempotency and TestInvalidRecurrence::test_invalid_recurrence[rec0-missing cadence]. After main agent fixes _pre_generate_series idempotency and (optionally) the 400-vs-422 status for missing cadence, re-run the module. All other scenarios (option A auto-spawn, option B pre-generate, POST/DELETE recurrence, end_type=until with monthly clamp, end_type=count=1, extended goal cadences quarterly/fortnightly, bogus rejection, alternate_day period membership on /checkins/required, legacy daily cadence) are confirmed working.",
+  "rca_of_issue": "Issue 1 (idempotency): _pre_generate_series is invoked by three call sites — task creation with pre_generate_count>0, POST /tasks/{id}/recurrence with pre_generate_count>0, and POST /tasks/{id}/recurrence/generate. Only the third call site is meant to be user-triggered repeatedly. Since the helper never queries for an existing sibling with the same (user_id, series_id, due_date), subsequent invocations always append duplicates. Reproduction: create task with weekly recurrence pre_generate_count=0 → POST /recurrence/generate {count:3} → POST /recurrence/generate {count:3} again → observe 6 sibling tasks with only 3 distinct due_dates. Mitigation: inside the loop, add `if await db.tasks.find_one({\"user_id\": base_task[\"user_id\"], \"series_id\": base_task[\"series_id\"], \"due_date\": next_due}, {\"_id\":0, \"id\":1}): cursor_due = next_due; continue`. Issue 2 (422 vs 400): FastAPI/Pydantic returns 422 for Request-body schema violations before any endpoint code runs. To honour the spec's 400, drop the required-ness from the model for `cadence` (make Optional[str]) so the body deserialises and normalise_recurrence raises the friendly ValueError converted to 400."
+}

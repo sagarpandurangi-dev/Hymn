@@ -4,6 +4,34 @@ const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
 
 export type ApiError = { status: number; message: string };
 
+/** Recurrence cadence vocabulary — shared with `backend/recurrence.py`. */
+export type RecurrenceCadence =
+  | "daily"
+  | "alternate_day"
+  | "weekly"
+  | "fortnightly"
+  | "monthly"
+  | "quarterly"
+  | "half_yearly"
+  | "yearly";
+
+/** Extended cadence enum for goal-level check-in scheduling. Adds `manual`. */
+export type CheckinCadence = RecurrenceCadence | "manual" | "";
+
+/**
+ * Task recurrence configuration. Matches the backend `TaskRecurrenceSpec`
+ * one-to-one. `series_id` is server-owned — clients read it, never set it.
+ */
+export type RecurrenceSpec = {
+  cadence: RecurrenceCadence;
+  anchor_date: string;                       // YYYY-MM-DD
+  end_type?: "never" | "until" | "count";
+  end_date?: string | null;                  // when end_type === "until"
+  occurrences_remaining?: number | null;     // when end_type === "count"
+  series_id?: string | null;
+  pre_generate_count?: number;               // 0..12 upfront materialisation
+};
+
 function _stringifyDetail(d: any): string {
   if (!d) return "Request failed";
   if (typeof d === "string") return d;
@@ -158,15 +186,21 @@ export const api = {
       { id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }[]
     >(`/tasks${qs}`, { auth: true });
   },
-  createTask: (payload: { title: string; due_date?: string; priority?: string; status?: string; notes?: string; origin: string; expected_outcome_id?: string | null; project_id?: string | null; commitment_type?: "postponable" | "exclusive" }) =>
+  createTask: (payload: { title: string; due_date?: string; priority?: string; status?: string; notes?: string; origin: string; expected_outcome_id?: string | null; project_id?: string | null; commitment_type?: "postponable" | "exclusive"; recurrence?: RecurrenceSpec | null }) =>
     request<{ id: string }>("/tasks", { method: "POST", body: payload, auth: true }),
   getTask: (id: string) =>
-    request<{ id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }>(
+    request<{ id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number; recurrence: RecurrenceSpec | null; series_id: string | null; occurrence_index: number }>(
       `/tasks/${id}`,
       { auth: true },
     ),
-  updateTask: (id: string, payload: { title?: string; due_date?: string; priority?: string; status?: string; notes?: string; commitment_type?: "postponable" | "exclusive" }) =>
+  updateTask: (id: string, payload: { title?: string; due_date?: string; priority?: string; status?: string; notes?: string; commitment_type?: "postponable" | "exclusive"; recurrence?: RecurrenceSpec | null; set_recurrence?: boolean }) =>
     request<{ id: string }>(`/tasks/${id}`, { method: "PUT", body: payload, auth: true }),
+  setTaskRecurrence: (id: string, payload: RecurrenceSpec) =>
+    request<any>(`/tasks/${id}/recurrence`, { method: "POST", body: payload, auth: true }),
+  clearTaskRecurrence: (id: string) =>
+    request<any>(`/tasks/${id}/recurrence`, { method: "DELETE", auth: true }),
+  generateTaskOccurrences: (id: string, count: number) =>
+    request<any[]>(`/tasks/${id}/recurrence/generate`, { method: "POST", body: { count }, auth: true }),
   deferTask: (id: string, deferred_until: string) =>
     request<{ id: string; deferred_until: string | null; defer_count: number }>(
       `/tasks/${id}/defer`, { method: "POST", body: { deferred_until }, auth: true },
