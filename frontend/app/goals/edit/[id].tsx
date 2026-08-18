@@ -24,6 +24,8 @@ export default function EditGoalScreen() {
           status: g.status,
           notes: g.notes,
           commitment_type: (g as any).commitment_type || "postponable",
+          checkin_cadence: (g as any).checkin_cadence || "",
+          checkin_anchor_date: (g as any).checkin_anchor_date || "",
         });
       } finally { setLoading(false); }
     })();

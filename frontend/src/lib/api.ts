@@ -32,6 +32,32 @@ export type RecurrenceSpec = {
   pre_generate_count?: number;               // 0..12 upfront materialisation
 };
 
+/**
+ * Behavioural calibration profile returned by `GET /api/finance/calibration`.
+ * Mirrors `backend/calibration.py::compute_profile` one-to-one so the UI can
+ * render it without extra reshaping.
+ */
+export type CalibrationBucket = {
+  value: string;
+  count: number;
+  vindicated: number;
+  regretted: number;
+  vindicated_ratio: number | null;
+  softens: boolean;
+};
+
+export type CalibrationProfile = {
+  total: number;
+  by_classification: Record<string, number>;
+  by_priority: CalibrationBucket[];
+  by_domain: CalibrationBucket[];
+  by_currency: CalibrationBucket[];
+  outcomes: { vindicated: number; regretted: number; pending: number };
+  trend: { last_90d: number; last_180d: number; last_365d: number };
+  soften_min_count: number;
+  soften_min_ratio: number;
+};
+
 function _stringifyDetail(d: any): string {
   if (!d) return "Request failed";
   if (typeof d === "string") return d;
@@ -132,14 +158,14 @@ export const api = {
     request<
       { id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence: string; created_at: string; updated_at: string }[]
     >("/goals", { auth: true }),
-  createGoal: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence?: string; commitment_type?: "postponable" | "exclusive" }) =>
+  createGoal: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence?: string; checkin_anchor_date?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>("/goals", { method: "POST", body: payload, auth: true }),
   getGoal: (id: string) =>
     request<{ id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence: string; created_at: string; updated_at: string; expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number }>(
       `/goals/${id}`,
       { auth: true },
     ),
-  updateGoal: (id: string, payload: { title?: string; domain_id?: string; target_outcome?: string; deadline?: string; status?: string; notes?: string; checkin_cadence?: string; commitment_type?: "postponable" | "exclusive" }) =>
+  updateGoal: (id: string, payload: { title?: string; domain_id?: string; target_outcome?: string; deadline?: string; status?: string; notes?: string; checkin_cadence?: string; checkin_anchor_date?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>(`/goals/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteGoal: (id: string) =>
     request<{ detail: string }>(`/goals/${id}`, { method: "DELETE", auth: true }),
@@ -411,6 +437,12 @@ export const api = {
   runDecisionAssessment: (payload: { amount: string | number; currency: string; due_date: string; priority: string }) =>
     request<any>("/finance/decision-assessment", { method: "POST", body: payload, auth: true }),
   recordOverride: (payload: any) => request<any>("/finance/overrides", { method: "POST", body: payload, auth: true }),
+  setOverrideOutcome: (id: string, outcome: "vindicated" | "regretted" | "pending", notes?: string) =>
+    request<{ ok: boolean; outcome: string }>(
+      `/finance/overrides/${id}/outcome`,
+      { method: "POST", body: { outcome, notes }, auth: true },
+    ),
+  getCalibration: () => request<CalibrationProfile>("/finance/calibration", { auth: true }),
 
   rebalanceCandidates: (currency: string, exclude_id?: string) =>
     request<any[]>(`/finance/rebalance-candidates?currency=${encodeURIComponent(currency)}${exclude_id ? `&exclude_id=${encodeURIComponent(exclude_id)}` : ""}`, { auth: true }),

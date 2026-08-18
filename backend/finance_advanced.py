@@ -59,6 +59,9 @@ from finance_manager import (
 
 advanced_router = APIRouter(prefix="/finance", tags=["finance-advanced"])
 
+# Behavioural calibration — profile aggregation + assessment softening.
+from calibration import calibrate_classification, compute_profile  # noqa: E402
+
 
 # ============================================================================
 # 22 \u2014 Expected future income
@@ -745,8 +748,40 @@ async def decision_assessment(
                 assumptions.append(a)
     confidence = liq.get("confidence", "medium")
 
+    # ------------------------------------------------------------------
+    # Behavioural calibration (§backlog): consult the user's override
+    # history to *soften* the classification when their track record
+    # shows they've been repeatedly right to proceed on similar
+    # warnings. Never escalates.
+    # ------------------------------------------------------------------
+    domain_hint = ""
+    try:
+        if body.priority in PRIORITIES:
+            pass  # (currency already available)
+        # Best-effort domain: read from any linked commitment on the account
+        # bucket the proposal falls into. Left blank when unknown.
+    except Exception:  # noqa: BLE001
+        domain_hint = ""
+    overrides = await db.override_decisions.find(
+        {"user_id": current_user["id"]}, {"_id": 0},
+    ).to_list(length=5000)
+    profile = compute_profile(overrides)
+    calibration = calibrate_classification(
+        {
+            "classification": classification,
+            "priority": body.priority,
+            "currency": body.currency,
+            "domain": domain_hint,
+        },
+        profile,
+        enabled=True,
+    )
+    effective_classification = calibration["calibrated"] if calibration["applied"] else classification
+
     return {
-        "classification": classification,
+        "classification": effective_classification,
+        "original_classification": classification,
+        "calibration": calibration,
         "projected_liquidity_by_due_date": _quantize_out(projected_liquid_at_due) if projected_liquid_at_due is not None else None,
         "projected_shortfall": (
             _quantize_out(-projected_liquid_at_due)
@@ -815,6 +850,59 @@ async def record_override(body: OverrideRecordPayload, current_user: dict = Depe
 # NOTE: `GET /finance/overrides` (list) removed per finance audit — no UI
 # consumer. `POST /finance/overrides` above is still used by the commitment
 # creation flow when a user proceeds despite a warning.
+
+
+@advanced_router.get("/calibration")
+async def get_calibration(current_user: dict = Depends(get_current_user)):
+    """Return the user's behavioural calibration profile.
+
+    Aggregates every recorded override into per-axis buckets, tags the
+    ones that pass the softening threshold, and surfaces vindication /
+    regret tallies plus 90/180/365-day trend counts for the UI.
+    """
+    db = get_db()
+    overrides = await db.override_decisions.find(
+        {"user_id": current_user["id"]}, {"_id": 0},
+    ).to_list(length=5000)
+    return compute_profile(overrides)
+
+
+# ============================================================================
+# Override outcome — vindicated / regretted (§calibration learning loop)
+# ============================================================================
+class OverrideOutcomeBody(BaseModel):
+    """Payload for `POST /finance/overrides/{id}/outcome`. Idempotent."""
+    outcome: str  # "vindicated" | "regretted" | "pending"
+    notes: Optional[str] = None
+
+
+@advanced_router.post("/overrides/{override_id}/outcome")
+async def set_override_outcome(
+    override_id: str,
+    body: OverrideOutcomeBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Manually classify an override's outcome.
+
+    The commitment lifecycle already writes `vindicated` when a
+    reserved commitment completes without overrun (via the completion
+    hook in finance_manager.py). This endpoint exists so the user can
+    correct or record outcomes for legacy overrides that predate the
+    hook.
+    """
+    if body.outcome not in ("vindicated", "regretted", "pending"):
+        raise HTTPException(status_code=400, detail="outcome must be vindicated|regretted|pending")
+    db = get_db()
+    result = await db.override_decisions.update_one(
+        {"id": override_id, "user_id": current_user["id"]},
+        {"$set": {
+            "actual_outcome": body.outcome if body.outcome != "pending" else None,
+            "outcome_notes": (body.notes or "").strip() or None,
+        }},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Override not found")
+    return {"ok": True, "outcome": body.outcome}
 
 
 # ============================================================================

@@ -227,6 +227,14 @@ export default function NewCommitment() {
             {assessment ? (
               <View style={{ gap: financeSpace.xs }}>
                 <FoldPill label={classificationLabel(assessment.classification)} tone={CLASSIFICATION_TONE[assessment.classification] || "neutral"} />
+                {assessment.calibration?.applied ? (
+                  <View style={styles.calibChip} testID="fc-calibration-note">
+                    <Ionicons name="pulse-outline" size={12} color={financeColors.accent} />
+                    <Text style={styles.calibText}>
+                      Softened from “{classificationLabel(assessment.original_classification || assessment.calibration.original)}” by your calibration history.
+                    </Text>
+                  </View>
+                ) : null}
                 <FoldCard style={{ marginTop: financeSpace.sm }}>
                   <FoldRow first label="Projected liquid on due date" right={<FoldAmount currency={currency} value={formatMoney(assessment.projected_liquidity_by_due_date || "0")} />} />
                   {assessment.projected_shortfall ? (
@@ -367,4 +375,15 @@ const styles = StyleSheet.create({
   rebCard: { flexDirection: "row", alignItems: "center", gap: financeSpace.sm, padding: financeSpace.md },
   rebTitle: { fontSize: 13, fontWeight: "600", color: financeColors.ink },
   rebMeta: { fontSize: 11, color: financeColors.inkMuted, marginTop: 2 },
+  calibChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: financeSpace.sm,
+    paddingVertical: 4,
+    borderRadius: financeRadius.pill,
+    backgroundColor: "#EFEFE9",
+    alignSelf: "flex-start",
+  },
+  calibText: { fontSize: 11, color: financeColors.ink, fontWeight: "600", flexShrink: 1 },
 });

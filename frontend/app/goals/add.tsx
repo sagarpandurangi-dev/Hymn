@@ -15,12 +15,31 @@ type Props = {
   initial?: {
     title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string;
     commitment_type?: "postponable" | "exclusive";
+    checkin_cadence?: string;
+    checkin_anchor_date?: string;
   } | null;
-  onSubmit: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; commitment_type: "postponable" | "exclusive" }) => Promise<void>;
+  onSubmit: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; commitment_type: "postponable" | "exclusive"; checkin_cadence: string; checkin_anchor_date: string }) => Promise<void>;
   headerTitle: string;
   submitLabel: string;
   testIDPrefix: string;
 };
+
+// Cadence catalogue rendered as chips. Kept aligned with
+// `backend/recurrence.py::EXTENDED_CHECKIN_CADENCES` — see also
+// `/app/frontend/src/components/RecurrenceSheet.tsx` for the label mapping
+// used by task recurrence (identical vocabulary).
+const CADENCE_OPTIONS: { value: string; label: string }[] = [
+  { value: "",              label: "None" },
+  { value: "daily",         label: "Daily" },
+  { value: "alternate_day", label: "Alternate day" },
+  { value: "weekly",        label: "Weekly" },
+  { value: "fortnightly",   label: "Fortnightly" },
+  { value: "monthly",       label: "Monthly" },
+  { value: "quarterly",     label: "Quarterly" },
+  { value: "half_yearly",   label: "Half-yearly" },
+  { value: "yearly",        label: "Yearly" },
+  { value: "manual",        label: "Manual" },
+];
 
 export function GoalForm({ initial, onSubmit, headerTitle, submitLabel, testIDPrefix }: Props) {
   const router = useRouter();
@@ -32,6 +51,8 @@ export function GoalForm({ initial, onSubmit, headerTitle, submitLabel, testIDPr
   const [status, setStatus] = useState<string>(initial?.status || "active");
   const [notes, setNotes] = useState(initial?.notes || "");
   const [commitmentType, setCommitmentType] = useState<"postponable" | "exclusive">(initial?.commitment_type || "postponable");
+  const [cadence, setCadence] = useState<string>(initial?.checkin_cadence || "");
+  const [cadenceAnchor, setCadenceAnchor] = useState<string>(initial?.checkin_anchor_date || "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,6 +82,8 @@ export function GoalForm({ initial, onSubmit, headerTitle, submitLabel, testIDPr
         status,
         notes: notes.trim(),
         commitment_type: commitmentType,
+        checkin_cadence: cadence,
+        checkin_anchor_date: cadenceAnchor.trim(),
       });
     } catch (e: any) {
       setError(e?.message || "Could not save");
@@ -146,6 +169,43 @@ export function GoalForm({ initial, onSubmit, headerTitle, submitLabel, testIDPr
           <Text style={styles.label}>Commitment</Text>
           <CommitmentTypeToggle value={commitmentType} onChange={setCommitmentType} testID={`${testIDPrefix}-commitment`} />
 
+          {/* Check-in cadence — how often the goal expects a fresh
+              check-in. This drives `/api/checkins/required` and is
+              inherited by any task linked to this goal.  Anchor date is
+              optional; when blank the backend falls back to the goal's
+              creation date. */}
+          <Text style={styles.label}>Check-in cadence</Text>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipRow}>
+            {CADENCE_OPTIONS.map((opt) => {
+              const sel = cadence === opt.value;
+              return (
+                <Pressable
+                  key={opt.value || "none"}
+                  onPress={() => setCadence(opt.value)}
+                  style={[styles.chip, sel && styles.chipSelected]}
+                  testID={`${testIDPrefix}-cadence-${opt.value || "none"}`}
+                >
+                  <Text style={[styles.chipText, sel && styles.chipTextSelected]}>{opt.label}</Text>
+                </Pressable>
+              );
+            })}
+          </ScrollView>
+          {cadence && cadence !== "manual" ? (
+            <>
+              <Text style={styles.helpText}>
+                Anchor date — the cadence is computed from this day. Leave blank to use today.
+              </Text>
+              <DateTimeField
+                mode="date"
+                value={cadenceAnchor}
+                onChange={setCadenceAnchor}
+                placeholder="Choose date (optional)"
+                clearable
+                testID={`${testIDPrefix}-cadence-anchor`}
+              />
+            </>
+          ) : null}
+
           <Text style={styles.label}>Notes</Text>
           <TextInput
             style={styles.notes}
@@ -211,6 +271,7 @@ const styles = StyleSheet.create({
   chipText: { color: colors.onBrandTertiary, fontSize: 13, fontWeight: "500" },
   chipTextSelected: { color: colors.onBrandPrimary },
   errorText: { color: colors.error, marginTop: spacing.md, fontSize: 13 },
+  helpText: { fontSize: 11, color: colors.onSurfaceSecondary, marginTop: spacing.sm, marginBottom: 4, fontStyle: "italic", lineHeight: 16 },
   footer: { paddingHorizontal: spacing.xl, paddingBottom: spacing.md, paddingTop: spacing.sm },
   cta: { backgroundColor: colors.onSurface, paddingVertical: spacing.lg, borderRadius: radius.pill, alignItems: "center" },
   ctaDisabled: { opacity: 0.5 },

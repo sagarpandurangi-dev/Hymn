@@ -1111,6 +1111,23 @@ async def complete_commitment(
     updated = await _apply_complete(
         db, current_user["id"], c, body.actual_amount, body.actual_event_id, body.event_date,
     )
+    # Behavioural-calibration hook: when a completed commitment had an
+    # override recorded against it, tag that override as vindicated
+    # (actual outflow within the reserved envelope) or regretted
+    # (overrun). Silently no-ops when there was no override.
+    try:
+        actual = _decimal_from_stored(updated.get("actual_amount"))
+        reserved = _decimal_from_stored(c.get("amount"))
+        outcome = "regretted" if actual > reserved else "vindicated"
+        await db.override_decisions.update_many(
+            {"user_id": current_user["id"], "commitment_id": commitment_id, "actual_outcome": None},
+            {"$set": {
+                "actual_outcome": outcome,
+                "user_or_hymn_correct": "user" if outcome == "vindicated" else "hymn",
+            }},
+        )
+    except Exception:  # noqa: BLE001 — best-effort; do not fail completion
+        pass
     return _project_commitment(updated)
 
 
@@ -1150,6 +1167,15 @@ async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get
         source="manual",
         new_value={"state": "cancelled", "released_amount": released_amt},
     )
+    # Calibration hook: cancelling after an override → regretted.
+    if c.get("state") in ("reserved", "expired"):
+        try:
+            await db.override_decisions.update_many(
+                {"user_id": current_user["id"], "commitment_id": commitment_id, "actual_outcome": None},
+                {"$set": {"actual_outcome": "regretted", "user_or_hymn_correct": "hymn"}},
+            )
+        except Exception:  # noqa: BLE001
+            pass
     doc = await _read_commitment_by_id(db, current_user["id"], commitment_id)
     return _project_commitment(doc or {})
 
