@@ -329,7 +329,7 @@ export const api = {
     request<{ id: string }>("/checkins", { method: "POST", body: payload, auth: true }),
   getCheckin: (id: string) =>
     request<any>(`/checkins/${id}`, { auth: true }),
-  updateCheckin: (id: string, payload: { title?: string; date?: string; time?: string; notes?: string; attachment?: string; money_spent?: string | null; money_currency?: string | null; account_id?: string | null }) =>
+  updateCheckin: (id: string, payload: { title?: string; date?: string; time?: string; notes?: string; attachment?: string; money_spent?: string | null; money_currency?: string | null; account_id?: string | null; occurred_at?: string | null }) =>
     request<{ id: string }>(`/checkins/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteCheckin: (id: string) =>
     request<{ detail: string }>(`/checkins/${id}`, { method: "DELETE", auth: true }),

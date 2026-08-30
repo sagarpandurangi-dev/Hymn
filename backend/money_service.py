@@ -2,42 +2,46 @@
 
 This module owns the single, canonical calculation of:
   * an account's *effective balance* — snapshot ``current_value`` plus
-    every confirmed inflow/outflow linked to that account since the
-    snapshot's ``balance_as_of`` timestamp.
+    every FINANCIALLY APPLIED inflow/outflow linked to that account
+    since the snapshot's ``balance_as_of`` timestamp.
   * per-currency *available unreserved money* — sum of effective
-    balances of liquid asset accounts minus active reserved commitments.
+    balances of **liquid asset** accounts minus active reserved
+    commitments.
 
-Batch 2A (Foundation Cleanup / Money Source of Truth) explicitly forbids
-competing "current position" or "available money" math anywhere else in
-the codebase — every consumer must call one of the helpers below.
+Batch 2A + Correction 1 lock in the applied-event rule:
+an event affects an account balance ONLY when every one of these holds:
+  1. ``account_id`` is present and points to an ASSET account of the
+     event's currency owned by the same user (endpoint enforces
+     user_id + currency + asset_type at write time).
+  2. ``confirmation_status == "confirmed"``.
+  3. ``lifecycle_status`` is one of the applied set:
+     ``awaiting_reconciliation`` / ``matched`` / ``resolved_unplanned``.
+  4. ``occurred_at`` is present AND (parsed as tz-aware UTC datetime)
+     is strictly greater than the account's ``balance_as_of``
+     (also parsed as tz-aware UTC datetime). Legacy or date-only
+     events with no safely-placeable ``occurred_at`` remain unapplied
+     and visibly require review.
 
 Design invariants
 -----------------
-1. Snapshots are authoritative *as of* ``balance_as_of``. Events created
-   before that timestamp must never be reapplied — the snapshot already
-   reflects them.
-2. An event contributes to an account's effective balance only when
-   * it has ``account_id`` set,
-   * its ``lifecycle_status`` is one of the applied statuses
-     (``awaiting_reconciliation``, ``matched``, ``resolved_unplanned``),
-   * its ``created_at`` is strictly greater than the account's
-     ``balance_as_of``.
-3. Availability subtracts *only* active reserved commitments (state
-   ``reserved`` or ``expired``). Confirmed events are NOT subtracted at
-   the aggregate again because they are already inside the effective
-   balance.
-4. All money math flows through ``decimal.Decimal``; no binary floats.
+* Snapshots are authoritative *as of* ``balance_as_of``. Events
+  occurring at or before that timestamp are never reapplied.
+* Availability subtracts only active reserved commitments (state
+  ``reserved`` or ``expired``). Confirmed events are NOT subtracted at
+  the aggregate again because they are already inside the effective
+  balance.
+* Availability includes only accounts whose ``account_type`` is in
+  ``ASSET_ACCOUNT_TYPES`` and whose ``liquidity_type == 'liquid'``.
+  Liabilities and semi/illiquid assets are excluded here.
+* All money math flows through ``decimal.Decimal``; no binary floats.
 
-The module deliberately exposes both:
-  * pure helpers (``compute_effective_balance``,
-    ``compute_available_unreserved``) that operate on in-memory dicts —
-    fully unit-testable without a database, and
-  * async loaders that assemble the same result from MongoDB.
-
-Test coverage lives in ``backend/safety_tests/test_money_service.py``.
+Consumers must call one of the helpers here — no other module may
+recompute "available money" or "effective balance". Test coverage is in
+``backend/safety_tests/test_money_service.py``.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Optional
 
@@ -45,17 +49,15 @@ from bson.decimal128 import Decimal128
 
 
 # ---------------------------------------------------------------------------
-# Constants — event lifecycle status enum for Batch 2A.
+# Constants — event lifecycle status enum for Batch 2A + Correction 1.
 # ---------------------------------------------------------------------------
 
-# Statuses that MUST count against an account's effective balance.
 APPLIED_LIFECYCLE_STATUSES: frozenset = frozenset({
     "awaiting_reconciliation",
     "matched",
     "resolved_unplanned",
 })
 
-# Statuses that MUST NOT affect balances (pending or reversed).
 UNAPPLIED_LIFECYCLE_STATUSES: frozenset = frozenset({
     "pending_account_assignment",
     "void",
@@ -63,20 +65,25 @@ UNAPPLIED_LIFECYCLE_STATUSES: frozenset = frozenset({
 
 ALL_LIFECYCLE_STATUSES: frozenset = APPLIED_LIFECYCLE_STATUSES | UNAPPLIED_LIFECYCLE_STATUSES
 
-# Commitment states that reserve money (draft doesn't; completed/cancelled
-# release).
+# Commitment states that reserve money.
 RESERVING_COMMITMENT_STATES: frozenset = frozenset({"reserved", "expired"})
 
-# Asset account types that count as *liquid* for availability. Portfolio
-# owns the account_type taxonomy — we re-declare only the "liquid" filter
-# label here because availability filters by ``liquidity_type == 'liquid'``,
-# not by account_type.
+# Liquidity axis label used for availability filtering.
 LIQUIDITY_LIQUID = "liquid"
+
+# Asset account types recognised by Portfolio. Mirrors
+# ``portfolio_manager.ASSET_ACCOUNT_TYPES`` — kept as a private set here
+# so this module can be imported independently for pure unit tests. The
+# HTTP layer remains the source of truth; changes to the Portfolio list
+# must be reflected here.
+ASSET_ACCOUNT_TYPES: frozenset = frozenset({
+    "cash", "bank", "fixed_deposit", "recurring_deposit", "mutual_fund",
+    "stock", "bond", "crypto", "gold", "real_estate", "other_asset",
+})
 
 
 # ---------------------------------------------------------------------------
-# Decimal helpers — every consumer must go through these to keep money math
-# strictly Decimal end-to-end.
+# Decimal + datetime helpers.
 # ---------------------------------------------------------------------------
 
 def _to_decimal(v: Any) -> Decimal:
@@ -92,21 +99,80 @@ def _to_decimal(v: Any) -> Decimal:
         return Decimal(0)
 
 
-def _is_after(event_created_at: Optional[str], account_balance_as_of: Optional[str]) -> bool:
-    """Return True when the event's ``created_at`` is strictly greater
-    than the account's ``balance_as_of``. Comparison is lexical on ISO-8601
-    strings — which is order-preserving for well-formed timestamps.
-
-    Missing/empty ``balance_as_of`` means the account has never had a
-    snapshot cut-off; treat every event as post-snapshot so the caller
-    still gets a consistent effective balance (though in practice startup
-    migration ensures every account has a ``balance_as_of``).
+def parse_utc(v: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 string (or ``datetime``) into a tz-aware UTC
+    ``datetime``. Returns ``None`` when the input is missing or cannot
+    be parsed *with* timezone information — deliberately strict: naive
+    timestamps are refused so callers cannot mistake a wall-clock string
+    for an authoritative UTC moment.
     """
-    if not event_created_at:
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            return None
+        return v.astimezone(timezone.utc)
+    if not isinstance(v, str):
+        return None
+    s = v.strip()
+    if not s:
+        return None
+    # Python's fromisoformat handles 'Z' only from 3.11+; be permissive.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return None
+    return dt.astimezone(timezone.utc)
+
+
+def _event_occurs_after_snapshot(event: dict, account_balance_as_of: Any) -> bool:
+    """Strict tz-aware comparison. When either side lacks a safely
+    parseable UTC datetime we conservatively return ``False`` so the
+    event does NOT affect the balance — the caller must surface the
+    event for user review.
+    """
+    ev_dt = parse_utc(event.get("occurred_at"))
+    snap_dt = parse_utc(account_balance_as_of)
+    if ev_dt is None:
         return False
-    if not account_balance_as_of:
+    if snap_dt is None:
+        # Snapshot has never had an authoritative cut-off; any properly
+        # dated event applies. In practice migration ensures every
+        # account carries a ``balance_as_of``.
         return True
-    return event_created_at > account_balance_as_of
+    return ev_dt > snap_dt
+
+
+# ---------------------------------------------------------------------------
+# Applied-event predicate — the single canonical test.
+# ---------------------------------------------------------------------------
+
+def event_is_applied_to_account(
+    event: dict,
+    account: dict,
+    *,
+    applied_statuses: Iterable[str] = APPLIED_LIFECYCLE_STATUSES,
+) -> bool:
+    """Return True iff ``event`` counts towards ``account``'s effective
+    balance under the strict Batch 2A Correction 1 rules."""
+    if event.get("account_id") != account.get("id"):
+        return False
+    if event.get("confirmation_status") != "confirmed":
+        return False
+    if event.get("lifecycle_status") not in frozenset(applied_statuses):
+        return False
+    # Currency guard: the endpoint layer enforces this at write time,
+    # but a defensive check here means a data-corruption event never
+    # contaminates a different currency's totals.
+    if event.get("currency") and account.get("currency") and event["currency"] != account["currency"]:
+        return False
+    if not _event_occurs_after_snapshot(event, account.get("balance_as_of")):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -119,29 +185,18 @@ def compute_effective_balance(
     *,
     applied_statuses: Iterable[str] = APPLIED_LIFECYCLE_STATUSES,
 ) -> Decimal:
-    """Return the account's effective balance as a Decimal.
+    """Return the account's effective balance (Decimal).
 
-    Formula:
+    Formula::
+
         effective = current_value
-                  + sum(applied inflow events after balance_as_of)
-                  - sum(applied outflow events after balance_as_of)
-
-    ``events`` may be a broader iterable — this function filters by
-    ``account_id`` and ``lifecycle_status`` internally so callers can pass
-    the full user event list without having to pre-filter.
+                  + Σ applied inflow after balance_as_of
+                  - Σ applied outflow after balance_as_of
     """
-    applied = frozenset(applied_statuses)
     snapshot = _to_decimal(account.get("current_value"))
-    balance_as_of = account.get("balance_as_of")
-    account_id = account.get("id")
-
     delta = Decimal(0)
     for ev in events:
-        if ev.get("account_id") != account_id:
-            continue
-        if ev.get("lifecycle_status") not in applied:
-            continue
-        if not _is_after(ev.get("created_at"), balance_as_of):
+        if not event_is_applied_to_account(ev, account, applied_statuses=applied_statuses):
             continue
         amt = _to_decimal(ev.get("amount"))
         direction = ev.get("direction")
@@ -158,31 +213,12 @@ def summarise_effective_balances(
     *,
     applied_statuses: Iterable[str] = APPLIED_LIFECYCLE_STATUSES,
 ) -> list[dict]:
-    """Return one row per account with snapshot / effective breakdown.
-
-    Row shape (all money values are ``Decimal``; caller quantises for
-    JSON):
-
-        {
-            "account_id": ...,
-            "currency": ...,
-            "liquidity_type": ...,
-            "account_type": ...,
-            "snapshot_current_value": Decimal,
-            "snapshot_balance_as_of": Optional[str],
-            "post_snapshot_inflows": Decimal,
-            "post_snapshot_outflows": Decimal,
-            "effective_current_balance": Decimal,
-        }
-    """
+    """Return one row per account with snapshot / effective breakdown."""
     applied = frozenset(applied_statuses)
-    # Bucket events by account_id once — O(n + a) instead of O(a * n).
     by_account: dict = {}
     for ev in events:
         aid = ev.get("account_id")
         if not aid:
-            continue
-        if ev.get("lifecycle_status") not in applied:
             continue
         by_account.setdefault(aid, []).append(ev)
 
@@ -190,11 +226,10 @@ def summarise_effective_balances(
     for a in accounts:
         aid = a.get("id")
         snapshot = _to_decimal(a.get("current_value"))
-        balance_as_of = a.get("balance_as_of")
         inflows = Decimal(0)
         outflows = Decimal(0)
         for ev in by_account.get(aid, ()):
-            if not _is_after(ev.get("created_at"), balance_as_of):
+            if not event_is_applied_to_account(ev, a, applied_statuses=applied):
                 continue
             amt = _to_decimal(ev.get("amount"))
             if ev.get("direction") == "inflow":
@@ -209,7 +244,7 @@ def summarise_effective_balances(
             "account_type": a.get("account_type"),
             "name": a.get("name") or "",
             "snapshot_current_value": snapshot,
-            "snapshot_balance_as_of": balance_as_of,
+            "snapshot_balance_as_of": a.get("balance_as_of"),
             "post_snapshot_inflows": inflows,
             "post_snapshot_outflows": outflows,
             "effective_current_balance": effective,
@@ -221,12 +256,7 @@ def compute_available_unreserved(
     effective_by_currency: dict,
     reserved_by_currency: dict,
 ) -> dict:
-    """Combine per-currency effective balances with reservations.
-
-    Returns ``{currency: {"effective": Decimal, "reserved": Decimal,
-    "available_unreserved": Decimal}}``. Callers are responsible for
-    quantising Decimals into JSON strings.
-    """
+    """Combine per-currency effective balances with reservations."""
     result: dict = {}
     for cur in set(list(effective_by_currency.keys()) + list(reserved_by_currency.keys())):
         eff = _to_decimal(effective_by_currency.get(cur, Decimal(0)))
@@ -241,26 +271,53 @@ def compute_available_unreserved(
 
 def sum_liquid_effective_by_currency(rows: Iterable[dict]) -> dict:
     """Aggregate ``summarise_effective_balances`` rows into per-currency
-    liquid-asset totals used by availability."""
+    LIQUID ASSET totals used by availability. Only rows whose
+    ``liquidity_type == 'liquid'`` AND ``account_type`` is in
+    ``ASSET_ACCOUNT_TYPES`` are counted — liabilities and non-liquid
+    assets never contribute to available money.
+    """
     totals: dict = {}
     for r in rows:
         if r.get("liquidity_type") != LIQUIDITY_LIQUID:
             continue
-        # Availability filters to asset accounts (positive money) — the
-        # liquidity axis already excludes liabilities in practice, but be
-        # explicit here.
+        if r.get("account_type") not in ASSET_ACCOUNT_TYPES:
+            continue
         cur = r.get("currency") or ""
         totals[cur] = totals.get(cur, Decimal(0)) + r.get("effective_current_balance", Decimal(0))
     return totals
 
 
 def collect_pending_account_events(events: Iterable[dict]) -> list[dict]:
-    """Return the subset of events that block confidence in the position
-    (lifecycle_status == 'pending_account_assignment')."""
-    return [
-        ev for ev in events
-        if ev.get("lifecycle_status") == "pending_account_assignment"
-    ]
+    """Return events that block full confidence in the position.
+
+    An event is 'pending' — visibly requiring the user's review — when
+    either:
+
+    * it is confirmed but has no account_id (needs assignment), or
+    * its ``lifecycle_status`` is ``pending_account_assignment``, or
+    * it is confirmed with an account but has no safely-placeable
+      ``occurred_at`` (legacy/date-only import that we refuse to
+      silently place either side of a snapshot).
+
+    Void, rejected, and duplicate-pending events are NOT surfaced here
+    because they are already handled by their own flows.
+    """
+    out: list[dict] = []
+    for ev in events:
+        if ev.get("lifecycle_status") == "pending_account_assignment":
+            out.append(ev)
+            continue
+        if (
+            ev.get("confirmation_status") == "confirmed"
+            and ev.get("lifecycle_status") in APPLIED_LIFECYCLE_STATUSES
+            and ev.get("account_id")
+            and parse_utc(ev.get("occurred_at")) is None
+        ):
+            # Confirmed with an account but no safe occurred_at — the
+            # user must review this event before Finance trusts the
+            # position. Tag it explicitly so the UI can distinguish.
+            out.append({**ev, "review_reason": "missing_occurred_at"})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -273,17 +330,26 @@ async def _load_user_accounts(db, user_id: str) -> list[dict]:
     ).to_list(length=5000)
 
 
-async def _load_user_events(db, user_id: str, *, only_applied: bool = False) -> list[dict]:
-    q: dict = {"user_id": user_id}
-    if only_applied:
-        q["lifecycle_status"] = {"$in": list(APPLIED_LIFECYCLE_STATUSES)}
-    return await db.financial_events.find(q, {"_id": 0}).to_list(length=50000)
+async def _load_applied_and_all_events(db, user_id: str):
+    """Return (applied_events, all_events). Applied is the subset that
+    the strict predicate accepts (confirmed + applied lifecycle +
+    account_id + parseable occurred_at). This is a *pre-filter* — the
+    per-account predicate is still evaluated inside the calculators to
+    enforce the snapshot cutoff.
+    """
+    all_events = await db.financial_events.find(
+        {"user_id": user_id}, {"_id": 0},
+    ).to_list(length=50000)
+    applied_events = [
+        e for e in all_events
+        if e.get("confirmation_status") == "confirmed"
+        and e.get("lifecycle_status") in APPLIED_LIFECYCLE_STATUSES
+        and e.get("account_id")
+    ]
+    return applied_events, all_events
 
 
 async def _load_reserved_totals(db, user_id: str) -> dict:
-    """Per-currency total of active reserved commitments (state in
-    RESERVING_COMMITMENT_STATES). Reads from ``resource_allocations`` —
-    the same source of truth Finance Manager uses."""
     rows = await db.resource_allocations.find(
         {"user_id": user_id, "resource_type": "money",
          "financial_commitment_id": {"$ne": None},
@@ -293,44 +359,23 @@ async def _load_reserved_totals(db, user_id: str) -> dict:
     totals: dict = {}
     for r in rows:
         cur = r.get("currency") or ""
-        # Prefer explicit ``amount`` if present; fall back to ``quantity``
-        # (the pure allocation semantics).
         raw = r.get("amount") if r.get("amount") is not None else r.get("quantity")
         totals[cur] = totals.get(cur, Decimal(0)) + _to_decimal(raw)
     return totals
 
 
 async def load_account_positions(db, user_id: str) -> list[dict]:
-    """Load per-account effective balance rows (Decimal preserved)."""
     accounts = await _load_user_accounts(db, user_id)
-    events = await _load_user_events(db, user_id, only_applied=True)
-    return summarise_effective_balances(accounts, events)
+    applied_events, _ = await _load_applied_and_all_events(db, user_id)
+    return summarise_effective_balances(accounts, applied_events)
 
 
 async def load_availability(db, user_id: str) -> dict:
-    """Load the full availability breakdown used by every Finance /
-    Portfolio surface that reports "current position" or "available
-    money".
-
-    Return shape (Decimal preserved — quantise at the JSON boundary)::
-
-        {
-            "accounts": [row, ...],
-            "by_currency": {
-                cur: {
-                    "liquid_effective": Decimal,
-                    "reserved": Decimal,
-                    "available_unreserved": Decimal,
-                }, ...},
-            "pending_events": [event, ...],   # unassigned / pending
-        }
-    """
+    """Load the full availability breakdown used by every current-money
+    / available-money surface."""
     accounts = await _load_user_accounts(db, user_id)
-    all_events = await _load_user_events(db, user_id, only_applied=False)
-    # Split — applied events feed effective balances, pending events flag
-    # the caller UI so we don't silently pretend everything is confirmed.
-    applied = [e for e in all_events if e.get("lifecycle_status") in APPLIED_LIFECYCLE_STATUSES]
-    rows = summarise_effective_balances(accounts, applied)
+    applied_events, all_events = await _load_applied_and_all_events(db, user_id)
+    rows = summarise_effective_balances(accounts, applied_events)
     liquid_totals = sum_liquid_effective_by_currency(rows)
     reserved_totals = await _load_reserved_totals(db, user_id)
     by_cur_raw = compute_available_unreserved(liquid_totals, reserved_totals)
@@ -349,12 +394,46 @@ async def load_availability(db, user_id: str) -> dict:
     }
 
 
+async def monthly_actual_spending(
+    db, user_id: str, month: str, currency: str,
+) -> Decimal:
+    """Compute month-to-date outflows from CANONICAL applied events —
+    the single source of truth. Sums the amount of every event that:
+
+    * belongs to ``user_id`` and matches ``currency``
+    * has ``direction == 'outflow'``
+    * is applied (confirmation_status='confirmed' + lifecycle_status in
+      APPLIED + account_id present)
+    * ``occurred_at`` (UTC) falls inside the requested ``YYYY-MM``.
+
+    Events lacking an ``occurred_at`` are excluded — they are pending
+    review and MUST NOT contribute to spending totals.
+    """
+    applied_events, _ = await _load_applied_and_all_events(db, user_id)
+    total = Decimal(0)
+    for ev in applied_events:
+        if ev.get("currency") != currency:
+            continue
+        if ev.get("direction") != "outflow":
+            continue
+        occ = parse_utc(ev.get("occurred_at"))
+        if occ is None:
+            continue
+        if occ.strftime("%Y-%m") != month:
+            continue
+        total += _to_decimal(ev.get("amount"))
+    return total
+
+
 __all__ = [
     "APPLIED_LIFECYCLE_STATUSES",
     "UNAPPLIED_LIFECYCLE_STATUSES",
     "ALL_LIFECYCLE_STATUSES",
     "RESERVING_COMMITMENT_STATES",
     "LIQUIDITY_LIQUID",
+    "ASSET_ACCOUNT_TYPES",
+    "parse_utc",
+    "event_is_applied_to_account",
     "compute_effective_balance",
     "summarise_effective_balances",
     "compute_available_unreserved",
@@ -362,4 +441,5 @@ __all__ = [
     "collect_pending_account_events",
     "load_account_positions",
     "load_availability",
+    "monthly_actual_spending",
 ]

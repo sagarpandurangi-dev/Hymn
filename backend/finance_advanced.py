@@ -367,47 +367,103 @@ async def reconcile_confirm(
     event_id: str, body: ReconcileConfirmPayload,
     current_user: dict = Depends(get_current_user),
 ):
-    """User confirms an event is a match for a commitment. This completes the
-    commitment with the event as the actual (per \u00a713 rules) and marks the
-    event ``matched`` so subsequent forecasts don't double-count.
+    """User confirms an event is a match for a commitment. This completes
+    the commitment with the event as the actual (per \u00a713 rules) and
+    marks the event ``matched`` so subsequent forecasts don't double-count.
 
-    Batch 2A: idempotent — repeat calls on the same (event, commitment)
-    pair MUST NOT create additional monetary events. If the event is
-    already ``matched``, we no-op and return the current commitment.
+    Batch 2A Correction 1:
+    * conditional DB update — permitted transition is
+      ``awaiting_reconciliation \u2192 matched`` only, guarded by
+      ``find_one_and_update`` so concurrent duplicate requests produce
+      exactly one state change and one audit entry.
+    * a ``matched`` event cannot be matched to another commitment.
+    * an accountless event cannot be matched — it must first receive a
+      valid asset account.
+    * ledger release runs ONLY after the event transition succeeds.
     """
     db = get_db()
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
-    # Idempotency: an event already matched to this commitment is a no-op.
-    if ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED and ev.get("commitment_id") == body.commitment_id:
-        c_existing = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
-        if c_existing:
-            return {"commitment": _project_commitment(c_existing)}
+
+    # A matched event cannot be re-matched to another commitment; return
+    # its current commitment idempotently.
+    if ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED:
+        if ev.get("commitment_id") == body.commitment_id:
+            c_existing = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
+            if c_existing:
+                return {"commitment": _project_commitment(c_existing)}
+        raise HTTPException(
+            status_code=409,
+            detail="Event is already matched to a different commitment",
+        )
+
+    # Accountless events cannot be matched — they carry no real money.
+    if not ev.get("account_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Assign an asset account to the event before matching a commitment",
+        )
+
     c = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
     if not c:
         raise HTTPException(status_code=404, detail="Commitment not found")
     _require(c.get("state") in ("reserved", "expired"),
              f"Cannot reconcile against a commitment in state '{c.get('state')}'")
 
-    # Attach event to commitment then use the shared complete path
     if body.actual_amount_override is not None:
         stored = _money_to_stored(body.actual_amount_override, "actual_amount_override")
         await db.financial_events.update_one({"id": event_id}, {"$set": {"amount": stored}})
         ev["amount"] = stored
-    await db.financial_events.update_one(
-        {"id": event_id},
+
+    # Conditional transition — a single DB-level guard. If another
+    # concurrent request already flipped the event to matched, we skip
+    # the audit/complete path so exactly one transition audit is
+    # written. This is stronger than a read-then-write; MongoDB
+    # guarantees the ``find_one_and_update`` condition atomically at
+    # the single-document level.
+    transitioned = await db.financial_events.find_one_and_update(
+        {"id": event_id, "user_id": current_user["id"],
+         "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
         {"$set": {
             "commitment_id": c["id"],
             "reconciliation_status": "matched",
             "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
         }},
+        return_document=False,
     )
-    updated = await _apply_complete(db, current_user["id"], c, None, event_id, ev.get("event_date"))
+    if transitioned is None:
+        # Another request won; return the current commitment state
+        # without a duplicate release of the reservation.
+        current_ev = await db.financial_events.find_one({"id": event_id}, {"_id": 0})
+        if current_ev and current_ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED:
+            fresh = await _read_commitment_by_id(db, current_user["id"], current_ev.get("commitment_id") or c["id"])
+            if fresh:
+                return {"commitment": _project_commitment(fresh)}
+        raise HTTPException(
+            status_code=409,
+            detail="Event is not in awaiting_reconciliation and cannot be matched",
+        )
+
+    # We are the winner — perform the ledger release. If it fails, roll
+    # the event back to awaiting_reconciliation so the caller can retry.
+    try:
+        updated = await _apply_complete(db, current_user["id"], c, None, event_id, ev.get("event_date"))
+    except Exception:
+        await db.financial_events.update_one(
+            {"id": event_id, "user_id": current_user["id"]},
+            {"$set": {
+                "commitment_id": None,
+                "reconciliation_status": None,
+                "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON,
+            }},
+        )
+        raise
     await _audit(
         db, current_user["id"], "financial_event", event_id, "reconciled",
         source="reconciliation",
-        new_value={"commitment_id": c["id"], "outcome": "matched", "lifecycle_status": LIFECYCLE_STATUS_MATCHED},
+        new_value={"commitment_id": c["id"], "outcome": "matched",
+                   "lifecycle_status": LIFECYCLE_STATUS_MATCHED},
         related_event_id=event_id,
     )
     return {"commitment": _project_commitment(updated)}
@@ -417,34 +473,58 @@ async def reconcile_confirm(
 async def reconcile_reject(event_id: str, current_user: dict = Depends(get_current_user)):
     """User rejects all suggested matches — the event is an unplanned actual.
 
-    Batch 2A:
-    * atomically transitions the event's lifecycle_status to
-      ``resolved_unplanned`` (the terminal state for an unmatched actual).
-    * writes AT MOST one audit entry — repeat calls are idempotent and
-      DO NOT append duplicate audit rows or duplicate the actual.
-    * the event remains the ONE canonical actual outflow: it stays in
-      the account's effective balance, and next call to
-      ``/reconciliation/suggestions`` no longer returns it.
+    Batch 2A Correction 1:
+    * conditional DB update — permitted transition is
+      ``awaiting_reconciliation \u2192 resolved_unplanned`` only.
+    * accountless events cannot be resolved as an applied actual and
+      MUST first receive a valid asset account.
+    * concurrent duplicate requests produce exactly one transition and
+      one audit entry.
     """
     db = get_db()
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
-    # Idempotency: already resolved => return success without a duplicate
-    # audit entry.
+
+    # Already-resolved => idempotent no-op (no extra audit).
     if ev.get("lifecycle_status") == LIFECYCLE_STATUS_RESOLVED_UNPLANNED:
         return {"detail": "already resolved unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED}
-    await db.financial_events.update_one(
-        {"id": event_id},
+
+    if not ev.get("account_id"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Assign an asset account to the event before resolving it as "
+                "an unplanned actual — accountless events cannot be applied "
+                "to the balance."
+            ),
+        )
+
+    result = await db.financial_events.find_one_and_update(
+        {"id": event_id, "user_id": current_user["id"],
+         "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
         {"$set": {
             "reconciliation_status": "unmatched",
             "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
         }},
+        return_document=False,
     )
+    if result is None:
+        # Another concurrent request already handled it, OR the event
+        # is not in awaiting_reconciliation.
+        current_ev = await db.financial_events.find_one({"id": event_id}, {"_id": 0})
+        if current_ev and current_ev.get("lifecycle_status") == LIFECYCLE_STATUS_RESOLVED_UNPLANNED:
+            return {"detail": "already resolved unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED}
+        raise HTTPException(
+            status_code=409,
+            detail="Event is not in awaiting_reconciliation and cannot be resolved",
+        )
+
     await _audit(
         db, current_user["id"], "financial_event", event_id, "reconciled",
         source="reconciliation",
-        new_value={"outcome": "resolved_unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED},
+        new_value={"outcome": "resolved_unplanned",
+                   "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED},
     )
     return {"detail": "resolved unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED}
 

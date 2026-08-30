@@ -21,6 +21,15 @@ type AccountRow = {
   liquidity_type: string;
 };
 
+// Batch 2A Correction 1: only ASSET account types are eligible to pay a
+// money-bearing check-in. Liabilities (credit card, loan, mortgage) are
+// NOT supported by the current financial-event pipeline and MUST NOT be
+// shown here. Kept in sync with ``portfolio_manager.ASSET_ACCOUNT_TYPES``.
+const ASSET_ACCOUNT_TYPES: ReadonlySet<string> = new Set([
+  "cash", "bank", "fixed_deposit", "recurring_deposit", "mutual_fund",
+  "stock", "bond", "crypto", "gold", "real_estate", "other_asset",
+]);
+
 type Props = {
   visible: boolean;
   currency: string; // ISO 4217 — only accounts in this currency are shown
@@ -51,7 +60,9 @@ export default function AccountPickerModal({ visible, currency, selectedId, onSe
   }, [visible]);
 
   const filtered = useMemo(
-    () => (accounts || []).filter((a) => a.currency === currency),
+    () => (accounts || []).filter(
+      (a) => a.currency === currency && ASSET_ACCOUNT_TYPES.has(a.account_type),
+    ),
     [accounts, currency],
   );
 
@@ -69,10 +80,11 @@ export default function AccountPickerModal({ visible, currency, selectedId, onSe
             <View style={styles.loading}><ActivityIndicator color={colors.onSurface} /></View>
           ) : filtered.length === 0 ? (
             <View style={styles.empty}>
-              <Text style={styles.emptyTitle}>No {currency} accounts</Text>
+              <Text style={styles.emptyTitle}>No {currency} asset accounts</Text>
               <Text style={styles.emptyBody}>
-                Add a {currency} account in Portfolio to link this spend. You can save the
-                check-in now and assign an account later.
+                Add a {currency} bank, cash, or investment account in Portfolio to link this
+                spend. Liability accounts (credit cards, loans) aren&apos;t supported yet — save
+                the check-in now and assign an account later.
               </Text>
             </View>
           ) : (

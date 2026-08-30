@@ -1174,23 +1174,14 @@ async def get_monthly_money_position(
             planned_investments += amt
         # "other" contributes to nothing.
 
-    # Actual spending for the month is reported for transparency only.
-    # It is NOT subtracted again from ``available_for_flexible_spending``
-    # because those confirmed outflows are already reflected in each
-    # account's effective balance via money_service (Batch 2A).
-    month_prefix = month  # YYYY-MM
-    spend_docs = await db.checkins.find(
-        {
-            "user_id": current_user["id"],
-            "money_currency": currency,
-            "money_spent": {"$ne": None},
-            "date": {"$regex": f"^{re.escape(month_prefix)}-"},
-        },
-        {"_id": 0, "money_spent": 1},
-    ).to_list(length=20000)
-    actual_spending = sum(
-        (_decimal_from_stored(x.get("money_spent")) for x in spend_docs),
-        Decimal(0),
+    # Batch 2A Correction 1: monthly actual spending is now sourced
+    # from CANONICAL applied financial events, not from
+    # ``checkins.money_spent`` — the latter counts check-ins whose
+    # events may be pending, rejected, void, or missing. The money
+    # service is the sole source of truth.
+    from money_service import monthly_actual_spending  # local for cycles
+    actual_spending = await monthly_actual_spending(
+        db, current_user["id"], month, currency,
     )
 
     return MonthlyMoneyPositionResponse(

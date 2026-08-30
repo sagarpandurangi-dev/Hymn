@@ -476,6 +476,13 @@ class CheckInCreate(BaseModel):
     money_spent: Optional[Any] = None
     money_currency: Optional[str] = None
     account_id: Optional[str] = None
+    # Batch 2A Correction 1: authoritative transaction timestamp
+    # (tz-aware ISO 8601). If the client cannot supply this we derive
+    # from ``date`` + ``time`` treated as UTC (documented fallback) —
+    # the resulting occurred_at is used only when the check-in has an
+    # account. Legacy backdated entries entered today MUST NOT be
+    # silently placed after the current snapshot.
+    occurred_at: Optional[str] = None
     # If true and task_id is set, the linked task is marked done atomically
     # with the check-in write. Otherwise the task is only updated
     # (`updated_at` bumped) but its status is preserved — a check-in on a
@@ -494,6 +501,7 @@ class CheckInUpdate(BaseModel):
     money_spent: Optional[Any] = None
     money_currency: Optional[str] = None
     account_id: Optional[str] = None
+    occurred_at: Optional[str] = None
 
 
 class CheckInResponse(BaseModel):
@@ -1967,26 +1975,14 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
             raise HTTPException(status_code=400, detail="money_currency must be an ISO 4217 code when money_spent is set")
         stored_money_spent = _D128(d)
         stored_money_currency = body.money_currency
-        # Batch 2A: account linkage for money-bearing check-ins.
-        # * If ``account_id`` is supplied, it MUST belong to the caller
-        #   and match the money_currency.
-        # * If ``account_id`` is null we still persist the check-in but
-        #   the derived financial event is created in
-        #   ``pending_account_assignment`` so it does NOT silently affect
-        #   any account balance.
+        # Batch 2A + Correction 1: account linkage for money-bearing
+        # check-ins. Uses the finance_manager helper so liability
+        # accounts are rejected too. Raises 400/404 on cross-user,
+        # currency mismatch, or liability.
         if body.account_id:
-            acct = await db.financial_accounts.find_one({"id": body.account_id}, {"_id": 0})
-            if not acct or acct.get("user_id") != current_user["id"]:
-                raise HTTPException(status_code=404, detail="Financial account not found")
-            if acct.get("currency") != stored_money_currency:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "account_id currency mismatch: account is "
-                        f"{acct.get('currency')}, check-in money_currency is {stored_money_currency}"
-                    ),
-                )
-            resolved_account_id = acct["id"]
+            from finance_manager import _resolve_event_account  # noqa: WPS433
+            await _resolve_event_account(db, current_user["id"], body.account_id, stored_money_currency)
+            resolved_account_id = body.account_id
 
     follow_up_task_id: Optional[str] = None
     if body.follow_up_task:
@@ -2024,17 +2020,21 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
     }
     await db.checkins.insert_one(doc)
 
-    # Batch 2A: Feed the Finance Event Pipeline with strict atomicity.
-    # Creating a money-bearing check-in and its financial event MUST
-    # succeed or fail together. If the event insert fails, the check-in
-    # is deleted and the original error is re-raised so the caller sees
-    # a single, transactional response.
+    # Batch 2A: Feed the Finance Event Pipeline with best-effort
+    # cross-collection consistency. The database in this environment
+    # does NOT guarantee transactional atomicity; instead we roll each
+    # document back manually on failure so no orphan lingers. Creating
+    # a money-bearing check-in and its financial event succeed or fail
+    # together at the endpoint level.
     if stored_money_spent is not None and stored_money_currency:
+        _created_event_id: Optional[str] = None
+        _created_dedupe_id: Optional[str] = None
         try:
             from finance_manager import (  # noqa: WPS433 local import
                 _dedupe_check,
                 _now as _fnow,
                 _money_from_stored,
+                _normalise_occurred_at,
                 LIFECYCLE_STATUS_PENDING_ACCOUNT,
                 LIFECYCLE_STATUS_AWAITING_RECON,
             )
@@ -2042,6 +2042,19 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                 LIFECYCLE_STATUS_AWAITING_RECON if resolved_account_id
                 else LIFECYCLE_STATUS_PENDING_ACCOUNT
             )
+            # Batch 2A Correction 1: derive the authoritative
+            # ``occurred_at`` for the linked event.
+            # 1. Prefer the client's explicit tz-aware ``occurred_at``.
+            # 2. Otherwise interpret the check-in ``date+time`` as UTC
+            #    (documented fallback — no per-user timezone is stored).
+            occurred_at_iso = _normalise_occurred_at(body.occurred_at)
+            if not occurred_at_iso and body.date:
+                try:
+                    _t = body.time or "00:00"
+                    _dt = datetime.fromisoformat(f"{body.date}T{_t}:00+00:00")
+                    occurred_at_iso = _dt.astimezone(timezone.utc).isoformat()
+                except Exception:
+                    occurred_at_iso = None
             fev = {
                 "id": str(uuid.uuid4()),
                 "user_id": current_user["id"],
@@ -2057,15 +2070,20 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                 "commitment_id": None,
                 "account_id": resolved_account_id,
                 "lifecycle_status": lifecycle_status,
+                "occurred_at": occurred_at_iso,
                 "created_at": _fnow(),
             }
             dup_id = await _dedupe_check(db, current_user["id"], fev)
             if dup_id:
+                # Duplicates remain FINANCIALLY UNAPPLIED — kept in
+                # ``pending_account_assignment`` while awaiting user
+                # resolution regardless of whether an account was
+                # provided.
                 fev["confirmation_status"] = "pending"
-                # Duplicates still get the account-linkage semantics but
-                # they wait for user resolution.
+                fev["lifecycle_status"] = LIFECYCLE_STATUS_PENDING_ACCOUNT
                 await db.financial_events.insert_one(dict(fev))
-                await db.financial_dedupe_candidates.insert_one({
+                _created_event_id = fev["id"]
+                _dedupe = {
                     "id": str(uuid.uuid4()),
                     "user_id": current_user["id"],
                     "event_a_id": dup_id,
@@ -2073,9 +2091,12 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                     "status": "pending",
                     "created_at": _fnow(),
                     "resolved_at": None,
-                })
+                }
+                await db.financial_dedupe_candidates.insert_one(_dedupe)
+                _created_dedupe_id = _dedupe["id"]
             else:
                 await db.financial_events.insert_one(dict(fev))
+                _created_event_id = fev["id"]
             await db.financial_audit.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": current_user["id"],
@@ -2090,6 +2111,7 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                     "currency": fev["currency"],
                     "checkin_id": doc["id"],
                     "account_id": resolved_account_id,
+                    "occurred_at": occurred_at_iso,
                     "lifecycle_status": fev["lifecycle_status"],
                     "pending_dedupe_with": dup_id,
                 },
@@ -2100,17 +2122,22 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                 "notes": "",
             })
         except HTTPException:
-            # Atomic rollback: delete the check-in so the pair remains
-            # consistent and re-raise so the caller sees the original
-            # 400/404. Follow-up task, if any, is also removed.
+            # Best-effort rollback so no orphan lingers. The database
+            # does not guarantee cross-collection atomicity in this
+            # environment, so we roll back document-by-document.
+            if _created_dedupe_id:
+                await db.financial_dedupe_candidates.delete_one({"id": _created_dedupe_id})
+            if _created_event_id:
+                await db.financial_events.delete_one({"id": _created_event_id})
             await db.checkins.delete_one({"id": doc["id"]})
             if follow_up_task_id:
                 await db.tasks.delete_one({"id": follow_up_task_id, "user_id": current_user["id"]})
             raise
         except Exception as _fx:
-            # Any unexpected failure: rollback and surface a 500 so the
-            # user is never left with a check-in that has no matching
-            # event silently missing.
+            if _created_dedupe_id:
+                await db.financial_dedupe_candidates.delete_one({"id": _created_dedupe_id})
+            if _created_event_id:
+                await db.financial_events.delete_one({"id": _created_event_id})
             await db.checkins.delete_one({"id": doc["id"]})
             if follow_up_task_id:
                 await db.tasks.delete_one({"id": follow_up_task_id, "user_id": current_user["id"]})
@@ -2422,29 +2449,29 @@ async def update_checkin(checkin_id: str, body: CheckInUpdate, current_user: dic
     # already completed a commitment (lifecycle_status='matched'). The
     # actual has flowed into the reservation ledger; the user must first
     # adjust the reconciliation.
-    money_field_touched = any(k in incoming for k in ("money_spent", "money_currency", "account_id", "date"))
-    linked_event = None
-    if money_field_touched:
-        linked_event = await db.financial_events.find_one(
-            {"checkin_id": checkin_id, "user_id": current_user["id"]}, {"_id": 0},
+    money_field_touched = any(k in incoming for k in ("money_spent", "money_currency", "account_id", "date", "occurred_at"))
+    # Locate the canonical event (may include a previously-voided one so
+    # we can reactivate instead of duplicating).
+    linked_event_any = await db.financial_events.find_one(
+        {"checkin_id": checkin_id, "user_id": current_user["id"]}, {"_id": 0},
+        sort=[("created_at", -1)],
+    ) if money_field_touched else None
+    if linked_event_any and linked_event_any.get("lifecycle_status") == "matched":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This check-in's financial event has been reconciled with a commitment. "
+                "Reverse the reconciliation before editing money fields."
+            ),
         )
-        if linked_event and linked_event.get("lifecycle_status") == "matched":
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "This check-in's financial event has been reconciled with a commitment. "
-                    "Reverse the reconciliation before editing money fields."
-                ),
-            )
 
-    # Batch 2A: validate money-related fields together. money_spent and
-    # money_currency remain coupled — currency required whenever amount
-    # is present. account_id, if supplied, must match the resulting
-    # currency and belong to the caller.
+    # Batch 2A: validate money-related fields together.
     from bson.decimal128 import Decimal128 as _D128
     from decimal import Decimal as _Dec, InvalidOperation as _InvOp
     from finance_manager import (  # noqa: WPS433 local import
         _now as _fnow,
+        _resolve_event_account,
+        _normalise_occurred_at,
     )
 
     resolved_account_id_update = incoming.get("account_id") if "account_id" in incoming else c.get("account_id")
@@ -2467,105 +2494,144 @@ async def update_checkin(checkin_id: str, body: CheckInUpdate, current_user: dic
             raise HTTPException(status_code=400, detail="money_currency must be an ISO 4217 code")
         updates["money_currency"] = incoming["money_currency"]
 
-    # Validate account when we now have any money on the check-in.
     effective_amount = updates.get("money_spent") if "money_spent" in updates else c.get("money_spent")
     effective_currency = updates.get("money_currency") if "money_currency" in updates else c.get("money_currency")
     if effective_amount is not None and effective_currency:
         if resolved_account_id_update:
-            acct = await db.financial_accounts.find_one({"id": resolved_account_id_update}, {"_id": 0})
-            if not acct or acct.get("user_id") != current_user["id"]:
-                raise HTTPException(status_code=404, detail="Financial account not found")
-            if acct.get("currency") != effective_currency:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "account_id currency mismatch: account is "
-                        f"{acct.get('currency')}, check-in money_currency is {effective_currency}"
-                    ),
-                )
-        # Persist account_id (may be None => pending)
+            # Correction 1: reject cross-user, cross-currency AND
+            # liability accounts via the shared helper.
+            await _resolve_event_account(db, current_user["id"], resolved_account_id_update, effective_currency)
         updates["account_id"] = resolved_account_id_update
     elif "account_id" in incoming:
         updates["account_id"] = incoming["account_id"]
 
+    prev_snapshot = {k: c.get(k) for k in ("money_spent", "money_currency", "account_id", "date", "time")}
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.checkins.update_one({"id": checkin_id, "user_id": current_user["id"]}, {"$set": updates})
-    updated = await db.checkins.find_one({"id": checkin_id}, {"_id": 0})
+    try:
+        updated = await db.checkins.find_one({"id": checkin_id}, {"_id": 0})
 
-    # Propagate to the linked (unreconciled) event: amount, currency,
-    # date, description, and account. Void events and matched events are
-    # not touched here — the matched-branch was already rejected above.
-    if money_field_touched:
-        event_doc = linked_event or await db.financial_events.find_one(
-            {"checkin_id": checkin_id, "user_id": current_user["id"]}, {"_id": 0},
-        )
-        if event_doc and event_doc.get("lifecycle_status") != "void":
+        if money_field_touched:
             new_amount = updated.get("money_spent")
             new_currency = updated.get("money_currency")
-            if new_amount is None or not new_currency:
-                # Money removed from the check-in — void the linked event
-                # so it stops affecting the account balance.
+            new_account_id = updated.get("account_id")
+            has_money = new_amount is not None and bool(new_currency)
+
+            # Recompute occurred_at authoritatively.
+            occurred_at_iso = _normalise_occurred_at(incoming.get("occurred_at")) if "occurred_at" in incoming else None
+            if not occurred_at_iso and updated.get("date"):
+                try:
+                    _t = updated.get("time") or "00:00"
+                    _dt = datetime.fromisoformat(f"{updated['date']}T{_t}:00+00:00")
+                    occurred_at_iso = _dt.astimezone(timezone.utc).isoformat()
+                except Exception:
+                    occurred_at_iso = None
+
+            new_lifecycle = (
+                "awaiting_reconciliation" if new_account_id else "pending_account_assignment"
+            )
+
+            if linked_event_any and linked_event_any.get("lifecycle_status") != "void":
+                # Sync existing non-void event.
+                if not has_money:
+                    # Money cleared — void the canonical event.
+                    await db.financial_events.update_one(
+                        {"id": linked_event_any["id"]},
+                        {"$set": {
+                            "lifecycle_status": "void",
+                            "confirmation_status": "rejected",
+                        }},
+                    )
+                else:
+                    await db.financial_events.update_one(
+                        {"id": linked_event_any["id"]},
+                        {"$set": {
+                            "amount": new_amount if isinstance(new_amount, _D128) else _D128(_Dec(str(new_amount))),
+                            "currency": new_currency,
+                            "event_date": updated.get("date") or linked_event_any.get("event_date"),
+                            "description": (updated.get("notes") or updated.get("title") or "").strip()[:200],
+                            "account_id": new_account_id,
+                            "occurred_at": occurred_at_iso,
+                            "lifecycle_status": new_lifecycle,
+                        }},
+                    )
+            elif linked_event_any and linked_event_any.get("lifecycle_status") == "void" and has_money:
+                # Correction 1: money re-added after a prior void —
+                # reactivate the existing canonical event in place so no
+                # duplicate is created and the unique index remains
+                # satisfied.
                 await db.financial_events.update_one(
-                    {"id": event_doc["id"]},
-                    {"$set": {
-                        "lifecycle_status": "void",
-                        "confirmation_status": "rejected",
-                    }},
-                )
-                await db.financial_audit.insert_one({
-                    "id": str(uuid.uuid4()),
-                    "user_id": current_user["id"],
-                    "record_type": "financial_event",
-                    "record_id": event_doc["id"],
-                    "action": "updated",
-                    "timestamp": _fnow(),
-                    "source": "checkin",
-                    "previous_value": {"lifecycle_status": event_doc.get("lifecycle_status")},
-                    "new_value": {"lifecycle_status": "void", "reason": "checkin_money_cleared"},
-                    "related_checkin_id": checkin_id,
-                    "related_task_id": c.get("task_id"),
-                    "related_event_id": event_doc["id"],
-                    "related_import_id": None,
-                    "notes": "",
-                })
-            else:
-                # Propagate amount / currency / date / description / account.
-                new_lifecycle = (
-                    "awaiting_reconciliation" if updated.get("account_id") else "pending_account_assignment"
-                )
-                await db.financial_events.update_one(
-                    {"id": event_doc["id"]},
+                    {"id": linked_event_any["id"]},
                     {"$set": {
                         "amount": new_amount if isinstance(new_amount, _D128) else _D128(_Dec(str(new_amount))),
                         "currency": new_currency,
-                        "event_date": updated.get("date") or event_doc.get("event_date"),
+                        "event_date": updated.get("date") or linked_event_any.get("event_date"),
                         "description": (updated.get("notes") or updated.get("title") or "").strip()[:200],
-                        "account_id": updated.get("account_id"),
+                        "account_id": new_account_id,
+                        "occurred_at": occurred_at_iso,
+                        "confirmation_status": "confirmed",
                         "lifecycle_status": new_lifecycle,
                     }},
                 )
-                await db.financial_audit.insert_one({
-                    "id": str(uuid.uuid4()),
+            elif not linked_event_any and has_money:
+                # Correction 1: money added to a check-in that had no
+                # canonical event — create it now so Finance reflects
+                # the spend exactly once.
+                fev_id = str(uuid.uuid4())
+                fev = {
+                    "id": fev_id,
                     "user_id": current_user["id"],
-                    "record_type": "financial_event",
-                    "record_id": event_doc["id"],
-                    "action": "updated",
-                    "timestamp": _fnow(),
+                    "amount": new_amount if isinstance(new_amount, _D128) else _D128(_Dec(str(new_amount))),
+                    "currency": new_currency,
+                    "direction": "outflow",
+                    "event_date": updated.get("date") or "",
+                    "description": (updated.get("notes") or updated.get("title") or "").strip()[:200],
                     "source": "checkin",
-                    "previous_value": {
-                        "account_id": event_doc.get("account_id"),
-                        "lifecycle_status": event_doc.get("lifecycle_status"),
-                    },
-                    "new_value": {
-                        "account_id": updated.get("account_id"),
-                        "lifecycle_status": new_lifecycle,
-                    },
-                    "related_checkin_id": checkin_id,
-                    "related_task_id": c.get("task_id"),
-                    "related_event_id": event_doc["id"],
-                    "related_import_id": None,
-                    "notes": "",
-                })
+                    "source_reference": f"checkin:{checkin_id}",
+                    "confirmation_status": "confirmed",
+                    "checkin_id": checkin_id,
+                    "commitment_id": None,
+                    "account_id": new_account_id,
+                    "lifecycle_status": new_lifecycle,
+                    "occurred_at": occurred_at_iso,
+                    "created_at": _fnow(),
+                }
+                await db.financial_events.insert_one(dict(fev))
+
+            # Audit trail (append-only).
+            await db.financial_audit.insert_one({
+                "id": str(uuid.uuid4()),
+                "user_id": current_user["id"],
+                "record_type": "financial_event",
+                "record_id": (linked_event_any or {}).get("id"),
+                "action": "updated",
+                "timestamp": _fnow(),
+                "source": "checkin",
+                "previous_value": prev_snapshot,
+                "new_value": {
+                    "money_spent": new_amount if isinstance(new_amount, (str, type(None))) else str(new_amount),
+                    "money_currency": new_currency,
+                    "account_id": new_account_id,
+                    "occurred_at": occurred_at_iso,
+                    "has_money": has_money,
+                    "lifecycle_status": (
+                        "void" if (linked_event_any and not has_money)
+                        else new_lifecycle if has_money else None
+                    ),
+                },
+                "related_checkin_id": checkin_id,
+                "related_task_id": c.get("task_id"),
+                "related_event_id": (linked_event_any or {}).get("id"),
+                "related_import_id": None,
+                "notes": "",
+            })
+    except Exception:
+        # Roll the check-in back to its previous snapshot so the pair
+        # never lands in a half-updated state.
+        await db.checkins.update_one(
+            {"id": checkin_id, "user_id": current_user["id"]}, {"$set": {**prev_snapshot, "updated_at": c.get("updated_at")}},
+        )
+        raise
 
     return checkin_to_response(updated)
 
