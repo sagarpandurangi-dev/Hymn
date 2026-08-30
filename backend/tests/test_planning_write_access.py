@@ -26,16 +26,9 @@ import requests
 
 
 # ---- Backend URL ---------------------------------------------------------
-def _load_backend_url() -> str:
-    with open("/app/frontend/.env", "r", encoding="utf-8") as fp:
-        for line in fp:
-            line = line.strip()
-            if line.startswith("EXPO_PUBLIC_BACKEND_URL="):
-                return line.split("=", 1)[1].strip().strip('"').rstrip("/")
-    raise RuntimeError("EXPO_PUBLIC_BACKEND_URL not found")
-
-
-BASE_URL = _load_backend_url()
+# The test-suite guard in backend/conftest.py enforces
+# EXPO_PUBLIC_BACKEND_URL is a loopback URL before any test collects.
+BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 API = f"{BASE_URL}/api"
 
 sys.path.insert(0, "/app/backend")

@@ -23,9 +23,7 @@ from datetime import date, timedelta
 import pytest
 import requests
 
-BASE_URL = (os.environ.get("EXPO_BACKEND_URL")
-            or os.environ.get("EXPO_PUBLIC_BACKEND_URL")
-            or "https://personal-os-app-8.preview.emergentagent.com").rstrip("/")
+BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 
 EMAIL = "test@hymn.app"
 PASSWORD = "TestPass123!"

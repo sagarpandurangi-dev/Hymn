@@ -30,7 +30,15 @@ next-env.d.ts
 dist/
 dist
 
-# Environment files (comprehensive coverage)
+# Environment files (comprehensive coverage) — never commit real .env files.
+.env
+.env.*
+*.env
+# Allow the safe placeholder examples that document required variables.
+!.env.example
+!.env.test.example
+!**/.env.example
+!**/.env.test.example
 
 *token.json*
 *credentials.json*
@@ -78,11 +86,46 @@ agenthub/agents/youtube/db
 
 memory/test_credentials.md
 
+# Generated test artefacts (test_reports/, test_result.md, root .gitconfig)
+test_reports/
+test_result.md
+.gitconfig
+
+# Frontend dependency & build caches (Expo / Metro / Yarn)
+.expo/
+.expo-shared/
+.metro-cache/
+.metro/
+frontend/.expo/
+frontend/.expo-shared/
+frontend/.metro-cache/
+frontend/dist/
+frontend/web-build/
+frontend/ios/
+frontend/android/build/
+frontend/.yarn/cache/
+
+# Python caches
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Credential / key files (never commit)
+*.key
+*.pem
+*.p12
+*.p8
+*credentials*.json
+*service-account*.json
+.credentials
+
 # Mobile development
 android-sdk/
-.env
-.env.*
-*.env
+# NOTE: .env / .env.* / *.env are ignored by the block near the top of
+# this file. The negations there re-allow the .env.example placeholders
+# in backend/ and frontend/. Do not re-declare .env patterns here.
 credentials.json
 *.key
 .credentials

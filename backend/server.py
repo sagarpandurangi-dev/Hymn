@@ -21,7 +21,12 @@ load_dotenv(ROOT_DIR / ".env")
 # ---------- Config ----------
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
-JWT_SECRET = os.environ.get("JWT_SECRET", "hymn-dev-secret-change-in-prod")
+# JWT secret is resolved through the runtime module which enforces the
+# per-mode policy (preview/production must supply JWT_SECRET; test may
+# fall back to a deterministic secret that is never returned in any
+# other mode). See backend/runtime.py.
+from runtime import get_jwt_secret  # noqa: E402
+JWT_SECRET = get_jwt_secret()
 JWT_ALG = "HS256"
 # Long-lived token; client-side logout controls session end.
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 days
