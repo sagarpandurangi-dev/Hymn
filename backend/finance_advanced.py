@@ -54,6 +54,9 @@ from finance_manager import (
     _month_of,
     CHANGE_SOURCES,
     PRIORITIES,
+    LIFECYCLE_STATUS_AWAITING_RECON,
+    LIFECYCLE_STATUS_MATCHED,
+    LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
 )
 
 
@@ -328,15 +331,17 @@ async def _score_matches(db, user_id: str, event: dict) -> list:
 @advanced_router.get("/reconciliation/suggestions")
 async def reconciliation_suggestions(current_user: dict = Depends(get_current_user)):
     """List confirmed unmatched events with ranked commitment candidates so
-    the client can surface the appropriate prompts (\u00a715). Never auto-completes."""
+    the client can surface the appropriate prompts (\u00a715). Never auto-completes.
+
+    Batch 2A: filters strictly on ``lifecycle_status='awaiting_reconciliation'``
+    so ``resolved_unplanned`` and ``matched`` events never resurface here.
+    """
     db = get_db()
     events = await db.financial_events.find(
-        {"user_id": current_user["id"], "confirmation_status": "confirmed",
-         "direction": "outflow", "commitment_id": None,
-         "$or": [
-             {"reconciliation_status": {"$exists": False}},
-             {"reconciliation_status": {"$ne": "matched"}},
-         ]},
+        {"user_id": current_user["id"],
+         "direction": "outflow",
+         "commitment_id": None,
+         "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
         {"_id": 0},
     ).sort("event_date", -1).to_list(length=200)
     out = []
@@ -364,11 +369,21 @@ async def reconcile_confirm(
 ):
     """User confirms an event is a match for a commitment. This completes the
     commitment with the event as the actual (per \u00a713 rules) and marks the
-    event ``matched`` so subsequent forecasts don't double-count."""
+    event ``matched`` so subsequent forecasts don't double-count.
+
+    Batch 2A: idempotent — repeat calls on the same (event, commitment)
+    pair MUST NOT create additional monetary events. If the event is
+    already ``matched``, we no-op and return the current commitment.
+    """
     db = get_db()
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
+    # Idempotency: an event already matched to this commitment is a no-op.
+    if ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED and ev.get("commitment_id") == body.commitment_id:
+        c_existing = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
+        if c_existing:
+            return {"commitment": _project_commitment(c_existing)}
     c = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
     if not c:
         raise HTTPException(status_code=404, detail="Commitment not found")
@@ -381,13 +396,18 @@ async def reconcile_confirm(
         await db.financial_events.update_one({"id": event_id}, {"$set": {"amount": stored}})
         ev["amount"] = stored
     await db.financial_events.update_one(
-        {"id": event_id}, {"$set": {"commitment_id": c["id"], "reconciliation_status": "matched"}},
+        {"id": event_id},
+        {"$set": {
+            "commitment_id": c["id"],
+            "reconciliation_status": "matched",
+            "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
+        }},
     )
     updated = await _apply_complete(db, current_user["id"], c, None, event_id, ev.get("event_date"))
     await _audit(
         db, current_user["id"], "financial_event", event_id, "reconciled",
         source="reconciliation",
-        new_value={"commitment_id": c["id"], "outcome": "matched"},
+        new_value={"commitment_id": c["id"], "outcome": "matched", "lifecycle_status": LIFECYCLE_STATUS_MATCHED},
         related_event_id=event_id,
     )
     return {"commitment": _project_commitment(updated)}
@@ -395,20 +415,38 @@ async def reconcile_confirm(
 
 @advanced_router.post("/reconciliation/{event_id}/reject")
 async def reconcile_reject(event_id: str, current_user: dict = Depends(get_current_user)):
-    """User rejects all suggested matches. Event is treated as unplanned;
-    Finance already counted it once via the pipeline (\u00a713)."""
+    """User rejects all suggested matches — the event is an unplanned actual.
+
+    Batch 2A:
+    * atomically transitions the event's lifecycle_status to
+      ``resolved_unplanned`` (the terminal state for an unmatched actual).
+    * writes AT MOST one audit entry — repeat calls are idempotent and
+      DO NOT append duplicate audit rows or duplicate the actual.
+    * the event remains the ONE canonical actual outflow: it stays in
+      the account's effective balance, and next call to
+      ``/reconciliation/suggestions`` no longer returns it.
+    """
     db = get_db()
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
+    # Idempotency: already resolved => return success without a duplicate
+    # audit entry.
+    if ev.get("lifecycle_status") == LIFECYCLE_STATUS_RESOLVED_UNPLANNED:
+        return {"detail": "already resolved unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED}
     await db.financial_events.update_one(
-        {"id": event_id}, {"$set": {"reconciliation_status": "unmatched"}},
+        {"id": event_id},
+        {"$set": {
+            "reconciliation_status": "unmatched",
+            "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
+        }},
     )
     await _audit(
         db, current_user["id"], "financial_event", event_id, "reconciled",
-        source="reconciliation", new_value={"outcome": "unmatched"},
+        source="reconciliation",
+        new_value={"outcome": "resolved_unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED},
     )
-    return {"detail": "marked unmatched"}
+    return {"detail": "resolved unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED}
 
 
 # ============================================================================

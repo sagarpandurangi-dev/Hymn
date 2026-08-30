@@ -289,7 +289,7 @@ export const api = {
   // ---------- Portfolio: financial_accounts ----------
   listFinancialAccounts: () =>
     request<
-      { id: string; user_id: string; account_type: string; name: string; currency: string; current_value: string; liquidity_type: string; fixed_or_flexible: string; notes: string; created_at: string; updated_at: string }[]
+      { id: string; user_id: string; account_type: string; name: string; currency: string; current_value: string; balance_as_of: string; liquidity_type: string; fixed_or_flexible: string; notes: string; created_at: string; updated_at: string }[]
     >("/portfolio/financial-accounts", { auth: true }),
   createFinancialAccount: (payload: { account_type: string; name: string; currency: string; current_value: string | number; liquidity_type: string; fixed_or_flexible: string; notes?: string }) =>
     request<{ id: string }>("/portfolio/financial-accounts", { method: "POST", body: payload, auth: true }),
@@ -329,7 +329,7 @@ export const api = {
     request<{ id: string }>("/checkins", { method: "POST", body: payload, auth: true }),
   getCheckin: (id: string) =>
     request<any>(`/checkins/${id}`, { auth: true }),
-  updateCheckin: (id: string, payload: { title?: string; date?: string; time?: string; notes?: string; attachment?: string }) =>
+  updateCheckin: (id: string, payload: { title?: string; date?: string; time?: string; notes?: string; attachment?: string; money_spent?: string | null; money_currency?: string | null; account_id?: string | null }) =>
     request<{ id: string }>(`/checkins/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteCheckin: (id: string) =>
     request<{ detail: string }>(`/checkins/${id}`, { method: "DELETE", auth: true }),

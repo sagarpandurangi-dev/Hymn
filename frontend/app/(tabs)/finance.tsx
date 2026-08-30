@@ -250,9 +250,22 @@ export default function FinanceScreen() {
                     <FoldRow
                       key={`liq-${l.currency}`}
                       label={`Available (${l.currency})`}
-                      meta="Liquid minus reservations & spend this month"
+                      meta="Liquid minus reservations"
                       right={<FoldAmount currency={l.currency} value={formatMoney(l.available_unreserved)} size="md" tone="positive" />}
                     />
+                  ))}
+                  {liquidity.map((l: any) => (
+                    (l.pending_account_events && l.pending_account_events.length > 0) ? (
+                      <FoldRow
+                        key={`pending-${l.currency}`}
+                        label={`Pending account (${l.currency})`}
+                        meta={`${l.pending_account_events.length} spend${l.pending_account_events.length === 1 ? "" : "s"} waiting for an account`}
+                        right={<FoldPill label="Assign" tone="warn" size="xs" />}
+                        onPress={() => router.push(`/finance/events`)}
+                        chevron
+                        testID={`pending-account-${l.currency}`}
+                      />
+                    ) : null
                   ))}
                 </FoldCard>
               ) : null}

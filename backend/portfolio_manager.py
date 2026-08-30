@@ -408,6 +408,12 @@ class FinancialAccountResponse(BaseModel):
     name: str
     currency: str
     current_value: str  # decimal string; never a binary float
+    # ``balance_as_of`` is the authoritative snapshot timestamp for
+    # current_value (Batch 2A). Confirmed events created strictly AFTER
+    # this timestamp are applied on top of the snapshot to produce the
+    # effective balance; events created before are already reflected in
+    # the snapshot and MUST NOT be re-applied.
+    balance_as_of: str
     liquidity_type: str
     fixed_or_flexible: str
     notes: str
@@ -651,8 +657,13 @@ def _validate_financial_account(body, *, is_create: bool, existing: dict | None 
 
     # Only touch current_value if the caller sent one (or we're creating).
     # On updates that omit current_value we keep the existing Decimal128.
+    # Batch 2A: when current_value is set (create OR update), we refresh
+    # ``balance_as_of`` to *now* so past events are NOT reapplied to the
+    # new snapshot. When the caller omits current_value we preserve the
+    # existing snapshot timestamp untouched.
     if is_create or "current_value" in incoming:
         merged["current_value"] = _money_to_stored(merged.get("current_value"), "current_value")
+        merged["balance_as_of"] = _now()
     merged["notes"] = merged.get("notes") or ""
     return merged
 
@@ -774,6 +785,11 @@ def _validate_allocation(body, *, is_create: bool, existing: dict | None = None)
 def _project_account(doc: dict) -> dict:
     doc = dict(doc)
     doc["current_value"] = _money_from_stored(doc.get("current_value"))
+    # Batch 2A: expose the snapshot timestamp so consumers can reason
+    # about which events are already inside ``current_value``. Legacy
+    # rows may lack the field (backfill covers them at startup); guard
+    # anyway so response serialisation never fails.
+    doc["balance_as_of"] = doc.get("balance_as_of") or doc.get("updated_at") or doc.get("created_at") or ""
     return doc
 
 
@@ -956,6 +972,10 @@ async def create_financial_account(body: FinancialAccountCreate, current_user: d
         "name": payload["name"].strip(),
         "currency": payload["currency"],
         "current_value": payload["current_value"],  # Decimal128
+        # Batch 2A: authoritative snapshot timestamp — every event created
+        # AFTER this is applied on top; events created before are already
+        # reflected in current_value and MUST NOT be reapplied.
+        "balance_as_of": payload.get("balance_as_of") or now,
         "liquidity_type": payload["liquidity_type"],
         "fixed_or_flexible": payload["fixed_or_flexible"],
         "notes": payload["notes"],
@@ -1103,20 +1123,17 @@ async def get_monthly_money_position(
     _require_month_str(month, "month")
     _require_currency(currency, "currency")
 
-    # Opening liquid assets: liquid asset-type accounts in the given currency.
-    accounts = await db.financial_accounts.find(
-        {
-            "user_id": current_user["id"],
-            "currency": currency,
-            "liquidity_type": "liquid",
-            "account_type": {"$in": list(ASSET_ACCOUNT_TYPES)},
-        },
-        {"_id": 0},
-    ).to_list(length=5000)
-    opening_liquid_assets = sum(
-        (_decimal_from_stored(a.get("current_value")) for a in accounts),
-        Decimal(0),
-    )
+    # Batch 2A: "Portfolio available for flexible spending" is one of the
+    # three surfaces that MUST use the authoritative money service. The
+    # planned budget rows (income/expense/saving/investment) remain a
+    # separate informational view — they are NOT combined with actual
+    # spending into a competing "available" number.
+    from money_service import load_availability  # local import to avoid cycles
+
+    availability = await load_availability(db, current_user["id"])
+    by_cur = availability["by_currency"].get(currency, {})
+    liquid_effective = _decimal_from_stored(by_cur.get("liquid_effective", Decimal(0)))
+    available_unreserved = _decimal_from_stored(by_cur.get("available_unreserved", Decimal(0)))
 
     # Active monthly commitments for the requested month in that currency.
     active = await db.monthly_money_commitments.find(
@@ -1157,19 +1174,10 @@ async def get_monthly_money_position(
             planned_investments += amt
         # "other" contributes to nothing.
 
-    available = (
-        opening_liquid_assets
-        + planned_income
-        - fixed_outflows
-        - flexible_outflows
-        - planned_savings
-        - planned_investments
-    )
-
-    # Actual spending: sum of checkin.money_spent for the requested month +
-    # currency. This is treated as a real-time deduction from the available
-    # pool so the "available for flexible spending" number reflects reality,
-    # not just the plan.
+    # Actual spending for the month is reported for transparency only.
+    # It is NOT subtracted again from ``available_for_flexible_spending``
+    # because those confirmed outflows are already reflected in each
+    # account's effective balance via money_service (Batch 2A).
     month_prefix = month  # YYYY-MM
     spend_docs = await db.checkins.find(
         {
@@ -1184,19 +1192,18 @@ async def get_monthly_money_position(
         (_decimal_from_stored(x.get("money_spent")) for x in spend_docs),
         Decimal(0),
     )
-    available = available - actual_spending
 
     return MonthlyMoneyPositionResponse(
         month=month,
         currency=currency,
-        opening_liquid_assets=_quantize_out(opening_liquid_assets),
+        opening_liquid_assets=_quantize_out(liquid_effective),
         planned_income=_quantize_out(planned_income),
         fixed_outflows=_quantize_out(fixed_outflows),
         flexible_outflows=_quantize_out(flexible_outflows),
         planned_savings=_quantize_out(planned_savings),
         planned_investments=_quantize_out(planned_investments),
         actual_spending=_quantize_out(actual_spending),
-        available_for_flexible_spending=_quantize_out(available),
+        available_for_flexible_spending=_quantize_out(available_unreserved),
     )
 
 
@@ -1430,6 +1437,18 @@ async def ensure_portfolio_indexes(database) -> None:
     await database.financial_accounts.create_index("user_id")
     await database.financial_accounts.create_index([("user_id", 1), ("currency", 1)])
     await database.financial_accounts.create_index([("user_id", 1), ("account_type", 1)])
+
+    # Batch 2A migration: every account MUST carry an authoritative
+    # ``balance_as_of`` snapshot timestamp. For pre-2A rows we set it to
+    # the migration/startup timestamp — preserving ``current_value``
+    # unchanged so historical events created BEFORE this moment are not
+    # reapplied to the migrated balance. Idempotent: only rows missing
+    # the field are touched.
+    _now_ts = datetime.now(timezone.utc).isoformat()
+    await database.financial_accounts.update_many(
+        {"$or": [{"balance_as_of": {"$exists": False}}, {"balance_as_of": None}, {"balance_as_of": ""}]},
+        {"$set": {"balance_as_of": _now_ts}},
+    )
 
     # monthly_money_commitments
     await database.monthly_money_commitments.create_index("id", unique=True)

@@ -76,6 +76,27 @@ EVENT_DIRECTIONS = ("outflow", "inflow")
 CONFIRMATION_STATUSES = ("pending", "confirmed", "rejected")
 DEDUPE_STATUSES = ("pending", "confirmed_same", "rejected")
 
+# Batch 2A: explicit lifecycle statuses for financial events. The
+# authoritative money service (money_service.py) applies inflows/outflows
+# to an account's snapshot only when the event carries an APPLIED status.
+LIFECYCLE_STATUS_PENDING_ACCOUNT = "pending_account_assignment"
+LIFECYCLE_STATUS_AWAITING_RECON = "awaiting_reconciliation"
+LIFECYCLE_STATUS_MATCHED = "matched"
+LIFECYCLE_STATUS_RESOLVED_UNPLANNED = "resolved_unplanned"
+LIFECYCLE_STATUS_VOID = "void"
+LIFECYCLE_STATUSES = (
+    LIFECYCLE_STATUS_PENDING_ACCOUNT,
+    LIFECYCLE_STATUS_AWAITING_RECON,
+    LIFECYCLE_STATUS_MATCHED,
+    LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
+    LIFECYCLE_STATUS_VOID,
+)
+APPLIED_LIFECYCLE_STATUSES = frozenset({
+    LIFECYCLE_STATUS_AWAITING_RECON,
+    LIFECYCLE_STATUS_MATCHED,
+    LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
+})
+
 # Reserved reasons the backend derives (not user-visible states):
 _OVERDUE_STATES = {"reserved", "expired"}
 
@@ -221,6 +242,52 @@ def _require_in(v: Any, choices, field: str) -> None:
     _require(v in choices, f"{field} must be one of {list(choices)}")
 
 
+# ---------------------------------------------------------------------------
+# Batch 2A: account-linkage validation and lifecycle-status backfill.
+# ---------------------------------------------------------------------------
+
+async def _resolve_event_account(
+    db, user_id: str, account_id: Optional[str], currency: str,
+) -> Optional[dict]:
+    """Validate that ``account_id`` (if given) belongs to ``user_id`` and
+    is in the same currency as the event. Rejects cross-user references
+    (404) and currency mismatches (400). Returns the account document or
+    ``None`` when ``account_id`` is null (caller decides what to do)."""
+    if not account_id:
+        return None
+    acct = await db.financial_accounts.find_one(
+        {"id": account_id}, {"_id": 0},
+    )
+    if not acct or acct.get("user_id") != user_id:
+        raise HTTPException(status_code=404, detail="Financial account not found")
+    if acct.get("currency") != currency:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "account_id currency mismatch: account is "
+                f"{acct.get('currency')}, event is {currency}"
+            ),
+        )
+    return acct
+
+
+def _default_lifecycle_status(*, direction: str, account_id: Optional[str], commitment_id: Optional[str]) -> str:
+    """Compute the initial lifecycle_status for a new event.
+
+    * outflow with no account => pending_account_assignment (does not
+      affect balances until the user assigns an account).
+    * commitment_id set already => matched (created via a completion
+      flow; the reconciliation module manages later transitions).
+    * else => awaiting_reconciliation (already applied to the account
+      balance, still eligible to be matched to a commitment).
+    """
+    if commitment_id:
+        return LIFECYCLE_STATUS_MATCHED
+    if not account_id:
+        return LIFECYCLE_STATUS_PENDING_ACCOUNT
+    return LIFECYCLE_STATUS_AWAITING_RECON
+
+
 # ============================================================================
 # Pydantic models
 # ============================================================================
@@ -308,6 +375,12 @@ class FinancialEventCreate(BaseModel):
     confirmation_status: str = "confirmed"  # manual entries default to confirmed
     checkin_id: Optional[str] = None
     commitment_id: Optional[str] = None
+    # Batch 2A: authoritative source-of-truth linkage. Newly confirmed
+    # inflows/outflows MUST be tied to a user-owned account of the same
+    # currency. Callers that cannot supply one see the event persisted
+    # in ``pending_account_assignment`` state so it does NOT affect
+    # balances silently.
+    account_id: Optional[str] = None
 
 
 class FinancialEventResponse(BaseModel):
@@ -323,6 +396,8 @@ class FinancialEventResponse(BaseModel):
     confirmation_status: str
     checkin_id: Optional[str] = None
     commitment_id: Optional[str] = None
+    account_id: Optional[str] = None
+    lifecycle_status: str
     created_at: str
 
 
@@ -392,7 +467,22 @@ async def get_audit_trail(
 # ============================================================================
 
 async def _current_position(db, user_id: str) -> dict:
+    # Batch 2A: net-worth position now derives asset totals from
+    # authoritative *effective* balances (snapshot + post-snapshot
+    # confirmed events) so the "Current Financial Position" screen and
+    # the availability calculation both share ONE canonical number per
+    # account. Legacy raw ``current_value`` is only used for liabilities
+    # (which do not participate in the event pipeline yet).
+    from money_service import summarise_effective_balances, APPLIED_LIFECYCLE_STATUSES
+
     docs = await db.financial_accounts.find({"user_id": user_id}, {"_id": 0}).to_list(length=5000)
+    events = await db.financial_events.find(
+        {"user_id": user_id, "lifecycle_status": {"$in": list(APPLIED_LIFECYCLE_STATUSES)}},
+        {"_id": 0},
+    ).to_list(length=50000)
+    eff_rows = summarise_effective_balances(docs, events)
+    eff_by_id = {r["account_id"]: r for r in eff_rows}
+
     by_currency: dict = {}
     for d in docs:
         cur = d.get("currency") or ""
@@ -409,14 +499,22 @@ async def _current_position(db, user_id: str) -> dict:
             "accounts_asset": [],
             "accounts_liability": [],
         })
-        amt = _decimal_from_stored(d.get("current_value"))
         is_asset = d.get("account_type") in ASSET_ACCOUNT_TYPES
+        # Assets use effective balance; liabilities continue on snapshot
+        # value until the event pipeline models negative-account
+        # transactions (out of Batch 2A scope).
+        if is_asset:
+            eff = eff_by_id.get(d.get("id"), {})
+            amt = eff.get("effective_current_balance", _decimal_from_stored(d.get("current_value")))
+        else:
+            amt = _decimal_from_stored(d.get("current_value"))
         row = {
             "id": d["id"],
             "name": d.get("name") or "",
             "account_type": d.get("account_type"),
-            "current_value": _money_from_stored(d.get("current_value")),
+            "current_value": _quantize_out(amt),
             "liquidity_type": d.get("liquidity_type"),
+            "balance_as_of": d.get("balance_as_of"),
         }
         if is_asset:
             b["assets"] += amt
@@ -1046,6 +1144,8 @@ async def _apply_complete(
             "confirmation_status": "confirmed",
             "checkin_id": None,
             "commitment_id": c["id"],
+            "account_id": None,
+            "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
             "created_at": _now(),
         }
         await db.financial_events.insert_one(dict(linked_event))
@@ -1344,41 +1444,68 @@ async def _reserved_totals(db, user_id: str) -> dict:
 # ============================================================================
 
 async def _available_liquidity(db, user_id: str) -> list:
-    """Liquid assets minus reserved money and confirmed month-to-date outflows.
-    Returned per currency with the contributing breakdown."""
-    pos = await _current_position(db, user_id)
-    reserved_rows = await _reserved_totals(db, user_id)
-    reserved_by_cur = {r["currency"]: _decimal_from_stored(r["reserved_total"]) for r in reserved_rows}
+    """Authoritative available-liquidity per currency.
 
-    # Confirmed outflows this month (from financial_events)
-    month = _today_iso()[:7]
-    events = await db.financial_events.find(
-        {
-            "user_id": user_id,
-            "confirmation_status": "confirmed",
-            "direction": "outflow",
-            "event_date": {"$regex": f"^{re.escape(month)}-"},
-        },
-        {"_id": 0, "amount": 1, "currency": 1},
-    ).to_list(length=20000)
-    outflow_by_cur: dict = {}
-    for e in events:
-        c = e.get("currency") or ""
-        outflow_by_cur[c] = outflow_by_cur.get(c, Decimal(0)) + _decimal_from_stored(e.get("amount"))
+    Batch 2A rewrites this helper on top of ``money_service.load_availability``.
+    The old implementation subtracted month-to-date confirmed outflows AT
+    THE AGGREGATE, which double-counted outflows already reflected in the
+    account snapshots via the effective-balance calculation. The new
+    formula is::
 
+        available_unreserved = sum(effective liquid asset balances)
+                             - active reserved commitments
+
+    Draft, completed, and cancelled commitments do NOT reduce the total
+    (they don't hold a reservation). Reserved and expired commitments do.
+    """
+    from money_service import load_availability  # local import for cycles
+
+    availability = await load_availability(db, user_id)
     out = []
-    for cur_row in pos["currencies"]:
-        cur = cur_row["currency"]
-        liquid = _decimal_from_stored(cur_row["liquid_assets"])
-        reserved = reserved_by_cur.get(cur, Decimal(0))
-        mtd_outflow = outflow_by_cur.get(cur, Decimal(0))
-        available = liquid - reserved - mtd_outflow
+    # Also carry per-account transparency so downstream surfaces can
+    # show WHY the number is what it is (snapshot vs post-snapshot events).
+    accounts_by_cur: dict = {}
+    for r in availability["accounts"]:
+        cur = r.get("currency") or ""
+        accounts_by_cur.setdefault(cur, []).append({
+            "account_id": r.get("account_id"),
+            "name": r.get("name"),
+            "account_type": r.get("account_type"),
+            "liquidity_type": r.get("liquidity_type"),
+            "snapshot_current_value": _quantize_out(r.get("snapshot_current_value", Decimal(0))),
+            "snapshot_balance_as_of": r.get("snapshot_balance_as_of"),
+            "post_snapshot_inflows": _quantize_out(r.get("post_snapshot_inflows", Decimal(0))),
+            "post_snapshot_outflows": _quantize_out(r.get("post_snapshot_outflows", Decimal(0))),
+            "effective_current_balance": _quantize_out(r.get("effective_current_balance", Decimal(0))),
+        })
+    pending_events = availability.get("pending_events", []) or []
+    for cur, buckets in sorted(availability["by_currency"].items()):
+        effective = buckets["liquid_effective"]
+        reserved = buckets["reserved"]
+        available = buckets["available_unreserved"]
         out.append({
             "currency": cur,
-            "liquid_assets": _quantize_out(liquid),
+            # Transparency fields required by Batch 2A spec:
+            "liquid_effective": _quantize_out(effective),
             "reserved": _quantize_out(reserved),
-            "month_to_date_outflow": _quantize_out(mtd_outflow),
             "available_unreserved": _quantize_out(available),
+            # Back-compat aliases so legacy Finance frontend keeps working
+            # until the client migrates to the new field names.
+            "liquid_assets": _quantize_out(effective),
+            "month_to_date_outflow": "0.00",
+            "accounts": accounts_by_cur.get(cur, []),
+            "pending_account_events": [
+                {
+                    "event_id": e.get("id"),
+                    "amount": _money_from_stored(e.get("amount")),
+                    "currency": e.get("currency"),
+                    "direction": e.get("direction"),
+                    "event_date": e.get("event_date"),
+                    "description": e.get("description") or "",
+                    "checkin_id": e.get("checkin_id"),
+                }
+                for e in pending_events if (e.get("currency") == cur)
+            ],
         })
     return out
 
@@ -1542,6 +1669,18 @@ async def create_event(body: FinancialEventCreate, current_user: dict = Depends(
     _require_in(body.confirmation_status, CONFIRMATION_STATUSES, "confirmation_status")
     stored_amt = _money_to_stored(body.amount, "amount")
 
+    # Batch 2A: account linkage validation. When ``account_id`` is set we
+    # confirm it belongs to the user and matches the event currency; the
+    # helper raises 400/404 on cross-user or currency mismatches so
+    # authoritative balances are never corrupted.
+    await _resolve_event_account(db, current_user["id"], body.account_id, body.currency)
+
+    lifecycle_status = _default_lifecycle_status(
+        direction=body.direction,
+        account_id=body.account_id,
+        commitment_id=body.commitment_id,
+    )
+
     ev = {
         "id": _uuid(),
         "user_id": current_user["id"],
@@ -1555,6 +1694,8 @@ async def create_event(body: FinancialEventCreate, current_user: dict = Depends(
         "confirmation_status": body.confirmation_status,
         "checkin_id": body.checkin_id,
         "commitment_id": body.commitment_id,
+        "account_id": body.account_id,
+        "lifecycle_status": lifecycle_status,
         "created_at": _now(),
     }
 
@@ -1584,7 +1725,9 @@ async def create_event(body: FinancialEventCreate, current_user: dict = Depends(
             db, current_user["id"], "financial_event", ev["id"], "created",
             source=body.source,
             new_value={"amount": _money_from_stored(stored_amt), "currency": body.currency,
-                        "direction": body.direction, "event_date": body.event_date},
+                        "direction": body.direction, "event_date": body.event_date,
+                        "account_id": body.account_id,
+                        "lifecycle_status": lifecycle_status},
         )
     ev["amount"] = _money_from_stored(stored_amt)
     return ev
@@ -1608,6 +1751,8 @@ async def list_events(
     docs = await db.financial_events.find(q, {"_id": 0}).sort("event_date", -1).to_list(length=limit)
     for d in docs:
         d["amount"] = _money_from_stored(d.get("amount"))
+        d.setdefault("account_id", None)
+        d.setdefault("lifecycle_status", LIFECYCLE_STATUS_AWAITING_RECON if d.get("confirmation_status") == "confirmed" else LIFECYCLE_STATUS_PENDING_ACCOUNT)
     return docs
 
 
@@ -1628,6 +1773,8 @@ async def confirm_event(event_id: str, current_user: dict = Depends(get_current_
     )
     ev["confirmation_status"] = "confirmed"
     ev["amount"] = _money_from_stored(ev.get("amount"))
+    ev.setdefault("account_id", None)
+    ev.setdefault("lifecycle_status", LIFECYCLE_STATUS_AWAITING_RECON if ev.get("account_id") else LIFECYCLE_STATUS_PENDING_ACCOUNT)
     return ev
 
 
@@ -1639,14 +1786,16 @@ async def reject_event(event_id: str, current_user: dict = Depends(get_current_u
         raise HTTPException(status_code=404, detail="Financial Event not found")
     await db.financial_events.update_one(
         {"id": event_id, "user_id": current_user["id"]},
-        {"$set": {"confirmation_status": "rejected"}},
+        {"$set": {"confirmation_status": "rejected", "lifecycle_status": LIFECYCLE_STATUS_VOID}},
     )
     await _audit(
         db, current_user["id"], "financial_event", event_id, "reconciled",
-        source="reconciliation", new_value={"confirmation_status": "rejected"},
+        source="reconciliation", new_value={"confirmation_status": "rejected", "lifecycle_status": LIFECYCLE_STATUS_VOID},
     )
     ev["confirmation_status"] = "rejected"
+    ev["lifecycle_status"] = LIFECYCLE_STATUS_VOID
     ev["amount"] = _money_from_stored(ev.get("amount"))
+    ev.setdefault("account_id", None)
     return ev
 
 
@@ -1753,6 +1902,8 @@ async def _recent_events(db, user_id: str, limit: int = 20) -> list:
     ).sort([("event_date", -1), ("created_at", -1)]).to_list(length=limit)
     for d in docs:
         d["amount"] = _money_from_stored(d.get("amount"))
+        d.setdefault("account_id", None)
+        d.setdefault("lifecycle_status", LIFECYCLE_STATUS_AWAITING_RECON if d.get("account_id") else LIFECYCLE_STATUS_PENDING_ACCOUNT)
     return docs
 
 
@@ -1845,6 +1996,62 @@ async def ensure_finance_indexes(database) -> None:
     await database.financial_events.create_index("user_id")
     await database.financial_events.create_index([("user_id", 1), ("event_date", 1)])
     await database.financial_events.create_index([("user_id", 1), ("confirmation_status", 1)])
+    # Batch 2A: index the new authoritative fields so effective-balance
+    # queries stay fast and enforce ONE event per money-bearing check-in.
+    await database.financial_events.create_index([("user_id", 1), ("account_id", 1)])
+    await database.financial_events.create_index([("user_id", 1), ("lifecycle_status", 1)])
+    # Unique partial index: any check-in may own at most one non-void
+    # financial event. Historical/legacy events with no ``checkin_id``
+    # or already voided are excluded from the constraint. MongoDB does
+    # NOT permit ``$ne`` inside a partialFilterExpression, so we
+    # positively enumerate the active lifecycle statuses instead.
+    await database.financial_events.create_index(
+        [("checkin_id", 1)],
+        unique=True,
+        partialFilterExpression={
+            "checkin_id": {"$type": "string"},
+            "lifecycle_status": {"$in": [
+                LIFECYCLE_STATUS_PENDING_ACCOUNT,
+                LIFECYCLE_STATUS_AWAITING_RECON,
+                LIFECYCLE_STATUS_MATCHED,
+                LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
+            ]},
+        },
+        name="one_active_event_per_checkin",
+    )
+
+    # Batch 2A: backfill lifecycle_status for pre-2A financial events.
+    # * confirmation_status=='rejected'          -> void
+    # * commitment_id set                        -> matched
+    # * reconciliation_status=='unmatched'       -> resolved_unplanned
+    # * confirmation_status=='confirmed' (else)  -> awaiting_reconciliation
+    # * else                                     -> pending_account_assignment
+    await database.financial_events.update_many(
+        {"lifecycle_status": {"$exists": False}, "confirmation_status": "rejected"},
+        {"$set": {"lifecycle_status": LIFECYCLE_STATUS_VOID}},
+    )
+    await database.financial_events.update_many(
+        {"lifecycle_status": {"$exists": False}, "commitment_id": {"$ne": None}, "confirmation_status": "confirmed"},
+        {"$set": {"lifecycle_status": LIFECYCLE_STATUS_MATCHED}},
+    )
+    await database.financial_events.update_many(
+        {"lifecycle_status": {"$exists": False}, "reconciliation_status": "unmatched"},
+        {"$set": {"lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED}},
+    )
+    await database.financial_events.update_many(
+        {"lifecycle_status": {"$exists": False}, "confirmation_status": "confirmed"},
+        {"$set": {"lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON}},
+    )
+    await database.financial_events.update_many(
+        {"lifecycle_status": {"$exists": False}},
+        {"$set": {"lifecycle_status": LIFECYCLE_STATUS_PENDING_ACCOUNT}},
+    )
+    # Ensure account_id key exists (as null) on pre-2A rows so queries
+    # that project the field are consistent.
+    await database.financial_events.update_many(
+        {"account_id": {"$exists": False}},
+        {"$set": {"account_id": None}},
+    )
 
     await database.financial_audit.create_index("id", unique=True)
     await database.financial_audit.create_index([("user_id", 1), ("record_type", 1), ("record_id", 1)])

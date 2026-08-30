@@ -10,6 +10,7 @@ import { colors, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
 import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
+import AccountPickerModal from "@/src/components/AccountPickerModal";
 
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
 const nowDate = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
@@ -35,6 +36,10 @@ export default function LifeCheckinScreen() {
   const [moneySpent, setMoneySpent] = useState<string>("");
   const [moneyCurrency, setMoneyCurrency] = useState<string>(user?.portfolio_reporting_currency || "USD");
   const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
+  // Batch 2A: authoritative account linkage for money-bearing check-ins.
+  const [accountId, setAccountId] = useState<string | null>(null);
+  const [accountLabel, setAccountLabel] = useState<string>("Choose account");
+  const [accountPickerOpen, setAccountPickerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,6 +78,7 @@ export default function LifeCheckinScreen() {
       if (trimmedMoney) {
         payload.money_spent = trimmedMoney;
         payload.money_currency = moneyCurrency;
+        if (accountId) payload.account_id = accountId;
       }
       if (addFollowUp && followUpTitle.trim()) payload.follow_up_task = { title: followUpTitle.trim() };
       await api.createCheckin(payload);
@@ -168,6 +174,25 @@ export default function LifeCheckinScreen() {
               </Pressable>
             </View>
           </View>
+          {!!moneySpent.trim() && (
+            <>
+              <Text style={s.label}>Account (optional)</Text>
+              <Pressable
+                onPress={() => setAccountPickerOpen(true)}
+                style={s.input}
+                testID="life-checkin-account-select"
+              >
+                <Text style={{ fontSize: 15, color: accountId ? colors.onSurface : colors.onSurfaceTertiary }}>
+                  {accountLabel}
+                </Text>
+              </Pressable>
+              {!accountId && (
+                <Text style={{ fontSize: 12, color: colors.onSurfaceSecondary, marginTop: spacing.xs }}>
+                  We&apos;ll flag this as pending until you assign an account.
+                </Text>
+              )}
+            </>
+          )}
 
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.lg }}>
             <Text style={{ fontSize: 14, color: colors.onSurface }}>Create follow-up task</Text>
@@ -190,8 +215,25 @@ export default function LifeCheckinScreen() {
       <CurrencyPickerModal
         visible={currencyPickerOpen}
         selected={moneyCurrency}
-        onSelect={(c) => setMoneyCurrency(c)}
+        onSelect={(c) => { setMoneyCurrency(c); setAccountId(null); setAccountLabel("Choose account"); }}
         onClose={() => setCurrencyPickerOpen(false)}
+      />
+      <AccountPickerModal
+        visible={accountPickerOpen}
+        currency={moneyCurrency}
+        selectedId={accountId}
+        onSelect={async (id) => {
+          setAccountId(id);
+          if (!id) { setAccountLabel("Assign later"); return; }
+          try {
+            const rows = await api.listFinancialAccounts();
+            const match = rows.find((r) => r.id === id);
+            setAccountLabel(match ? `${match.name} (${match.currency})` : "Account selected");
+          } catch {
+            setAccountLabel("Account selected");
+          }
+        }}
+        onClose={() => setAccountPickerOpen(false)}
       />
     </SafeAreaView>
   );
