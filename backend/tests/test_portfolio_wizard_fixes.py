@@ -15,9 +15,7 @@ from datetime import date, timedelta
 import pytest
 import requests
 
-BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL") or os.environ.get("EXPO_BACKEND_URL")
-assert BASE_URL, "EXPO_PUBLIC_BACKEND_URL must be set"
-BASE_URL = BASE_URL.rstrip("/")
+BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 
 TEST_EMAIL = "test@hymn.app"
 TEST_PASSWORD = "TestPass123!"

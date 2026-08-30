@@ -34,11 +34,10 @@ dist
 .env
 .env.*
 *.env
-# Allow the safe placeholder examples that document required variables.
-!.env.example
-!.env.test.example
-!**/.env.example
-!**/.env.test.example
+# Placeholder examples live at `environment.example` /
+# `environment.test.example` (not `.env.example`) so they are naturally
+# outside the ignore patterns above and stay trackable across GitHub
+# save flows that would otherwise skip dotfile examples.
 
 *token.json*
 *credentials.json*

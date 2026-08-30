@@ -36,8 +36,16 @@ _FAKE_TEST = textwrap.dedent(
 
 @pytest.fixture()
 def sandbox(tmp_path: Path):
-    """A directory containing conftest.py copied verbatim + one fake test."""
+    """A directory containing conftest.py + test_environment.py + one fake test.
+
+    The shared validator lives beside conftest.py in the real tree, so
+    we replicate that layout — otherwise the sandbox conftest.py can't
+    import it.
+    """
     (tmp_path / "conftest.py").write_bytes((_BACKEND_DIR / "conftest.py").read_bytes())
+    (tmp_path / "test_environment.py").write_bytes(
+        (_BACKEND_DIR / "test_environment.py").read_bytes()
+    )
     tests_dir = tmp_path / "tests"
     tests_dir.mkdir()
     (tests_dir / "test_fake.py").write_text(_FAKE_TEST, encoding="utf-8")

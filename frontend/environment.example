@@ -1,0 +1,16 @@
+# Frontend environment — SAFE PLACEHOLDERS ONLY.
+#
+# Copy this file to `frontend/.env` for local development. Do NOT commit
+# the resulting `.env` (see `.gitignore`). Do NOT put real values in this
+# example file.
+
+# ---- Backend endpoint ----------------------------------------------------
+# URL of the FastAPI backend. In Expo dev preview this is proxied by
+# Metro; in a native build it must be a reachable URL from the device.
+EXPO_PUBLIC_BACKEND_URL=REPLACE_WITH_BACKEND_URL
+
+# ---- Metro / Expo dev proxy (managed in Emergent envs) ------------------
+# These are managed by the Emergent preview infrastructure in production.
+# Leave blank locally; Expo will fall back to sensible defaults.
+EXPO_PACKAGER_PROXY_URL=
+EXPO_PACKAGER_HOSTNAME=

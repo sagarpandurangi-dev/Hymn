@@ -1,0 +1,29 @@
+# Backend environment — SAFE PLACEHOLDERS ONLY.
+#
+# Copy this file to `backend/.env` and fill in real values locally. Do NOT
+# commit the resulting `.env` (see `.gitignore`). Do NOT put real values in
+# this example file. See `backend/environment.test.example` for the
+# test-mode variant.
+#
+# Every variable is required unless explicitly marked optional.
+
+# ---- Runtime mode --------------------------------------------------------
+# One of: preview | production | test
+# Absent value resolves to "preview" for backward compatibility.
+HYMN_RUNTIME_MODE=preview
+
+# ---- Database ------------------------------------------------------------
+# Local MongoDB (loopback). Never point this at a shared/prod instance
+# unless you understand the blast radius.
+MONGO_URL=mongodb://127.0.0.1:27017
+DB_NAME=REPLACE_WITH_YOUR_DB_NAME
+
+# ---- Auth ----------------------------------------------------------------
+# Required in preview and production. Generate with e.g.
+#   python -c "import secrets; print(secrets.token_urlsafe(48))"
+# Must be non-empty; startup refuses to run without it.
+JWT_SECRET=REPLACE_WITH_LONG_RANDOM_SECRET
+
+# ---- LLM / integrations (optional) --------------------------------------
+# Fill in only if the corresponding integration is enabled locally.
+EMERGENT_LLM_KEY=

@@ -5,16 +5,26 @@ Skips the LLM entirely so we can verify:
 - Idempotency via plan_action_log prevents duplicate on re-run.
 - Rollback on partial failure.
 """
-import asyncio, os, sys, httpx, hashlib, json
-from motor.motor_asyncio import AsyncIOMotorClient
-from dotenv import load_dotenv
-load_dotenv('/app/backend/.env')
+import asyncio, hashlib, json, os, sys
+from pathlib import Path
 
-BASE = "http://localhost:8001/api"
+sys.path.insert(0, str(Path("/app/backend").resolve()))
+from test_environment import TestEnvironmentError, validate  # noqa: E402
+try:
+    _ENV = validate(os.environ)
+except TestEnvironmentError as _exc:
+    raise SystemExit(f"[hymn-test-guard] {_exc}")
+
+import httpx  # noqa: E402
+from motor.motor_asyncio import AsyncIOMotorClient  # noqa: E402
+
+BASE = f"{_ENV.backend_url}/api"
+MONGO_URL = _ENV.mongo_url
+DB_NAME = _ENV.db_name
 
 
 async def run():
-    mdb = AsyncIOMotorClient(os.environ["MONGO_URL"])[os.environ["DB_NAME"]]
+    mdb = AsyncIOMotorClient(MONGO_URL)[DB_NAME]
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(f"{BASE}/auth/login", json={
             "email": "test@hymn.app", "password": "TestPass123!"})
