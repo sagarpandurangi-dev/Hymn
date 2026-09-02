@@ -80,12 +80,14 @@ DEDUPE_STATUSES = ("pending", "confirmed_same", "rejected")
 # authoritative money service (money_service.py) applies inflows/outflows
 # to an account's snapshot only when the event carries an APPLIED status.
 LIFECYCLE_STATUS_PENDING_ACCOUNT = "pending_account_assignment"
+LIFECYCLE_STATUS_PENDING_DEDUPE = "pending_deduplication"
 LIFECYCLE_STATUS_AWAITING_RECON = "awaiting_reconciliation"
 LIFECYCLE_STATUS_MATCHED = "matched"
 LIFECYCLE_STATUS_RESOLVED_UNPLANNED = "resolved_unplanned"
 LIFECYCLE_STATUS_VOID = "void"
 LIFECYCLE_STATUSES = (
     LIFECYCLE_STATUS_PENDING_ACCOUNT,
+    LIFECYCLE_STATUS_PENDING_DEDUPE,
     LIFECYCLE_STATUS_AWAITING_RECON,
     LIFECYCLE_STATUS_MATCHED,
     LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
@@ -1254,9 +1256,19 @@ async def _apply_complete(
         # update fails.
         occurred_at = _normalise_occurred_at(occurred_at_raw)
         if not occurred_at:
-            # Fall back to "now" (UTC) — completion is a user action
-            # happening in real time, so this is safe and monotonic.
-            occurred_at = datetime.now(timezone.utc).isoformat()
+            # Correction 2: never silently substitute "now" for a
+            # missing/naive timestamp. The client MUST supply an
+            # explicit tz-aware ``occurred_at`` when completing a
+            # commitment; otherwise refuse the completion so the actual
+            # spend is never placed at an incorrect moment.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "occurred_at is required when completing a commitment "
+                    "without an existing event. Send a timezone-aware "
+                    "ISO 8601 timestamp."
+                ),
+            )
         linked_event = {
             "id": _uuid(),
             "user_id": user_id,
@@ -1292,30 +1304,73 @@ async def _apply_complete(
     consumed = actual if actual <= reserved else reserved
     released = unused
 
-    # Ledger transitions — guarded so that a failure here rolls the
-    # auto-created event back so no orphan lands in ``financial_events``.
+    # Correction 2: single conditional update on the canonical
+    # ``resource_allocations`` row. Only ONE request may transition
+    # ``state`` from reserved/expired to completed AND write the
+    # consumption + completion fields together. If we lose the race
+    # (state was already completed / cancelled / etc.) we roll back the
+    # auto-created event and return the current commitment.
+    now = _now()
+    ledger_update = {
+        # Ledger consumption fields
+        "status": "consumed",
+        "consumed_amount": Decimal128(consumed),
+        "released_amount": Decimal128(released),
+        # Commitment lifecycle fields
+        "state": "completed",
+        "actual_amount": Decimal128(actual),
+        "variance": Decimal128(variance),
+        "unused_reservation": Decimal128(unused),
+        "overrun_amount": Decimal128(overrun),
+        "completed_at": now,
+        "next_review_date": None,
+        "updated_at": now,
+    }
     try:
-        if c.get("resource_allocation_id"):
-            await _consume_reservation(
-                db, user_id, c["resource_allocation_id"], consumed, released,
-            )
-        now = _now()
-        await _update_lifecycle(db, c["id"], {
-            "state": "completed",
-            "actual_amount": Decimal128(actual),
-            "variance": Decimal128(variance),
-            "unused_reservation": Decimal128(unused),
-            "overrun_amount": Decimal128(overrun),
-            "completed_at": now,
-            "next_review_date": None,
-        })
+        transitioned = await db.resource_allocations.find_one_and_update(
+            {"resource_type": "money",
+             "financial_commitment_id": c["id"],
+             "user_id": user_id,
+             "state": {"$in": ["reserved", "expired"]}},
+            {"$set": ledger_update},
+            return_document=False,
+        )
     except Exception:
-        # Best-effort rollback of the auto-created event. Audits are
-        # append-only so they remain as historical breadcrumb — but the
-        # event itself is removed so no orphan applies to the balance.
+        # DB error during the conditional update — roll the auto-created
+        # event and its audit back so no orphan lingers.
         if auto_created_event_id:
             await db.financial_events.delete_one({"id": auto_created_event_id, "user_id": user_id})
+            await db.financial_audit.delete_many({
+                "record_type": "financial_event",
+                "record_id": auto_created_event_id,
+                "user_id": user_id,
+            })
         raise
+    if transitioned is None:
+        # We lost the race. Remove any auto-created event and audit so
+        # we never leave: (a) a commitment in a mixed state, (b) two
+        # completion events, or (c) audits that reference a deleted
+        # event. Then return the current commitment idempotently.
+        if auto_created_event_id:
+            await db.financial_events.delete_one({"id": auto_created_event_id, "user_id": user_id})
+            await db.financial_audit.delete_many({
+                "record_type": "financial_event",
+                "record_id": auto_created_event_id,
+                "user_id": user_id,
+            })
+        fresh = await _read_commitment_by_id(db, user_id, c["id"])
+        if fresh and fresh.get("state") == "completed":
+            return fresh
+        raise HTTPException(
+            status_code=409,
+            detail="Commitment state changed concurrently; refresh and try again.",
+        )
+    await _audit(
+        db, user_id, "resource_allocation", c.get("resource_allocation_id"),
+        "reservation_consumed", source="manual",
+        new_value={"consumed": _quantize_out(consumed),
+                   "released": _quantize_out(released)},
+    )
     await _audit(
         db, user_id, "financial_commitment", c["id"], "completed",
         source="manual",
@@ -1843,13 +1898,19 @@ async def create_event(body: FinancialEventCreate, current_user: dict = Depends(
     }
 
     # Deduplication: probable duplicates are persisted as
-    # ``confirmation_status='pending'`` AND kept in ``lifecycle_status
-    # 'pending_account_assignment'`` — they MUST remain financially
-    # unapplied until the user resolves the dedupe ticket.
+    # ``confirmation_status='pending'``. Correction 2: the lifecycle
+    # status depends on whether the incoming event already carries an
+    # account — dedupe-with-account rows go to
+    # ``pending_deduplication``, dedupe-without-account rows go to
+    # ``pending_account_assignment`` (so the "Pending account" warning
+    # still surfaces them). Both statuses are unapplied.
     dup_id = await _dedupe_check(db, current_user["id"], ev)
     if dup_id:
         ev["confirmation_status"] = "pending"
-        ev["lifecycle_status"] = LIFECYCLE_STATUS_PENDING_ACCOUNT
+        ev["lifecycle_status"] = (
+            LIFECYCLE_STATUS_PENDING_DEDUPE if body.account_id
+            else LIFECYCLE_STATUS_PENDING_ACCOUNT
+        )
         await db.financial_events.insert_one(dict(ev))
         try:
             await db.financial_dedupe_candidates.insert_one({
@@ -1954,6 +2015,142 @@ async def reject_event(event_id: str, current_user: dict = Depends(get_current_u
     return ev
 
 
+# ---------------------------------------------------------------------
+# Correction 2: narrow event-assignment endpoint used by the Finance
+# "Pending account" resolution journey. Lets the user fix an unapplied
+# event's account_id / occurred_at / event_date without exposing any
+# other fields.
+# ---------------------------------------------------------------------
+
+class EventAssignmentPayload(BaseModel):
+    account_id: Optional[str] = None
+    occurred_at: Optional[str] = None
+    event_date: Optional[str] = None
+
+
+@finance_router.patch("/events/{event_id}/assignment", response_model=FinancialEventResponse)
+async def update_event_assignment(
+    event_id: str,
+    body: EventAssignmentPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """Correct an unapplied event's account, occurrence time, or
+    reporting date so it can flow into the money service.
+
+    Rules (Correction 2):
+    * Only the event owner may call this — user_id filter is applied on
+      every query.
+    * Matched events cannot be edited via this endpoint.
+    * ``account_id``, when supplied, MUST reference a same-currency
+      asset account owned by the caller (rejected via the shared
+      ``_resolve_event_account`` helper).
+    * ``occurred_at``, when supplied, MUST be tz-aware; naive strings
+      are refused (the event stays unapplied).
+    * ``event_date`` accepts YYYY-MM-DD when the caller explicitly
+      corrects the reporting date.
+    * After the write, if the event now has both an account_id AND a
+      trustworthy occurred_at, its lifecycle_status is promoted:
+        - was pending_account_assignment  -> awaiting_reconciliation
+        - was pending_deduplication       -> stays pending_deduplication
+          (must be resolved via the dedupe candidate flow, not here)
+    """
+    db = get_db()
+    ev = await db.financial_events.find_one(
+        {"id": event_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not ev:
+        raise HTTPException(status_code=404, detail="Financial Event not found")
+    if ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED:
+        raise HTTPException(
+            status_code=409,
+            detail="This event has been matched to a commitment. Reverse the reconciliation before editing.",
+        )
+    if ev.get("lifecycle_status") == LIFECYCLE_STATUS_VOID:
+        raise HTTPException(
+            status_code=409,
+            detail="This event has been voided and cannot be edited.",
+        )
+
+    updates: dict = {}
+
+    if "account_id" in body.dict(exclude_unset=True):
+        # ``None`` explicitly clears the account.
+        if body.account_id:
+            await _resolve_event_account(
+                db, current_user["id"], body.account_id, ev.get("currency") or "",
+            )
+        updates["account_id"] = body.account_id
+
+    if "occurred_at" in body.dict(exclude_unset=True):
+        normalised = _normalise_occurred_at(body.occurred_at) if body.occurred_at else None
+        if body.occurred_at and normalised is None:
+            raise HTTPException(
+                status_code=400,
+                detail="occurred_at must be a timezone-aware ISO 8601 timestamp",
+            )
+        updates["occurred_at"] = normalised
+
+    if "event_date" in body.dict(exclude_unset=True) and body.event_date:
+        _require_date_str(body.event_date, "event_date")
+        updates["event_date"] = body.event_date
+
+    if not updates:
+        # No-op — return the current projection so callers can treat
+        # this as idempotent.
+        ev["amount"] = _money_from_stored(ev.get("amount"))
+        ev.setdefault("account_id", None)
+        ev.setdefault("lifecycle_status", LIFECYCLE_STATUS_PENDING_ACCOUNT)
+        ev.setdefault("occurred_at", None)
+        return ev
+
+    # Compute the resulting lifecycle_status based on the projected
+    # state after the write.
+    from money_service import parse_utc as _parse_utc
+    proj_account = updates.get("account_id", ev.get("account_id"))
+    proj_occ = updates.get("occurred_at", ev.get("occurred_at"))
+    current_lifecycle = ev.get("lifecycle_status")
+    if current_lifecycle == LIFECYCLE_STATUS_PENDING_DEDUPE:
+        # Do NOT promote — dedupe must be resolved through its own flow.
+        new_lifecycle = LIFECYCLE_STATUS_PENDING_DEDUPE
+    elif proj_account and _parse_utc(proj_occ) is not None and ev.get("confirmation_status") == "confirmed":
+        new_lifecycle = LIFECYCLE_STATUS_AWAITING_RECON
+    else:
+        new_lifecycle = LIFECYCLE_STATUS_PENDING_ACCOUNT
+    updates["lifecycle_status"] = new_lifecycle
+
+    result = await db.financial_events.find_one_and_update(
+        {"id": event_id, "user_id": current_user["id"],
+         # Guard: refuse to write over a matched/void event even if a
+         # race intervenes between the initial read and this call.
+         "lifecycle_status": {"$nin": [LIFECYCLE_STATUS_MATCHED, LIFECYCLE_STATUS_VOID]}},
+        {"$set": updates},
+        return_document=False,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Event lifecycle changed concurrently; refresh and try again.",
+        )
+    await _audit(
+        db, current_user["id"], "financial_event", event_id, "updated",
+        source="manual",
+        previous_value={
+            "account_id": ev.get("account_id"),
+            "occurred_at": ev.get("occurred_at"),
+            "event_date": ev.get("event_date"),
+            "lifecycle_status": ev.get("lifecycle_status"),
+        },
+        new_value={**updates},
+    )
+    fresh = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
+    fresh["amount"] = _money_from_stored(fresh.get("amount"))
+    fresh.setdefault("account_id", None)
+    fresh.setdefault("occurred_at", None)
+    return fresh
+
+
+
+
 # --------- Deduplication resolution ---------
 @finance_router.get("/dedupe-candidates")
 async def list_dedupe_candidates(current_user: dict = Depends(get_current_user)):
@@ -1982,35 +2179,110 @@ async def resolve_dedupe(
     body: DedupeResolvePayload,
     current_user: dict = Depends(get_current_user),
 ):
+    """Correction 2: security + idempotency hardened.
+
+    * Candidate MUST belong to the caller AND currently be in
+      ``status='pending'`` (checked via a conditional
+      find_one_and_update on the candidate row).
+    * ``canonical_event_id``, when supplied, MUST equal exactly
+      ``event_a_id`` or ``event_b_id``.
+    * Both referenced events MUST belong to the caller — every
+      subsequent read/write filters on ``user_id``.
+    * Only the winning request writes an audit or mutates events.
+      Repeated requests return the existing terminal result without
+      another audit or state mutation.
+    """
     db = get_db()
+
+    _require_in(body.resolution, ("same", "different"), "resolution")
+
+    # Locate and inspect the candidate under the caller's user_id.
     row = await db.financial_dedupe_candidates.find_one(
         {"id": candidate_id, "user_id": current_user["id"]}, {"_id": 0},
     )
     if not row:
         raise HTTPException(status_code=404, detail="Deduplication candidate not found")
-    _require_in(body.resolution, ("same", "different"), "resolution")
+
+    terminal_status = "confirmed_same" if body.resolution == "same" else "rejected"
+
+    # Idempotency — repeated call once the candidate is already
+    # resolved. Return the same shape as the winning call would.
+    if row.get("status") == terminal_status:
+        if body.resolution == "different":
+            return {"detail": "kept both", "already_resolved": True}
+        canonical = row.get("canonical_event_id") or row["event_a_id"]
+        other = row["event_b_id"] if canonical == row["event_a_id"] else row["event_a_id"]
+        return {"detail": "merged", "canonical_event_id": canonical,
+                "retired_event_id": other, "already_resolved": True}
+    if row.get("status") not in (None, "pending"):
+        # Was resolved via the opposite resolution; refuse to flip.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Candidate already resolved with status '{row.get('status')}'",
+        )
+
+    # canonical_event_id, when supplied, MUST match exactly one of the
+    # referenced events.
+    if body.canonical_event_id and body.canonical_event_id not in (
+        row["event_a_id"], row["event_b_id"],
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="canonical_event_id must be event_a_id or event_b_id",
+        )
+
+    # Load both events under the caller's user_id — refuse if either
+    # is missing.
+    ev_a = await db.financial_events.find_one(
+        {"id": row["event_a_id"], "user_id": current_user["id"]}, {"_id": 0},
+    )
+    ev_b = await db.financial_events.find_one(
+        {"id": row["event_b_id"], "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not ev_a or not ev_b:
+        raise HTTPException(status_code=404, detail="Referenced event missing")
+
+    # Winning-only mutation: use conditional pending -> terminal on the
+    # candidate row. Only the winner proceeds to the event writes.
+    now = _now()
+    claimed = await db.financial_dedupe_candidates.find_one_and_update(
+        {"id": candidate_id, "user_id": current_user["id"], "status": "pending"},
+        {"$set": {"status": terminal_status,
+                   "resolved_at": now,
+                   "canonical_event_id": body.canonical_event_id
+                       or (row["event_a_id"] if body.resolution == "same" else None)}},
+        return_document=False,
+    )
+    if claimed is None:
+        # A concurrent request won. Re-read to return the winning
+        # result idempotently.
+        latest = await db.financial_dedupe_candidates.find_one(
+            {"id": candidate_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        if not latest:
+            raise HTTPException(status_code=404, detail="Deduplication candidate not found")
+        if latest.get("status") == "rejected":
+            return {"detail": "kept both", "already_resolved": True}
+        if latest.get("status") == "confirmed_same":
+            canonical = latest.get("canonical_event_id") or row["event_a_id"]
+            other = row["event_b_id"] if canonical == row["event_a_id"] else row["event_a_id"]
+            return {"detail": "merged", "canonical_event_id": canonical,
+                    "retired_event_id": other, "already_resolved": True}
+        raise HTTPException(status_code=409, detail=f"Candidate in unexpected state '{latest.get('status')}'")
 
     if body.resolution == "different":
-        # Batch 2A Correction 1: apply the pending event exactly once.
-        # It moves from ``pending_account_assignment`` to
-        # ``awaiting_reconciliation`` iff it has an account, else it
-        # stays pending until the user assigns one.
-        pending_ev = await db.financial_events.find_one({"id": row["event_b_id"]}, {"_id": 0})
-        if not pending_ev:
-            raise HTTPException(status_code=404, detail="Referenced event missing")
+        # Apply the pending event exactly once — filtered on user_id.
+        pending_ev = ev_b
         new_lifecycle = (
             LIFECYCLE_STATUS_AWAITING_RECON if pending_ev.get("account_id")
             else LIFECYCLE_STATUS_PENDING_ACCOUNT
         )
         await db.financial_events.update_one(
-            {"id": row["event_b_id"]},
+            {"id": row["event_b_id"], "user_id": current_user["id"]},
             {"$set": {
                 "confirmation_status": "confirmed",
                 "lifecycle_status": new_lifecycle,
             }},
-        )
-        await db.financial_dedupe_candidates.update_one(
-            {"id": candidate_id}, {"$set": {"status": "rejected", "resolved_at": _now()}},
         )
         await _audit(
             db, current_user["id"], "financial_event", row["event_b_id"], "reconciled",
@@ -2019,36 +2291,25 @@ async def resolve_dedupe(
         )
         return {"detail": "kept both", "lifecycle_status": new_lifecycle}
 
-    # same — pick a canonical, retire the other, wire audit
+    # resolution == 'same' — canonicalise and retire the other.
     canonical = body.canonical_event_id or row["event_a_id"]
     other = row["event_b_id"] if canonical == row["event_a_id"] else row["event_a_id"]
-    canonical_doc = await db.financial_events.find_one({"id": canonical}, {"_id": 0})
-    other_doc = await db.financial_events.find_one({"id": other}, {"_id": 0})
-    if not canonical_doc or not other_doc:
-        raise HTTPException(status_code=404, detail="Referenced event missing")
-
-    # Confirm canonical AND make sure it is applied iff it has an
-    # account — otherwise it stays pending until the user assigns one.
+    canonical_doc = ev_a if canonical == row["event_a_id"] else ev_b
     canon_lifecycle = (
         LIFECYCLE_STATUS_AWAITING_RECON if canonical_doc.get("account_id")
         else LIFECYCLE_STATUS_PENDING_ACCOUNT
     )
     await db.financial_events.update_one(
-        {"id": canonical},
+        {"id": canonical, "user_id": current_user["id"]},
         {"$set": {"confirmation_status": "confirmed", "lifecycle_status": canon_lifecycle}},
     )
-    # Retire the duplicate: reject it AND mark its lifecycle_status
-    # ``void`` so the money service never applies it.
     await db.financial_events.update_one(
-        {"id": other},
+        {"id": other, "user_id": current_user["id"]},
         {"$set": {
             "confirmation_status": "rejected",
             "lifecycle_status": LIFECYCLE_STATUS_VOID,
             "dedup_of": canonical,
         }},
-    )
-    await db.financial_dedupe_candidates.update_one(
-        {"id": candidate_id}, {"$set": {"status": "confirmed_same", "resolved_at": _now()}},
     )
     await _audit(
         db, current_user["id"], "financial_event", canonical, "reconciled",
@@ -2260,6 +2521,28 @@ async def ensure_finance_indexes(database) -> None:
         {"$set": {"lifecycle_status": LIFECYCLE_STATUS_VOID}},
     )
 
+    # 4b. Correction 2: separate dedupe-pending from account-pending.
+    # Any event currently in ``pending_account_assignment`` that has a
+    # valid ``account_id`` AND is referenced by an OPEN
+    # ``financial_dedupe_candidates`` row belongs in
+    # ``pending_deduplication`` so it does not clutter the "Pending
+    # account" warning. Idempotent — restart-safe.
+    open_dedupe_event_ids: set = set()
+    async for row in database.financial_dedupe_candidates.find(
+        {"status": "pending"}, {"_id": 0, "event_a_id": 1, "event_b_id": 1},
+    ):
+        for k in ("event_a_id", "event_b_id"):
+            v = row.get(k)
+            if isinstance(v, str):
+                open_dedupe_event_ids.add(v)
+    if open_dedupe_event_ids:
+        await database.financial_events.update_many(
+            {"id": {"$in": list(open_dedupe_event_ids)},
+             "lifecycle_status": LIFECYCLE_STATUS_PENDING_ACCOUNT,
+             "account_id": {"$ne": None}},
+            {"$set": {"lifecycle_status": LIFECYCLE_STATUS_PENDING_DEDUPE}},
+        )
+
     # 5. Duplicate cleanup — before creating the unique partial index on
     #    (checkin_id) restricted to active lifecycles, void any second-or-
     #    later active event that shares a checkin_id. Keep the earliest
@@ -2267,6 +2550,7 @@ async def ensure_finance_indexes(database) -> None:
     #    runs find nothing to void.
     ACTIVE = [
         LIFECYCLE_STATUS_PENDING_ACCOUNT,
+        LIFECYCLE_STATUS_PENDING_DEDUPE,
         LIFECYCLE_STATUS_AWAITING_RECON,
         LIFECYCLE_STATUS_MATCHED,
         LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
@@ -2290,15 +2574,39 @@ async def ensure_finance_indexes(database) -> None:
     # 6. Unique partial index — safe now that duplicates were voided
     #    above. MongoDB does not accept ``$ne`` inside partialFilter
     #    expressions so we positively enumerate the active statuses.
-    await database.financial_events.create_index(
-        [("checkin_id", 1)],
-        unique=True,
-        partialFilterExpression={
-            "checkin_id": {"$type": "string"},
-            "lifecycle_status": {"$in": ACTIVE},
-        },
-        name="one_active_event_per_checkin",
-    )
+    #    Correction 2: the active-status list grew by one
+    #    (``pending_deduplication``). If a previous run created the
+    #    index with a narrower filter, MongoDB will refuse the create
+    #    with IndexKeySpecsConflict — drop the old index in that case
+    #    then recreate with the correct filter. Restart-safe.
+    try:
+        await database.financial_events.create_index(
+            [("checkin_id", 1)],
+            unique=True,
+            partialFilterExpression={
+                "checkin_id": {"$type": "string"},
+                "lifecycle_status": {"$in": ACTIVE},
+            },
+            name="one_active_event_per_checkin",
+        )
+    except Exception as _idx_exc:
+        msg = str(_idx_exc).lower()
+        if "same name" in msg or "indexkeyspecsconflict" in msg or "index" in msg:
+            try:
+                await database.financial_events.drop_index("one_active_event_per_checkin")
+            except Exception:
+                pass
+            await database.financial_events.create_index(
+                [("checkin_id", 1)],
+                unique=True,
+                partialFilterExpression={
+                    "checkin_id": {"$type": "string"},
+                    "lifecycle_status": {"$in": ACTIVE},
+                },
+                name="one_active_event_per_checkin",
+            )
+        else:
+            raise
 
     await database.financial_audit.create_index("id", unique=True)
     await database.financial_audit.create_index([("user_id", 1), ("record_type", 1), ("record_id", 1)])

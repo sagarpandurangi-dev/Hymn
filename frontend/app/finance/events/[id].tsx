@@ -1,100 +1,176 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
+import AccountPickerModal from "@/src/components/AccountPickerModal";
+import DateTimeField from "@/src/components/DateTimeField";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
-import { FoldCard, FoldHero, FoldPill, foldPageStyle } from "@/src/components/finance/foldUi";
-import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
-import { dateLabel, formatMoney } from "@/src/lib/finance/format";
+import { FoldCard, FoldRow, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeSpace } from "@/src/lib/finance/theme";
+import { formatMoney } from "@/src/lib/finance/format";
 
-export default function EventDetail() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+// Correction 2: this screen is the pending-event resolution journey.
+// Users land here from the Finance "Pending account" warning. They can
+// see WHY the event is pending, pick a same-currency asset account,
+// confirm/correct when it occurred, save it, and return to Finance
+// with the warning removed.
+
+function pad(n: number, w = 2) { return String(n).padStart(w, "0"); }
+
+// Construct a device-local, timezone-aware ISO 8601 timestamp from a
+// YYYY-MM-DD date at 12:00 local time. The backend normalises to UTC.
+function localIsoAtNoon(dateYmd: string): string {
+  const [y, m, d] = dateYmd.split("-").map((v) => parseInt(v, 10));
+  const dt = new Date(y, (m || 1) - 1, d || 1, 12, 0, 0);
+  const off = -dt.getTimezoneOffset();
+  const sign = off >= 0 ? "+" : "-";
+  const oh = pad(Math.floor(Math.abs(off) / 60));
+  const om = pad(Math.abs(off) % 60);
+  return `${pad(dt.getFullYear(), 4)}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}${sign}${oh}:${om}`;
+}
+
+export default function PendingEventDetail() {
   const router = useRouter();
-  const [e, setE] = useState<any | null>(null);
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const [ev, setEv] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [accountId, setAccountId] = useState<string | null>(null);
+  const [accountLabel, setAccountLabel] = useState<string>("Choose account");
+  const [accountPickerOpen, setAccountPickerOpen] = useState(false);
+  const [eventDate, setEventDate] = useState<string>("");
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const all = await api.listFinancialEvents({ limit: 500 });
-      setE(all.find((x: any) => x.id === id) || null);
-    } catch { /* ignore */ }
+      const list = await api.listFinancialEvents({ limit: 500 });
+      const found = (list || []).find((e: any) => e.id === id);
+      if (!found) {
+        Alert.alert("Not found", "This event no longer exists.");
+        router.back();
+        return;
+      }
+      setEv(found);
+      setAccountId(found.account_id || null);
+      setEventDate(found.event_date || "");
+      if (found.account_id) {
+        try {
+          const rows = await api.listFinancialAccounts();
+          const m = rows.find((r) => r.id === found.account_id);
+          setAccountLabel(m ? `${m.name} (${m.currency})` : "Account selected");
+        } catch { setAccountLabel("Account selected"); }
+      } else {
+        setAccountLabel("Choose account");
+      }
+    } catch (e: any) {
+      Alert.alert("Error", e?.message || "Could not load event");
+    }
     setLoading(false);
-  }, [id]);
+  }, [id, router]);
 
   useEffect(() => { load(); }, [load]);
 
-  const confirm = async () => { try { await api.confirmFinancialEvent(id); load(); } catch (err: any) { Alert.alert("Error", err?.message || ""); } };
-  const reject = async () => { try { await api.rejectFinancialEvent(id); load(); } catch (err: any) { Alert.alert("Error", err?.message || ""); } };
+  const reason = useMemo(() => {
+    if (!ev) return "";
+    if (ev.lifecycle_status === "pending_account_assignment") {
+      return "This event doesn't have an asset account attached yet. Pick the account it came from so Finance can apply it to your balance.";
+    }
+    if (ev.lifecycle_status === "pending_deduplication") {
+      return "This event looks like a duplicate. Resolve it through the deduplication journey — not here.";
+    }
+    if (ev.review_reason === "missing_occurred_at") {
+      return "This event is confirmed but the exact moment it occurred is unknown. Confirm the date so Finance can decide which snapshot it applies to.";
+    }
+    return "This event needs your review.";
+  }, [ev]);
 
-  if (loading || !e) return (
-    <SafeAreaView style={foldPageStyle}>
-      <FinanceHeader title="Event" />
-      <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} />
+  const canSave = !!ev && ev.lifecycle_status !== "pending_deduplication" && !!accountId && !!eventDate;
+
+  const save = async () => {
+    if (!ev || !canSave) return;
+    setBusy(true);
+    try {
+      await api.patchEventAssignment(ev.id, {
+        account_id: accountId,
+        // Correction 2: send a tz-aware ISO — anchor the transaction
+        // at local noon of the reported calendar date so it can't fall
+        // into the previous day for eastern hemispheres or the next
+        // day for western hemispheres.
+        occurred_at: localIsoAtNoon(eventDate),
+        event_date: eventDate,
+      });
+      router.replace("/(tabs)/finance");
+    } catch (e: any) {
+      Alert.alert("Save failed", e?.message || "");
+      setBusy(false);
+    }
+  };
+
+  if (loading || !ev) return (
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader title="Pending event" />
+      <ActivityIndicator style={{ marginTop: 40 }} color={financeColors.ink} />
     </SafeAreaView>
   );
 
   return (
     <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
-      <FinanceHeader title="Actual event" subtitle={e.description || "(no description)"} />
-      <ScrollView contentContainerStyle={styles.scroll}>
-        <FoldHero
-          currency={e.currency}
-          amount={`${e.direction === "outflow" ? "-" : "+"}${formatMoney(e.amount)}`}
-          size="xl"
-          caption={`${dateLabel(e.event_date)} · ${e.source}`}
-        />
-        <View style={{ flexDirection: "row", gap: 6 }}>
-          <FoldPill label={e.confirmation_status} tone={e.confirmation_status === "confirmed" ? "ok" : e.confirmation_status === "rejected" ? "neutral" : "warn"} />
-          <FoldPill label={e.direction} tone={e.direction === "inflow" ? "ok" : "neutral"} />
-        </View>
-
-        <FoldCard style={styles.linkGroup}>
-          {e.checkin_id ? (
-            <Pressable style={styles.linkRow} onPress={() => router.push(`/timeline?highlight=${e.checkin_id}`)}>
-              <Ionicons name="link-outline" size={14} color={financeColors.accent} />
-              <Text style={styles.linkText}>View originating check-in</Text>
-              <Ionicons name="chevron-forward" size={14} color={financeColors.inkFaint} style={{ marginLeft: "auto" }} />
-            </Pressable>
-          ) : null}
-          {e.commitment_id ? (
-            <Pressable style={[styles.linkRow, styles.divider]} onPress={() => router.push(`/finance/commitments/${e.commitment_id}`)}>
-              <Ionicons name="link-outline" size={14} color={financeColors.accent} />
-              <Text style={styles.linkText}>View linked commitment</Text>
-              <Ionicons name="chevron-forward" size={14} color={financeColors.inkFaint} style={{ marginLeft: "auto" }} />
-            </Pressable>
-          ) : null}
-          <Pressable style={[styles.linkRow, styles.divider]} onPress={() => router.push(`/finance/audit/financial_event/${e.id}`)}>
-            <Ionicons name="time-outline" size={14} color={financeColors.accent} />
-            <Text style={styles.linkText}>Audit trail</Text>
-            <Ionicons name="chevron-forward" size={14} color={financeColors.inkFaint} style={{ marginLeft: "auto" }} />
-          </Pressable>
+      <FinanceHeader title="Pending event" subtitle={ev.description || ""} />
+      <ScrollView contentContainerStyle={{ padding: financeSpace.lg, gap: financeSpace.md }}>
+        <FoldCard>
+          <FoldRow label="Amount" right={<Text style={styles.value}>{ev.currency} {formatMoney(ev.amount)}</Text>} />
+          <FoldRow label="Direction" right={<Text style={styles.value}>{ev.direction}</Text>} />
+          <FoldRow label="Status" right={<Text style={styles.value}>{ev.lifecycle_status}</Text>} />
         </FoldCard>
 
-        {e.source_reference ? <Text style={styles.foot}>Source ref · {e.source_reference}</Text> : null}
+        <Text style={styles.reason} testID="pending-event-reason">{reason}</Text>
 
-        {e.confirmation_status === "pending" ? (
-          <View style={{ flexDirection: "row", gap: financeSpace.md }}>
-            <Pressable style={styles.primary} onPress={confirm}><Text style={styles.primaryText}>Confirm</Text></Pressable>
-            <Pressable style={styles.secondary} onPress={reject}><Text style={styles.secondaryText}>Reject</Text></Pressable>
-          </View>
-        ) : null}
+        {ev.lifecycle_status !== "pending_deduplication" ? (
+          <>
+            <Text style={styles.label}>PAYING ACCOUNT</Text>
+            <Pressable style={styles.input} onPress={() => setAccountPickerOpen(true)} testID="pending-event-account">
+              <Text style={{ color: accountId ? financeColors.ink : financeColors.inkFaint }}>{accountLabel}</Text>
+            </Pressable>
+
+            <Text style={styles.label}>WHEN IT OCCURRED</Text>
+            <DateTimeField mode="date" value={eventDate} onChange={setEventDate} testID="pending-event-date" />
+
+            <Pressable style={[styles.primary, (!canSave || busy) && { opacity: 0.5 }]} onPress={save} disabled={!canSave || busy} testID="pending-event-save">
+              <Text style={styles.primaryText}>Save and apply</Text>
+            </Pressable>
+          </>
+        ) : (
+          <Pressable style={styles.primary} onPress={() => router.push("/finance/reconcile")} testID="pending-event-open-dedupe">
+            <Text style={styles.primaryText}>Open deduplication</Text>
+          </Pressable>
+        )}
       </ScrollView>
+
+      <AccountPickerModal
+        visible={accountPickerOpen}
+        currency={ev.currency}
+        selectedId={accountId}
+        onSelect={async (aid) => {
+          setAccountId(aid);
+          if (!aid) { setAccountLabel("Assign later"); return; }
+          try {
+            const rows = await api.listFinancialAccounts();
+            const m = rows.find((r) => r.id === aid);
+            setAccountLabel(m ? `${m.name} (${m.currency})` : "Account selected");
+          } catch { setAccountLabel("Account selected"); }
+        }}
+        onClose={() => setAccountPickerOpen(false)}
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
-  linkGroup: {},
-  linkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: financeSpace.lg, paddingVertical: 14, backgroundColor: "#FFFFFF" },
-  divider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: financeColors.divider },
-  linkText: { ...financeType.body, color: financeColors.accent, fontWeight: "600" } as any,
-  foot: { fontSize: 11, color: financeColors.inkFaint, fontStyle: "italic", letterSpacing: 0.3 },
-  primary: { flex: 1, backgroundColor: financeColors.ink, paddingVertical: financeSpace.md, borderRadius: financeRadius.pill, alignItems: "center" },
-  primaryText: { color: "#FBFBF6", fontSize: 13, fontWeight: "700", letterSpacing: 0.4 },
-  secondary: { flex: 1, paddingVertical: financeSpace.md, borderRadius: financeRadius.pill, alignItems: "center", borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
-  secondaryText: { color: financeColors.ink, fontSize: 13, fontWeight: "600" },
+  value: { color: financeColors.ink, fontSize: 14 },
+  label: { color: financeColors.inkFaint, fontSize: 11, letterSpacing: 1, marginTop: financeSpace.md },
+  input: { borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, borderRadius: 12, padding: financeSpace.md, backgroundColor: financeColors.surface },
+  reason: { color: financeColors.ink, fontSize: 14, lineHeight: 20 },
+  primary: { backgroundColor: financeColors.ink, borderRadius: 12, paddingVertical: financeSpace.md, alignItems: "center", marginTop: financeSpace.lg },
+  primaryText: { color: financeColors.surface, fontSize: 14, fontWeight: "600" },
 });

@@ -2075,12 +2075,17 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
             }
             dup_id = await _dedupe_check(db, current_user["id"], fev)
             if dup_id:
-                # Duplicates remain FINANCIALLY UNAPPLIED — kept in
-                # ``pending_account_assignment`` while awaiting user
-                # resolution regardless of whether an account was
-                # provided.
+                # Correction 2: duplicates remain FINANCIALLY UNAPPLIED
+                # in a status that reflects their true blocker. If the
+                # incoming event carries an account, it is a dedupe
+                # candidate (``pending_deduplication``); otherwise it
+                # still needs account assignment first
+                # (``pending_account_assignment``).
                 fev["confirmation_status"] = "pending"
-                fev["lifecycle_status"] = LIFECYCLE_STATUS_PENDING_ACCOUNT
+                fev["lifecycle_status"] = (
+                    "pending_deduplication" if resolved_account_id
+                    else LIFECYCLE_STATUS_PENDING_ACCOUNT
+                )
                 await db.financial_events.insert_one(dict(fev))
                 _created_event_id = fev["id"]
                 _dedupe = {
@@ -2506,8 +2511,22 @@ async def update_checkin(checkin_id: str, body: CheckInUpdate, current_user: dic
         updates["account_id"] = incoming["account_id"]
 
     prev_snapshot = {k: c.get(k) for k in ("money_spent", "money_currency", "account_id", "date", "time")}
+    # Correction 2: snapshot the linked event's mutable fields BEFORE
+    # any write so we can restore them atomically if a later step
+    # fails.
+    prev_event_snapshot: Optional[dict] = None
+    if linked_event_any:
+        prev_event_snapshot = {
+            k: linked_event_any.get(k)
+            for k in ("amount", "currency", "event_date", "description",
+                       "account_id", "occurred_at", "confirmation_status", "lifecycle_status")
+        }
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.checkins.update_one({"id": checkin_id, "user_id": current_user["id"]}, {"$set": updates})
+    # Track anything we created inside the try/except so we can roll it
+    # back on failure.
+    _created_new_event_id: Optional[str] = None
+    _created_audit_id: Optional[str] = None
     try:
         updated = await db.checkins.find_one({"id": checkin_id}, {"_id": 0})
 
@@ -2517,18 +2536,29 @@ async def update_checkin(checkin_id: str, body: CheckInUpdate, current_user: dic
             new_account_id = updated.get("account_id")
             has_money = new_amount is not None and bool(new_currency)
 
-            # Recompute occurred_at authoritatively.
-            occurred_at_iso = _normalise_occurred_at(incoming.get("occurred_at")) if "occurred_at" in incoming else None
-            if not occurred_at_iso and updated.get("date"):
-                try:
-                    _t = updated.get("time") or "00:00"
-                    _dt = datetime.fromisoformat(f"{updated['date']}T{_t}:00+00:00")
-                    occurred_at_iso = _dt.astimezone(timezone.utc).isoformat()
-                except Exception:
-                    occurred_at_iso = None
+            # Correction 2: never silently interpret naive check-in
+            # date+time as UTC. Only accept an explicit tz-aware
+            # ``occurred_at`` from the caller; if absent, leave the
+            # event unapplied by setting occurred_at to None so the
+            # money service refuses to place it.
+            occurred_at_iso: Optional[str] = None
+            if "occurred_at" in incoming:
+                occurred_at_iso = _normalise_occurred_at(incoming.get("occurred_at"))
+                if incoming.get("occurred_at") and occurred_at_iso is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="occurred_at must be a timezone-aware ISO 8601 timestamp",
+                    )
+            else:
+                # Preserve the previous occurred_at when the caller did
+                # not touch it — a description or amount edit shouldn't
+                # invalidate the moment we already trusted.
+                occurred_at_iso = (linked_event_any or {}).get("occurred_at")
 
             new_lifecycle = (
-                "awaiting_reconciliation" if new_account_id else "pending_account_assignment"
+                "awaiting_reconciliation"
+                if new_account_id and occurred_at_iso
+                else "pending_account_assignment"
             )
 
             if linked_event_any and linked_event_any.get("lifecycle_status") != "void":
@@ -2597,17 +2627,24 @@ async def update_checkin(checkin_id: str, body: CheckInUpdate, current_user: dic
                     "created_at": _fnow(),
                 }
                 await db.financial_events.insert_one(dict(fev))
+                _created_new_event_id = fev_id
 
-            # Audit trail (append-only).
+            # Audit trail (append-only). Correction 2: reference the
+            # newly-created event ID when we created one, otherwise the
+            # existing event's ID.
+            _audit_id = str(uuid.uuid4())
+            _audit_record_id = (
+                _created_new_event_id or (linked_event_any or {}).get("id")
+            )
             await db.financial_audit.insert_one({
-                "id": str(uuid.uuid4()),
+                "id": _audit_id,
                 "user_id": current_user["id"],
                 "record_type": "financial_event",
-                "record_id": (linked_event_any or {}).get("id"),
-                "action": "updated",
+                "record_id": _audit_record_id,
+                "action": "updated" if linked_event_any else "created",
                 "timestamp": _fnow(),
                 "source": "checkin",
-                "previous_value": prev_snapshot,
+                "previous_value": {**prev_snapshot, "event": prev_event_snapshot},
                 "new_value": {
                     "money_spent": new_amount if isinstance(new_amount, (str, type(None))) else str(new_amount),
                     "money_currency": new_currency,
@@ -2621,16 +2658,28 @@ async def update_checkin(checkin_id: str, body: CheckInUpdate, current_user: dic
                 },
                 "related_checkin_id": checkin_id,
                 "related_task_id": c.get("task_id"),
-                "related_event_id": (linked_event_any or {}).get("id"),
+                "related_event_id": _audit_record_id,
                 "related_import_id": None,
                 "notes": "",
             })
+            _created_audit_id = _audit_id
     except Exception:
-        # Roll the check-in back to its previous snapshot so the pair
-        # never lands in a half-updated state.
+        # Correction 2: complete rollback. Restore the check-in AND
+        # the linked event's previous state, remove anything we
+        # created solely for this failed operation.
         await db.checkins.update_one(
-            {"id": checkin_id, "user_id": current_user["id"]}, {"$set": {**prev_snapshot, "updated_at": c.get("updated_at")}},
+            {"id": checkin_id, "user_id": current_user["id"]},
+            {"$set": {**prev_snapshot, "updated_at": c.get("updated_at")}},
         )
+        if _created_new_event_id:
+            await db.financial_events.delete_one({"id": _created_new_event_id, "user_id": current_user["id"]})
+        elif linked_event_any and prev_event_snapshot is not None:
+            await db.financial_events.update_one(
+                {"id": linked_event_any["id"], "user_id": current_user["id"]},
+                {"$set": prev_event_snapshot},
+            )
+        if _created_audit_id:
+            await db.financial_audit.delete_one({"id": _created_audit_id})
         raise
 
     return checkin_to_response(updated)

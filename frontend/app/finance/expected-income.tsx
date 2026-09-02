@@ -5,11 +5,13 @@ import { Ionicons } from "@expo/vector-icons";
 import { api } from "@/src/lib/api";
 import DateTimeField from "@/src/components/DateTimeField";
 import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
+import AccountPickerModal from "@/src/components/AccountPickerModal";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
 import { CURRENCY_LABEL } from "@/src/lib/portfolio/constants";
 import { FoldAmount, FoldCard, FoldPill, FoldRow, foldPageStyle } from "@/src/components/finance/foldUi";
 import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
 import { dateLabel, formatMoney } from "@/src/lib/finance/format";
+import { toLocalTimezoneIso } from "@/src/lib/finance/occurredAt";
 
 export default function ExpectedIncome() {
   const [rows, setRows] = useState<any[]>([]);
@@ -25,6 +27,13 @@ export default function ExpectedIncome() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmSheet, setConfirmSheet] = useState<any | null>(null);
+  // Correction 2: mark-received now requires an asset account +
+  // occurred_at. State kept for the receive sheet.
+  const [receiveTarget, setReceiveTarget] = useState<any | null>(null);
+  const [receiveAccountId, setReceiveAccountId] = useState<string | null>(null);
+  const [receiveAccountLabel, setReceiveAccountLabel] = useState<string>("Choose account");
+  const [receiveAccountPickerOpen, setReceiveAccountPickerOpen] = useState(false);
+  const [receiveDate, setReceiveDate] = useState<string>("");
 
   const load = useCallback(async () => { setLoading(true); try { setRows(await api.listExpectedIncome()); } catch { /* ignore */ } setLoading(false); }, []);
   useEffect(() => { load(); }, [load]);
@@ -49,8 +58,33 @@ export default function ExpectedIncome() {
     try { await api.confirmExpectedInclusion(confirmSheet.id, include); setConfirmSheet(null); load(); } catch (e: any) { Alert.alert("Error", e?.message || ""); }
   };
 
-  const markReceived = async (id: string) => {
-    try { await api.markExpectedReceived(id, {}); load(); } catch (e: any) { Alert.alert("Error", e?.message || ""); }
+  const markReceived = (row: any) => {
+    // Correction 2: open a small sheet to collect account + occurred_at.
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, "0");
+    const dd = String(today.getDate()).padStart(2, "0");
+    setReceiveTarget(row);
+    setReceiveAccountId(null);
+    setReceiveAccountLabel("Choose account");
+    setReceiveDate(`${yyyy}-${mm}-${dd}`);
+  };
+
+  const submitReceived = async () => {
+    if (!receiveTarget || !receiveAccountId || !receiveDate) return;
+    try {
+      const occ = toLocalTimezoneIso(receiveDate, "12:00");
+      if (!occ) throw new Error("Invalid date");
+      await api.markExpectedReceived(receiveTarget.id, {
+        account_id: receiveAccountId,
+        occurred_at: occ,
+        event_date: receiveDate,
+      });
+      setReceiveTarget(null);
+      load();
+    } catch (e: any) {
+      Alert.alert("Error", e?.message || "");
+    }
   };
   const remove = async (id: string) => { try { await api.deleteExpectedIncome(id); load(); } catch (e: any) { Alert.alert("Error", e?.message || ""); } };
 
@@ -89,7 +123,7 @@ export default function ExpectedIncome() {
                     <View style={{ flexDirection: "row", alignItems: "center", gap: financeSpace.sm }}>
                       <FoldAmount currency={r.currency} value={formatMoney(r.amount)} tone="positive" />
                       {!r.received ? (
-                        <Pressable onPress={() => markReceived(r.id)} style={styles.smallBtn} testID={`ei-received-${r.id}`}>
+                        <Pressable onPress={() => markReceived(r)} style={styles.smallBtn} testID={`ei-received-${r.id}`}>
                           <Text style={styles.smallBtnText}>Received</Text>
                         </Pressable>
                       ) : null}
@@ -160,6 +194,43 @@ export default function ExpectedIncome() {
           </View>
         </View>
       </Modal>
+
+      <Modal visible={!!receiveTarget} animationType="slide" transparent onRequestClose={() => setReceiveTarget(null)}>
+        <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={styles.sheetCard}>
+            <View style={styles.sheetHead}>
+              <Text style={styles.sheetTitle}>Mark received</Text>
+              <Pressable onPress={() => setReceiveTarget(null)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
+            </View>
+            <Text style={styles.sheetBody}>Which asset account did this land in?</Text>
+            <Text style={styles.label}>RECEIVING ACCOUNT</Text>
+            <Pressable style={styles.input} onPress={() => setReceiveAccountPickerOpen(true)} testID="ei-receive-account">
+              <Text style={{ color: receiveAccountId ? financeColors.ink : financeColors.inkFaint }}>{receiveAccountLabel}</Text>
+            </Pressable>
+            <Text style={styles.label}>RECEIVED ON</Text>
+            <DateTimeField mode="date" value={receiveDate} onChange={setReceiveDate} testID="ei-receive-date" />
+            <Pressable style={[styles.primary, (!receiveAccountId || !receiveDate) && { opacity: 0.5 }]} disabled={!receiveAccountId || !receiveDate} onPress={submitReceived} testID="ei-receive-submit">
+              <Text style={styles.primaryText}>Confirm received</Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <AccountPickerModal
+        visible={receiveAccountPickerOpen}
+        currency={receiveTarget?.currency || currency}
+        selectedId={receiveAccountId}
+        onSelect={async (id) => {
+          setReceiveAccountId(id);
+          if (!id) { setReceiveAccountLabel("Assign later"); return; }
+          try {
+            const rows = await api.listFinancialAccounts();
+            const m = rows.find((r) => r.id === id);
+            setReceiveAccountLabel(m ? `${m.name} (${m.currency})` : "Account selected");
+          } catch { setReceiveAccountLabel("Account selected"); }
+        }}
+        onClose={() => setReceiveAccountPickerOpen(false)}
+      />
     </SafeAreaView>
   );
 }

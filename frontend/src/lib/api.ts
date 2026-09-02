@@ -379,7 +379,7 @@ export const api = {
     request<any>(`/finance/commitments/${id}`, { method: "PUT", body: payload, auth: true }),
   reserveFinancialCommitment: (id: string) =>
     request<any>(`/finance/commitments/${id}/reserve`, { method: "POST", auth: true }),
-  completeFinancialCommitment: (id: string, payload: { actual_amount?: string | number; actual_event_id?: string; event_date?: string }) =>
+  completeFinancialCommitment: (id: string, payload: { actual_amount?: string | number; actual_event_id?: string; event_date?: string; account_id?: string; occurred_at?: string }) =>
     request<any>(`/finance/commitments/${id}/complete`, { method: "POST", body: payload, auth: true }),
   cancelFinancialCommitment: (id: string) =>
     request<any>(`/finance/commitments/${id}/cancel`, { method: "POST", auth: true }),
@@ -387,8 +387,12 @@ export const api = {
     request<any>(`/finance/commitments/${id}/postpone`, { method: "POST", body: { new_due_date }, auth: true }),
   keepActiveFinancialCommitment: (id: string) =>
     request<any>(`/finance/commitments/${id}/keep-active`, { method: "POST", auth: true }),
-  reviewFinancialCommitment: (id: string, payload: { decision: "keep" | "complete" | "cancel" | "postpone"; new_due_date?: string; actual_amount?: string | number; actual_event_id?: string }) =>
+  reviewFinancialCommitment: (id: string, payload: { decision: "keep" | "complete" | "cancel" | "postpone"; new_due_date?: string; actual_amount?: string | number; actual_event_id?: string; account_id?: string; occurred_at?: string }) =>
     request<any>(`/finance/commitments/${id}/review`, { method: "POST", body: payload, auth: true }),
+  // Correction 2: narrow endpoint to fix an unapplied event's
+  // account/time so it flows into the money service.
+  patchEventAssignment: (id: string, payload: { account_id?: string | null; occurred_at?: string | null; event_date?: string }) =>
+    request<any>(`/finance/events/${id}/assignment`, { method: "PATCH", body: payload, auth: true }),
   getTaskLinkedCommitment: (taskId: string) =>
     request<any>(`/finance/task-linked-commitment/${taskId}`, { auth: true }),
   getCommitmentsDueForReview: () =>
@@ -429,7 +433,7 @@ export const api = {
     request<any>("/finance/expected-income", { method: "POST", body: payload, auth: true }),
   confirmExpectedInclusion: (id: string, include_in_forecast: boolean) =>
     request<any>(`/finance/expected-income/${id}/confirm-inclusion`, { method: "POST", body: { include_in_forecast }, auth: true }),
-  markExpectedReceived: (id: string, payload?: { event_id?: string; actual_amount?: string | number; event_date?: string }) =>
+  markExpectedReceived: (id: string, payload?: { event_id?: string; actual_amount?: string | number; event_date?: string; account_id?: string; occurred_at?: string }) =>
     request<any>(`/finance/expected-income/${id}/received`, { method: "POST", body: payload || {}, auth: true }),
   deleteExpectedIncome: (id: string) =>
     request<{ detail: string }>(`/finance/expected-income/${id}`, { method: "DELETE", auth: true }),

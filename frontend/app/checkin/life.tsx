@@ -11,6 +11,7 @@ import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
 import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
 import AccountPickerModal from "@/src/components/AccountPickerModal";
+import { toLocalTimezoneIso } from "@/src/lib/finance/occurredAt";
 
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
 const nowDate = () => { const d = new Date(); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
@@ -79,6 +80,11 @@ export default function LifeCheckinScreen() {
         payload.money_spent = trimmedMoney;
         payload.money_currency = moneyCurrency;
         if (accountId) payload.account_id = accountId;
+        // Correction 2: construct a device-local, timezone-aware ISO
+        // for occurred_at. The backend never silently interprets the
+        // check-in date/time as UTC.
+        const occ = toLocalTimezoneIso(date, time);
+        if (occ) payload.occurred_at = occ;
       }
       if (addFollowUp && followUpTitle.trim()) payload.follow_up_task = { title: followUpTitle.trim() };
       await api.createCheckin(payload);

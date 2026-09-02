@@ -176,6 +176,9 @@ class ExpectedIncomeReceivePayload(BaseModel):
     event_id: Optional[str] = None
     actual_amount: Optional[Any] = None
     event_date: Optional[str] = None
+    # Correction 2: canonical fields for the auto-created inflow.
+    account_id: Optional[str] = None
+    occurred_at: Optional[str] = None
 
 
 @advanced_router.post("/expected-income/{income_id}/received", response_model=ExpectedIncomeResponse)
@@ -183,22 +186,72 @@ async def mark_expected_received(
     income_id: str, body: ExpectedIncomeReceivePayload = Body(default_factory=ExpectedIncomeReceivePayload),
     current_user: dict = Depends(get_current_user),
 ):
-    """Mark expected income as received. Creates a confirmed inflow Financial
-    Event exactly once so it never doubles with the planned line."""
+    """Mark expected income as received. Creates a confirmed inflow event
+    exactly once (Correction 2: with account_id + occurred_at) so it
+    never doubles with the planned line and increases the receiving
+    account's effective balance the moment it is applied.
+
+    Rules (Correction 2):
+    * If ``event_id`` is supplied, the referenced event MUST belong to
+      the caller, match the expected income's currency, be confirmed,
+      applied, and carry an ASSET account of the same currency.
+    * Otherwise ``account_id`` + ``occurred_at`` are REQUIRED for the
+      auto-created inflow. Account is validated (user + currency +
+      asset). ``occurred_at`` must be tz-aware.
+    * The received transition is CONDITIONAL — concurrent callers
+      cannot create two inflows.
+    """
     db = get_db()
+    from finance_manager import (  # noqa: WPS433 local imports
+        _resolve_event_account,
+        _normalise_occurred_at,
+        LIFECYCLE_STATUS_AWAITING_RECON,
+    )
+    from money_service import parse_utc as _parse_utc, APPLIED_LIFECYCLE_STATUSES
+
     d = await db.expected_incomes.find_one({"id": income_id, "user_id": current_user["id"]}, {"_id": 0})
     if not d:
         raise HTTPException(status_code=404, detail="Expected income not found")
     _require(not d.get("received"), "This expected income is already received")
 
     if body.event_id:
-        ev = await db.financial_events.find_one({"id": body.event_id, "user_id": current_user["id"]}, {"_id": 0})
+        ev = await db.financial_events.find_one(
+            {"id": body.event_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
         if not ev:
             raise HTTPException(status_code=404, detail="Referenced event not found")
-        _require(ev.get("currency") == d.get("currency"), "Event currency must match expected income currency")
+        _require(ev.get("currency") == d.get("currency"),
+                 "Event currency must match expected income currency")
+        _require(ev.get("confirmation_status") == "confirmed",
+                 "Referenced event must be confirmed")
+        _require(ev.get("lifecycle_status") in APPLIED_LIFECYCLE_STATUSES,
+                 "Referenced event must be applied (has account + trustworthy occurred_at)")
+        if not ev.get("account_id"):
+            raise HTTPException(
+                status_code=400,
+                detail="Referenced event must have an asset account before receiving expected income",
+            )
+        await _resolve_event_account(db, current_user["id"], ev["account_id"], ev["currency"])
         event_id = ev["id"]
+        auto_created_event_id: Optional[str] = None
     else:
-        amt = _decimal_from_stored(d.get("amount")) if not body.actual_amount else _decimal_from_stored(_money_to_stored(body.actual_amount, "actual_amount"))
+        if not body.account_id:
+            raise HTTPException(
+                status_code=400,
+                detail="account_id is required to mark expected income received without an existing event",
+            )
+        occurred_at = _normalise_occurred_at(body.occurred_at)
+        if not occurred_at:
+            raise HTTPException(
+                status_code=400,
+                detail="occurred_at must be a timezone-aware ISO 8601 timestamp",
+            )
+        await _resolve_event_account(db, current_user["id"], body.account_id, d.get("currency") or "")
+
+        amt = (
+            _decimal_from_stored(d.get("amount")) if not body.actual_amount
+            else _decimal_from_stored(_money_to_stored(body.actual_amount, "actual_amount"))
+        )
         event_id = _uuid()
         await db.financial_events.insert_one({
             "id": event_id,
@@ -213,17 +266,46 @@ async def mark_expected_received(
             "confirmation_status": "confirmed",
             "checkin_id": None,
             "commitment_id": None,
+            "account_id": body.account_id,
+            "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON,
+            "occurred_at": occurred_at,
             "created_at": _now(),
         })
+        auto_created_event_id = event_id
         await _audit(
             db, current_user["id"], "financial_event", event_id, "created",
-            source="manual", new_value={"amount": _quantize_out(amt), "currency": d["currency"],
-                                         "direction": "inflow", "expected_income_id": income_id},
+            source="manual",
+            new_value={"amount": _quantize_out(amt), "currency": d["currency"],
+                       "direction": "inflow", "expected_income_id": income_id,
+                       "account_id": body.account_id, "occurred_at": occurred_at,
+                       "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
         )
 
-    await db.expected_incomes.update_one(
-        {"id": income_id}, {"$set": {"received": True, "received_event_id": event_id, "updated_at": _now()}},
+    # Conditional transition on the expected_incomes row — only ONE
+    # request may flip received=False to received=True. If we lose the
+    # race, roll back the auto-created event so we don't leave two
+    # inflows on the account.
+    claimed = await db.expected_incomes.find_one_and_update(
+        {"id": income_id, "user_id": current_user["id"], "received": False},
+        {"$set": {"received": True, "received_event_id": event_id, "updated_at": _now()}},
+        return_document=False,
     )
+    if claimed is None:
+        if auto_created_event_id:
+            await db.financial_events.delete_one({"id": auto_created_event_id, "user_id": current_user["id"]})
+            await db.financial_audit.delete_many({
+                "record_type": "financial_event",
+                "record_id": auto_created_event_id,
+                "user_id": current_user["id"],
+            })
+        # Return the current state idempotently.
+        fresh = await db.expected_incomes.find_one({"id": income_id, "user_id": current_user["id"]}, {"_id": 0})
+        if fresh and fresh.get("received"):
+            return _project_expected(fresh)
+        raise HTTPException(
+            status_code=409,
+            detail="Expected income state changed concurrently; refresh and try again.",
+        )
     d["received"] = True
     d["received_event_id"] = event_id
     return _project_expected(d)
@@ -371,23 +453,25 @@ async def reconcile_confirm(
     the commitment with the event as the actual (per \u00a713 rules) and
     marks the event ``matched`` so subsequent forecasts don't double-count.
 
-    Batch 2A Correction 1:
-    * conditional DB update — permitted transition is
-      ``awaiting_reconciliation \u2192 matched`` only, guarded by
-      ``find_one_and_update`` so concurrent duplicate requests produce
-      exactly one state change and one audit entry.
-    * a ``matched`` event cannot be matched to another commitment.
-    * an accountless event cannot be matched — it must first receive a
-      valid asset account.
-    * ledger release runs ONLY after the event transition succeeds.
+    Correction 2:
+    * validate the event has a valid ASSET account of the commitment's
+      currency AND a trustworthy tz-aware ``occurred_at`` (else 400).
+    * apply ``actual_amount_override`` INSIDE the same winning
+      conditional event transition so a losing concurrent request can
+      NEVER modify the event amount.
+    * claim the commitment via the single-completion conditional
+      transition in ``_apply_complete`` BEFORE any permanent
+      reservation release. Two different events matching the same
+      commitment cannot both succeed.
+    * event ``amount`` and commitment ``actual_amount`` always agree.
     """
     db = get_db()
+    from money_service import parse_utc as _parse_utc  # local for cycles
+
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
 
-    # A matched event cannot be re-matched to another commitment; return
-    # its current commitment idempotently.
     if ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED:
         if ev.get("commitment_id") == body.commitment_id:
             c_existing = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
@@ -398,44 +482,49 @@ async def reconcile_confirm(
             detail="Event is already matched to a different commitment",
         )
 
-    # Accountless events cannot be matched — they carry no real money.
     if not ev.get("account_id"):
         raise HTTPException(
             status_code=400,
             detail="Assign an asset account to the event before matching a commitment",
         )
+    if _parse_utc(ev.get("occurred_at")) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Set a timezone-aware occurred_at on the event before matching a commitment",
+        )
+    # Defence-in-depth: re-validate the account (currency + asset).
+    from finance_manager import _resolve_event_account  # noqa: WPS433
+    await _resolve_event_account(db, current_user["id"], ev.get("account_id"), ev.get("currency") or "")
 
     c = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
     if not c:
         raise HTTPException(status_code=404, detail="Commitment not found")
+    _require(c.get("currency") == ev.get("currency"),
+             "Event currency must match the commitment currency")
     _require(c.get("state") in ("reserved", "expired"),
              f"Cannot reconcile against a commitment in state '{c.get('state')}'")
 
+    # Correction 2: fold the amount override INTO the winning
+    # conditional transition on the event. The find_one_and_update
+    # requires ``lifecycle_status == awaiting_reconciliation``. If the
+    # override is set we write it in the SAME operation, so a losing
+    # concurrent request cannot mutate the event amount at all.
+    set_fields: dict = {
+        "commitment_id": c["id"],
+        "reconciliation_status": "matched",
+        "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
+    }
     if body.actual_amount_override is not None:
         stored = _money_to_stored(body.actual_amount_override, "actual_amount_override")
-        await db.financial_events.update_one({"id": event_id}, {"$set": {"amount": stored}})
-        ev["amount"] = stored
-
-    # Conditional transition — a single DB-level guard. If another
-    # concurrent request already flipped the event to matched, we skip
-    # the audit/complete path so exactly one transition audit is
-    # written. This is stronger than a read-then-write; MongoDB
-    # guarantees the ``find_one_and_update`` condition atomically at
-    # the single-document level.
+        set_fields["amount"] = stored
     transitioned = await db.financial_events.find_one_and_update(
         {"id": event_id, "user_id": current_user["id"],
          "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
-        {"$set": {
-            "commitment_id": c["id"],
-            "reconciliation_status": "matched",
-            "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
-        }},
+        {"$set": set_fields},
         return_document=False,
     )
     if transitioned is None:
-        # Another request won; return the current commitment state
-        # without a duplicate release of the reservation.
-        current_ev = await db.financial_events.find_one({"id": event_id}, {"_id": 0})
+        current_ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
         if current_ev and current_ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED:
             fresh = await _read_commitment_by_id(db, current_user["id"], current_ev.get("commitment_id") or c["id"])
             if fresh:
@@ -445,25 +534,31 @@ async def reconcile_confirm(
             detail="Event is not in awaiting_reconciliation and cannot be matched",
         )
 
-    # We are the winner — perform the ledger release. If it fails, roll
-    # the event back to awaiting_reconciliation so the caller can retry.
+    # We won the event transition. Now claim the commitment via the
+    # single-completion conditional update inside ``_apply_complete``.
+    # If it loses/fails, roll the event back so the transition is
+    # end-to-end consistent and no orphan lingers.
     try:
         updated = await _apply_complete(db, current_user["id"], c, None, event_id, ev.get("event_date"))
     except Exception:
+        revert_fields: dict = {
+            "commitment_id": None,
+            "reconciliation_status": None,
+            "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON,
+        }
+        if body.actual_amount_override is not None:
+            revert_fields["amount"] = ev.get("amount")
         await db.financial_events.update_one(
             {"id": event_id, "user_id": current_user["id"]},
-            {"$set": {
-                "commitment_id": None,
-                "reconciliation_status": None,
-                "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON,
-            }},
+            {"$set": revert_fields},
         )
         raise
     await _audit(
         db, current_user["id"], "financial_event", event_id, "reconciled",
         source="reconciliation",
         new_value={"commitment_id": c["id"], "outcome": "matched",
-                   "lifecycle_status": LIFECYCLE_STATUS_MATCHED},
+                   "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
+                   "amount_override_applied": body.actual_amount_override is not None},
         related_event_id=event_id,
     )
     return {"commitment": _project_commitment(updated)}

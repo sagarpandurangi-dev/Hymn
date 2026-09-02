@@ -60,6 +60,7 @@ APPLIED_LIFECYCLE_STATUSES: frozenset = frozenset({
 
 UNAPPLIED_LIFECYCLE_STATUSES: frozenset = frozenset({
     "pending_account_assignment",
+    "pending_deduplication",
     "void",
 })
 
@@ -288,19 +289,21 @@ def sum_liquid_effective_by_currency(rows: Iterable[dict]) -> dict:
 
 
 def collect_pending_account_events(events: Iterable[dict]) -> list[dict]:
-    """Return events that block full confidence in the position.
+    """Return events that block full confidence in the position because
+    they genuinely lack an account and/or a trustworthy occurred_at.
 
-    An event is 'pending' — visibly requiring the user's review — when
-    either:
+    Correction 2: dedupe-pending events (``pending_deduplication``) are
+    NOT surfaced here — they belong to the dedupe resolution journey
+    and already carry their own visible ticket. Only records that need
+    account or time assignment appear in this list:
 
-    * it is confirmed but has no account_id (needs assignment), or
-    * its ``lifecycle_status`` is ``pending_account_assignment``, or
-    * it is confirmed with an account but has no safely-placeable
-      ``occurred_at`` (legacy/date-only import that we refuse to
-      silently place either side of a snapshot).
+    * ``lifecycle_status == 'pending_account_assignment'``, or
+    * confirmed with an account + applied lifecycle but no safely
+      parseable ``occurred_at`` (legacy/date-only import).
 
-    Void, rejected, and duplicate-pending events are NOT surfaced here
-    because they are already handled by their own flows.
+    Void, rejected, and dedupe-pending events are intentionally
+    excluded so the Finance dashboard "Pending account" warning shows
+    only records the account-assignment path can act on.
     """
     out: list[dict] = []
     for ev in events:
@@ -313,9 +316,6 @@ def collect_pending_account_events(events: Iterable[dict]) -> list[dict]:
             and ev.get("account_id")
             and parse_utc(ev.get("occurred_at")) is None
         ):
-            # Confirmed with an account but no safe occurred_at — the
-            # user must review this event before Finance trusts the
-            # position. Tag it explicitly so the UI can distinguish.
             out.append({**ev, "review_reason": "missing_occurred_at"})
     return out
 
@@ -403,11 +403,12 @@ async def monthly_actual_spending(
     * belongs to ``user_id`` and matches ``currency``
     * has ``direction == 'outflow'``
     * is applied (confirmation_status='confirmed' + lifecycle_status in
-      APPLIED + account_id present)
-    * ``occurred_at`` (UTC) falls inside the requested ``YYYY-MM``.
+      APPLIED + account_id present + parseable ``occurred_at``).
 
-    Events lacking an ``occurred_at`` are excluded — they are pending
-    review and MUST NOT contribute to spending totals.
+    Correction 2: monthly bucketing uses the user-facing/reporting
+    ``event_date`` (YYYY-MM-DD in the user's calendar), NOT the UTC
+    month of ``occurred_at``. Using the UTC month would move
+    transactions across months for users east/west of UTC.
     """
     applied_events, _ = await _load_applied_and_all_events(db, user_id)
     total = Decimal(0)
@@ -416,10 +417,14 @@ async def monthly_actual_spending(
             continue
         if ev.get("direction") != "outflow":
             continue
-        occ = parse_utc(ev.get("occurred_at"))
-        if occ is None:
+        if parse_utc(ev.get("occurred_at")) is None:
+            # Not trustworthy enough to affect balance — also excluded
+            # from the reporting sum.
             continue
-        if occ.strftime("%Y-%m") != month:
+        # Bucket by the reporting calendar date, not the UTC month of
+        # occurred_at.
+        event_date = ev.get("event_date") or ""
+        if not (isinstance(event_date, str) and event_date.startswith(month)):
             continue
         total += _to_decimal(ev.get("amount"))
     return total

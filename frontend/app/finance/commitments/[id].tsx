@@ -6,11 +6,29 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import DateTimeField from "@/src/components/DateTimeField";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
+import AccountPickerModal from "@/src/components/AccountPickerModal";
 import { FoldAmount, FoldCard, FoldHero, FoldPill, FoldRow, FoldSectionHeader, foldPageStyle } from "@/src/components/finance/foldUi";
 import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
 import { dateLabel, formatMoney } from "@/src/lib/finance/format";
 
 type Action = "complete" | "cancel" | "postpone" | "keep-active" | null;
+
+// Correction 2: build a device-local, timezone-aware ISO 8601 timestamp
+// so the backend can normalise it to UTC without ever silently
+// interpreting a naive wall-clock string as UTC.
+function nowLocalIso(): string {
+  const now = new Date();
+  const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+  const off = -now.getTimezoneOffset(); // minutes east of UTC
+  const sign = off >= 0 ? "+" : "-";
+  const oh = pad(Math.floor(Math.abs(off) / 60));
+  const om = pad(Math.abs(off) % 60);
+  return (
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+    `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}` +
+    `${sign}${oh}:${om}`
+  );
+}
 
 const STATE_TONE: Record<string, "neutral" | "info" | "ok" | "err" | "warn"> = {
   draft: "neutral", reserved: "info", completed: "ok", cancelled: "neutral", expired: "err",
@@ -29,6 +47,11 @@ export default function CommitmentDetail() {
   const [action, setAction] = useState<Action>(null);
   const [actualAmount, setActualAmount] = useState<string>("");
   const [newDue, setNewDue] = useState<string>("");
+  // Correction 2: completion also needs a paying asset account +
+  // explicit occurred_at. State kept alongside the action modal.
+  const [accountId, setAccountId] = useState<string | null>(null);
+  const [accountLabel, setAccountLabel] = useState<string>("Choose account");
+  const [accountPickerOpen, setAccountPickerOpen] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -51,7 +74,15 @@ export default function CommitmentDetail() {
     try {
       if (a === "complete") {
         if (!actualAmount) { Alert.alert("Actual amount required", "Please enter the amount actually spent."); setBusy(false); return; }
-        await api.completeFinancialCommitment(c.id, { actual_amount: actualAmount });
+        if (!accountId) { Alert.alert("Account required", "Pick the asset account this money came out of."); setBusy(false); return; }
+        // Correction 2: send actual_amount + account_id + explicit
+        // timezone-aware occurred_at. The backend refuses missing/
+        // naive occurred_at when auto-creating the completion event.
+        await api.completeFinancialCommitment(c.id, {
+          actual_amount: actualAmount,
+          account_id: accountId,
+          occurred_at: nowLocalIso(),
+        });
       } else if (a === "cancel") {
         await api.cancelFinancialCommitment(c.id);
       } else if (a === "postpone") {
@@ -60,7 +91,7 @@ export default function CommitmentDetail() {
       } else if (a === "keep-active") {
         await api.keepActiveFinancialCommitment(c.id);
       }
-      setAction(null); setActualAmount(""); setNewDue("");
+      setAction(null); setActualAmount(""); setNewDue(""); setAccountId(null); setAccountLabel("Choose account");
       await load();
     } catch (e: any) {
       Alert.alert("Action failed", e?.message || "");
@@ -169,7 +200,16 @@ export default function CommitmentDetail() {
                 <Text style={styles.sheetBody}>Completing records the actual spend, consumes the amount spent, releases any unused reserved money to the available pool, recalculates forecasts and preserves full history.</Text>
                 <Text style={styles.label}>ACTUAL AMOUNT ({c.currency})</Text>
                 <TextInput value={actualAmount} onChangeText={setActualAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} style={styles.input} testID="fc-actual-amount" />
-                <Pressable style={[styles.primary, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("complete")} testID="fc-complete-submit">
+                <Text style={styles.label}>PAYING ACCOUNT</Text>
+                <Pressable onPress={() => setAccountPickerOpen(true)} style={styles.input} testID="fc-account-select">
+                  <Text style={{ color: accountId ? financeColors.ink : financeColors.inkFaint, fontSize: 15 }}>{accountLabel}</Text>
+                </Pressable>
+                {!accountId ? (
+                  <Text style={{ fontSize: 12, color: financeColors.inkFaint, marginTop: 4 }}>
+                    Pick the {c.currency} asset account this money came out of. Completion is disabled until an eligible account is chosen.
+                  </Text>
+                ) : null}
+                <Pressable style={[styles.primary, (busy || !accountId || !actualAmount) && { opacity: 0.5 }]} disabled={busy || !accountId || !actualAmount} onPress={() => run("complete")} testID="fc-complete-submit">
                   <Text style={styles.primaryText}>Confirm completion</Text>
                 </Pressable>
               </>
@@ -195,6 +235,23 @@ export default function CommitmentDetail() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+      <AccountPickerModal
+        visible={accountPickerOpen}
+        currency={c.currency}
+        selectedId={accountId}
+        onSelect={async (id) => {
+          setAccountId(id);
+          if (!id) { setAccountLabel("Assign later"); return; }
+          try {
+            const rows = await api.listFinancialAccounts();
+            const match = rows.find((r) => r.id === id);
+            setAccountLabel(match ? `${match.name} (${match.currency})` : "Account selected");
+          } catch {
+            setAccountLabel("Account selected");
+          }
+        }}
+        onClose={() => setAccountPickerOpen(false)}
+      />
     </SafeAreaView>
   );
 }
