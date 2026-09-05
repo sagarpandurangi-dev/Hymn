@@ -67,7 +67,7 @@ UNAPPLIED_LIFECYCLE_STATUSES: frozenset = frozenset({
 ALL_LIFECYCLE_STATUSES: frozenset = APPLIED_LIFECYCLE_STATUSES | UNAPPLIED_LIFECYCLE_STATUSES
 
 # Commitment states that reserve money.
-RESERVING_COMMITMENT_STATES: frozenset = frozenset({"reserved", "expired"})
+RESERVING_COMMITMENT_STATES: frozenset = frozenset({"reserved", "partial", "expired"})
 
 # Liquidity axis label used for availability filtering.
 LIQUIDITY_LIQUID = "liquid"
@@ -98,6 +98,49 @@ def _to_decimal(v: Any) -> Decimal:
         return Decimal(str(v))
     except (InvalidOperation, ValueError):
         return Decimal(0)
+
+
+# ---------------------------------------------------------------------------
+# Correction 4A — canonical reservation helper.
+#
+# Exactly ONE place computes how much of an account balance a commitment
+# still reserves. Every reservation surface (availability, dashboards,
+# forecasts, decision assessment) MUST call this helper. It never
+# mutates the record and never uses float.
+#
+# State -> reservation:
+#   draft, completed, cancelled, unknown  -> 0
+#   reserved, expired                     -> original amount (non-neg)
+#   partial                               -> remaining_amount, else
+#                                            original - paid_amount,
+#                                            clamped to [0, original]
+# ---------------------------------------------------------------------------
+
+def reservation_amount_for_commitment(record: Any) -> Decimal:
+    if not isinstance(record, dict):
+        return Decimal(0)
+    original = _to_decimal(record.get("amount"))
+    if original < 0:
+        original = Decimal(0)
+    state = record.get("state")
+    if state in ("reserved", "expired"):
+        return original
+    if state == "partial":
+        # Prefer the stored remaining_amount when present. Missing =>
+        # derive from paid_amount. Clamp to [0, original] in either
+        # case so we never over- or under-reserve because of stale
+        # aggregates.
+        if "remaining_amount" in record and record.get("remaining_amount") is not None:
+            remaining = _to_decimal(record.get("remaining_amount"))
+        else:
+            remaining = original - _to_decimal(record.get("paid_amount"))
+        if remaining < Decimal(0):
+            return Decimal(0)
+        if remaining > original:
+            return original
+        return remaining
+    # draft, completed, cancelled, unknown, missing -> nothing reserved.
+    return Decimal(0)
 
 
 def parse_utc(v: Any) -> Optional[datetime]:
@@ -407,13 +450,13 @@ async def _load_reserved_totals(db, user_id: str) -> dict:
         {"user_id": user_id, "resource_type": "money",
          "financial_commitment_id": {"$ne": None},
          "state": {"$in": list(RESERVING_COMMITMENT_STATES)}},
-        {"_id": 0, "currency": 1, "amount": 1, "quantity": 1},
+        {"_id": 0, "currency": 1, "amount": 1, "quantity": 1, "state": 1,
+         "paid_amount": 1, "remaining_amount": 1},
     ).to_list(length=5000)
     totals: dict = {}
     for r in rows:
         cur = r.get("currency") or ""
-        raw = r.get("amount") if r.get("amount") is not None else r.get("quantity")
-        totals[cur] = totals.get(cur, Decimal(0)) + _to_decimal(raw)
+        totals[cur] = totals.get(cur, Decimal(0)) + reservation_amount_for_commitment(r)
     return totals
 
 
@@ -491,6 +534,7 @@ __all__ = [
     "LIQUIDITY_LIQUID",
     "ASSET_ACCOUNT_TYPES",
     "parse_utc",
+    "reservation_amount_for_commitment",
     "event_is_applied_to_account",
     "compute_effective_balance",
     "summarise_effective_balances",

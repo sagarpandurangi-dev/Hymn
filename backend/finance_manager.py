@@ -1932,10 +1932,14 @@ async def _reserved_totals(db, user_id: str) -> dict:
     ``'partial'`` or ``'expired'`` count (Draft doesn't reserve;
     completed/cancelled have already released).
 
-    Correction 3: partial commitments retain their reservation for the
-    unpaid remainder — we count ``remaining_amount`` when present,
-    otherwise fall back to the full amount for reserved/expired rows.
+    Correction 4A: the amount deducted from availability for a single
+    commitment is computed via the canonical
+    ``money_service.reservation_amount_for_commitment`` helper — the
+    ONE source of truth for reservation math. This function no longer
+    performs its own partial-versus-full arithmetic.
     """
+    from money_service import reservation_amount_for_commitment  # noqa: WPS433
+
     rows = await db.resource_allocations.find(
         {"user_id": user_id, "resource_type": "money",
          "financial_commitment_id": {"$ne": None},
@@ -1949,11 +1953,7 @@ async def _reserved_totals(db, user_id: str) -> dict:
             continue
         cur = d.get("currency") or ""
         b = per_currency.setdefault(cur, {"reserved": Decimal(0), "items": []})
-        if d.get("state") == "partial":
-            remaining = _decimal_from_stored(d.get("remaining_amount"))
-            b["reserved"] += remaining if remaining > 0 else Decimal(0)
-        else:
-            b["reserved"] += _decimal_from_stored(d.get("amount"))
+        b["reserved"] += reservation_amount_for_commitment(d)
         b["items"].append(_project_commitment(d))
     out = []
     for cur, b in per_currency.items():
@@ -2063,6 +2063,8 @@ async def _forecast_12_months(db, user_id: str) -> dict:
       unreserved < 1x fixed_outflows for that month);
     * 'low' when any month goes negative.
     """
+    from money_service import reservation_amount_for_commitment  # noqa: WPS433
+
     pos = await _current_position(db, user_id)
     liquid_by_cur = {c["currency"]: _decimal_from_stored(c["liquid_assets"]) for c in pos["currencies"]}
     assets_by_cur = {c["currency"]: _decimal_from_stored(c["total_assets"]) for c in pos["currencies"]}
@@ -2109,7 +2111,7 @@ async def _forecast_12_months(db, user_id: str) -> dict:
                 + _decimal_from_stored(summary["investments"])
             )
             reserved_this_month = sum(
-                (_decimal_from_stored(x["amount"]) for x in reserved_by_month[m]),
+                (reservation_amount_for_commitment(x) for x in reserved_by_month[m]),
                 Decimal(0),
             )
             rolling_liquid = rolling_liquid + income - outflows - reserved_this_month

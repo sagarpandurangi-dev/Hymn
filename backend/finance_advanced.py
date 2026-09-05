@@ -704,6 +704,8 @@ async def _twin_forecasts(db, user_id: str) -> dict:
     Each per-month row carries the assumptions used (\u00a721) so the client
     can drill into confidence.
     """
+    from money_service import reservation_amount_for_commitment  # noqa: WPS433
+
     pos = await _current_position(db, user_id)
     liquid_by_cur = {c["currency"]: _decimal_from_stored(c["liquid_assets"]) for c in pos["currencies"]}
     assets_by_cur = {c["currency"]: _decimal_from_stored(c["total_assets"]) for c in pos["currencies"]}
@@ -711,7 +713,7 @@ async def _twin_forecasts(db, user_id: str) -> dict:
 
     # Reserved commitments per (currency, due_month) — read from allocation model
     reserved_docs = await _find_commitment_allocations(
-        db, {"user_id": user_id, "state": {"$in": ["reserved", "expired"]}},
+        db, {"user_id": user_id, "state": {"$in": ["reserved", "partial", "expired"]}},
     )
     # Expected income (per included_in_forecast)
     expected_docs = await db.expected_incomes.find(
@@ -792,7 +794,14 @@ async def _twin_forecasts(db, user_id: str) -> dict:
             investments = _decimal_from_stored(summary["investments"])
             # Financial Commitments due this month (skip those already reconciled to an event)
             fc_this_month = [c for c in reserved_by_month[m] if c["id"] not in reserved_ids_reconciled_this_cur]
-            fc_amount = sum((_decimal_from_stored(c.get("amount")) for c in fc_this_month), Decimal(0))
+            # Correction 4A: reservation deducted per commitment comes
+            # from the canonical helper. Never sum the stored
+            # ``amount`` here or partial commitments would either
+            # over-reserve or vanish entirely.
+            fc_amount = sum(
+                (reservation_amount_for_commitment(c) for c in fc_this_month),
+                Decimal(0),
+            )
             # Expected income (already gated by confirmation)
             exp_amount = sum((_decimal_from_stored(e.get("amount")) for e in expected_by_month[m]), Decimal(0))
             exp_confirmed = sum((_decimal_from_stored(e.get("amount")) for e in expected_by_month[m] if e.get("classification") == "confirmed"), Decimal(0))
@@ -985,8 +994,11 @@ async def decision_assessment(
             projected_close_current = rolling
 
     # Load existing commitments to find those the proposal might displace — allocation read model.
+    from money_service import reservation_amount_for_commitment  # noqa: WPS433
     all_commit = await _find_commitment_allocations(
-        db, {"user_id": current_user["id"], "state": "reserved", "currency": body.currency},
+        db, {"user_id": current_user["id"],
+             "state": {"$in": ["reserved", "partial", "expired"]},
+             "currency": body.currency},
     )
     higher_priority_displaced = [
         _project_commitment(c) for c in all_commit
@@ -1006,7 +1018,10 @@ async def decision_assessment(
             if row is None:
                 continue
             close_after = _decimal_from_stored(row["closing_liquid_money"]) - (prop_amt if due_month >= prop_month else Decimal(0))
-            if close_after < _decimal_from_stored(c.get("amount")):
+            # Correction 4A: compare against the canonical reservation
+            # (partial commitments must not compare against their
+            # original amount — they only tie up the remaining slice).
+            if close_after < reservation_amount_for_commitment(c):
                 affected.append(_project_commitment(c))
         if affected:
             classification = "warning"
