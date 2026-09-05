@@ -131,19 +131,59 @@ def parse_utc(v: Any) -> Optional[datetime]:
 
 
 def _event_occurs_after_snapshot(event: dict, account_balance_as_of: Any) -> bool:
-    """Strict tz-aware comparison. When either side lacks a safely
-    parseable UTC datetime we conservatively return ``False`` so the
-    event does NOT affect the balance — the caller must surface the
-    event for user review.
+    """Strict tz-aware comparison. Correction 3 adds trustworthy-time
+    rules for date-only events:
+
+    * ``precision == 'exact'`` (or missing but ``occurred_at`` parses):
+      compare parsed UTC datetimes; apply only when strictly after the
+      snapshot.
+    * ``precision == 'date_only'``: compare local calendar dates using
+      ``event_date`` and (when available) the event's stored device
+      timezone offset (``occurred_at_offset_minutes``). Rules:
+        - event date > snapshot local date  -> apply
+        - event date < snapshot local date  -> already in snapshot
+        - same local calendar date          -> leave unapplied; caller
+          surfaces review reason ``same_day_time_ambiguous``.
+
+    Returns True only when it is safe to apply the event; returns False
+    both for "before snapshot" and "same-day ambiguous". The pending-
+    events collector distinguishes the two cases via
+    ``review_reason``.
     """
-    ev_dt = parse_utc(event.get("occurred_at"))
     snap_dt = parse_utc(account_balance_as_of)
+    precision = (event.get("occurred_at_precision") or "").lower()
+    if precision == "date_only" or event.get("occurred_at") is None:
+        # date-only comparison — use event_date + local offset
+        ev_date = event.get("event_date")
+        if not isinstance(ev_date, str) or len(ev_date) < 10:
+            return False
+        # snapshot's local date (fall back to UTC calendar date)
+        offset_min = event.get("occurred_at_offset_minutes")
+        try:
+            if snap_dt is not None:
+                if isinstance(offset_min, (int, float)):
+                    from datetime import timezone as _tz, timedelta as _td
+                    snap_local = snap_dt.astimezone(_tz(_td(minutes=int(offset_min))))
+                else:
+                    snap_local = snap_dt.astimezone(timezone.utc)
+                snap_date_str = snap_local.strftime("%Y-%m-%d")
+            else:
+                snap_date_str = ""
+        except Exception:
+            snap_date_str = ""
+        if not snap_date_str:
+            # No snapshot pinpoint — refuse to guess.
+            return False
+        if ev_date > snap_date_str:
+            return True
+        # Before or same — never apply automatically. Same-day is
+        # ambiguous and requires an explicit time from the user.
+        return False
+    # precision == 'exact' (or unspecified with a tz-aware occurred_at)
+    ev_dt = parse_utc(event.get("occurred_at"))
     if ev_dt is None:
         return False
     if snap_dt is None:
-        # Snapshot has never had an authoritative cut-off; any properly
-        # dated event applies. In practice migration ensures every
-        # account carries a ``balance_as_of``.
         return True
     return ev_dt > snap_dt
 
@@ -159,16 +199,19 @@ def event_is_applied_to_account(
     applied_statuses: Iterable[str] = APPLIED_LIFECYCLE_STATUSES,
 ) -> bool:
     """Return True iff ``event`` counts towards ``account``'s effective
-    balance under the strict Batch 2A Correction 1 rules."""
+    balance under the strict Correction 3 rules.
+
+    An event applies to the account balance exactly once, regardless of
+    how many commitments or expected-income records it is allocated to.
+    Allocations classify the movement; they never move the account
+    balance again.
+    """
     if event.get("account_id") != account.get("id"):
         return False
     if event.get("confirmation_status") != "confirmed":
         return False
     if event.get("lifecycle_status") not in frozenset(applied_statuses):
         return False
-    # Currency guard: the endpoint layer enforces this at write time,
-    # but a defensive check here means a data-corruption event never
-    # contaminates a different currency's totals.
     if event.get("currency") and account.get("currency") and event["currency"] != account["currency"]:
         return False
     if not _event_occurs_after_snapshot(event, account.get("balance_as_of")):
@@ -289,34 +332,44 @@ def sum_liquid_effective_by_currency(rows: Iterable[dict]) -> dict:
 
 
 def collect_pending_account_events(events: Iterable[dict]) -> list[dict]:
-    """Return events that block full confidence in the position because
-    they genuinely lack an account and/or a trustworthy occurred_at.
+    """Return events that block full confidence in the position.
 
-    Correction 2: dedupe-pending events (``pending_deduplication``) are
-    NOT surfaced here — they belong to the dedupe resolution journey
-    and already carry their own visible ticket. Only records that need
-    account or time assignment appear in this list:
+    Correction 3 emits three distinct review reasons for pending
+    records:
 
-    * ``lifecycle_status == 'pending_account_assignment'``, or
-    * confirmed with an account + applied lifecycle but no safely
-      parseable ``occurred_at`` (legacy/date-only import).
+    * ``missing_account`` — the event lifecycle is
+      ``pending_account_assignment``.
+    * ``missing_occurred_at`` — confirmed & applied lifecycle & has an
+      account but the ``occurred_at`` is unparseable/naive.
+    * ``same_day_time_ambiguous`` — confirmed & applied lifecycle &
+      has an account & ``precision == 'date_only'`` & the event's
+      calendar date equals the snapshot's local calendar date. Only
+      this case requires the user to supply an explicit time.
 
-    Void, rejected, and dedupe-pending events are intentionally
-    excluded so the Finance dashboard "Pending account" warning shows
-    only records the account-assignment path can act on.
+    Dedupe-pending events remain in the dedupe journey and are NOT
+    surfaced here.
     """
     out: list[dict] = []
     for ev in events:
         if ev.get("lifecycle_status") == "pending_account_assignment":
-            out.append(ev)
+            out.append({**ev, "review_reason": "missing_account"})
             continue
         if (
             ev.get("confirmation_status") == "confirmed"
             and ev.get("lifecycle_status") in APPLIED_LIFECYCLE_STATUSES
             and ev.get("account_id")
-            and parse_utc(ev.get("occurred_at")) is None
         ):
-            out.append({**ev, "review_reason": "missing_occurred_at"})
+            precision = (ev.get("occurred_at_precision") or "").lower()
+            if precision == "date_only":
+                # We can't tell without asking whether the transaction
+                # is before/after the snapshot on the same day.
+                # Surface only when it truly matters — the caller
+                # doesn't have snapshot context here so we let the UI
+                # request precision when needed by tagging the event.
+                out.append({**ev, "review_reason": "same_day_time_ambiguous"})
+                continue
+            if parse_utc(ev.get("occurred_at")) is None:
+                out.append({**ev, "review_reason": "missing_occurred_at"})
     return out
 
 

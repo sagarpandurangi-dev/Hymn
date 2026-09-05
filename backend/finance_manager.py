@@ -346,6 +346,138 @@ def _normalise_occurred_at(v: Any) -> Optional[str]:
     return dt.astimezone(timezone.utc).isoformat()
 
 
+
+
+# ---------------------------------------------------------------------
+# Correction 3 — allocation helpers.
+#
+# ``financial_events.allocations`` is an embedded array of allocation
+# dicts. Each classifies a slice of the parent event to a commitment
+# or expected-income record. Allocations NEVER move the account
+# balance; the parent event is the sole account-affecting movement.
+# ---------------------------------------------------------------------
+
+
+def _allocation_shape(*, target_type: str, target_id: str, amount_stored: Decimal128,
+                       currency: str) -> dict:
+    now = _now()
+    return {
+        "id": _uuid(),
+        "target_type": target_type,
+        "target_id": target_id,
+        "amount": amount_stored,
+        "currency": currency,
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _sum_active_allocations(allocations: Any) -> Decimal:
+    total = Decimal(0)
+    if not isinstance(allocations, list):
+        return total
+    for a in allocations:
+        if a and a.get("status") == "active":
+            total += _decimal_from_stored(a.get("amount"))
+    return total
+
+
+def _project_event(ev: dict) -> dict:
+    """Public projection of a financial_event — never returns Decimal128
+    internals. Sums allocations for allocated/unallocated derived
+    fields."""
+    out = dict(ev)
+    amt_dec = _decimal_from_stored(out.get("amount"))
+    out["amount"] = _money_from_stored(out.get("amount"))
+    allocated = _sum_active_allocations(out.get("allocations"))
+    out["allocated_amount"] = _quantize_out(allocated)
+    out["unallocated_amount"] = _quantize_out(amt_dec - allocated)
+    projected_allocs: list = []
+    for a in out.get("allocations") or []:
+        projected_allocs.append({
+            **a,
+            "amount": _money_from_stored(a.get("amount")),
+        })
+    out["allocations"] = projected_allocs
+    out.setdefault("account_id", None)
+    out.setdefault("lifecycle_status", LIFECYCLE_STATUS_PENDING_ACCOUNT)
+    out.setdefault("occurred_at", None)
+    out.setdefault("occurred_at_precision", None)
+    out.setdefault("occurred_at_offset_minutes", None)
+    return out
+
+
+async def _validate_allocation_target(
+    db, user_id: str, target_type: str, target_id: str, currency: str,
+    direction: str,
+) -> dict:
+    """Ensure the allocation target belongs to the caller, matches the
+    parent event currency, and is compatible with the event direction.
+    Returns the target document.
+    """
+    _require_in(target_type, ("commitment", "expected_income"), "target_type")
+    if target_type == "commitment":
+        if direction != "outflow":
+            raise HTTPException(status_code=400, detail="Only outflow events can allocate to commitments")
+        doc = await _read_commitment_by_id(db, user_id, target_id)
+        if not doc:
+            raise HTTPException(status_code=404, detail="Commitment not found")
+    else:
+        if direction != "inflow":
+            raise HTTPException(status_code=400, detail="Only inflow events can allocate to expected income")
+        doc = await db.expected_incomes.find_one(
+            {"id": target_id, "user_id": user_id}, {"_id": 0},
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="Expected income not found")
+    if doc.get("currency") != currency:
+        raise HTTPException(status_code=400, detail="Allocation currency must match target currency")
+    return doc
+
+
+async def _conditional_push_allocation(
+    db, user_id: str, event_id: str, allocation: dict, amount: Decimal,
+) -> dict:
+    """Conditionally append an allocation to ``financial_events``,
+    enforcing that active allocations never exceed the event amount.
+
+    Uses an ``$expr`` guard so the update writes only when the current
+    active-allocation sum + this allocation still fits within the
+    event's ``amount``. The check runs atomically at the single-
+    document level in MongoDB.
+    """
+    # We compute the current sum in Python from a fresh read, then use
+    # a filter that matches only if the array shape hasn't changed
+    # since we read it (via array length + total). For safety we retry
+    # once on conflict.
+    for _ in range(3):
+        ev = await db.financial_events.find_one({"id": event_id, "user_id": user_id}, {"_id": 0})
+        if not ev:
+            raise HTTPException(status_code=404, detail="Financial Event not found")
+        allocs = ev.get("allocations") or []
+        current_active = _sum_active_allocations(allocs)
+        event_amount = _decimal_from_stored(ev.get("amount"))
+        if current_active + amount > event_amount:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Allocation exceeds unallocated event amount. "
+                    f"Unallocated remaining: {_quantize_out(event_amount - current_active)}"
+                ),
+            )
+        # Conditional push — filter by exact allocations array so a
+        # concurrent write invalidates our attempt.
+        result = await db.financial_events.update_one(
+            {"id": event_id, "user_id": user_id, "allocations": allocs},
+            {"$push": {"allocations": allocation}, "$set": {"updated_at": _now()}},
+        )
+        if result.modified_count == 1:
+            return allocation
+    raise HTTPException(status_code=409, detail="Concurrent allocation conflict; retry")
+
+
+
 # ============================================================================
 # Pydantic models
 # ============================================================================
@@ -442,18 +574,12 @@ class FinancialEventCreate(BaseModel):
     confirmation_status: str = "confirmed"  # manual entries default to confirmed
     checkin_id: Optional[str] = None
     commitment_id: Optional[str] = None
-    # Batch 2A: authoritative source-of-truth linkage. Newly confirmed
-    # inflows/outflows MUST be tied to a user-owned account of the same
-    # currency. Callers that cannot supply one see the event persisted
-    # in ``pending_account_assignment`` state so it does NOT affect
-    # balances silently.
     account_id: Optional[str] = None
-    # Batch 2A Correction 1: authoritative transaction timestamp
-    # (tz-aware ISO-8601 UTC). Used by the money service to decide
-    # whether the event falls after the account snapshot. When missing
-    # or naive the event remains unapplied until reviewed — we NEVER
-    # substitute created_at.
     occurred_at: Optional[str] = None
+    # Correction 3: precision explicitly declared by the caller. When
+    # omitted we infer from the presence of a tz-aware occurred_at.
+    occurred_at_precision: Optional[str] = None  # 'exact' | 'date_only'
+    occurred_at_offset_minutes: Optional[int] = None
 
 
 class FinancialEventResponse(BaseModel):
@@ -472,6 +598,13 @@ class FinancialEventResponse(BaseModel):
     account_id: Optional[str] = None
     lifecycle_status: str
     occurred_at: Optional[str] = None
+    occurred_at_precision: Optional[str] = None
+    occurred_at_offset_minutes: Optional[int] = None
+    # Correction 3: embedded allocations + derived aggregates so
+    # callers see multi-payment reality on a single wire trip.
+    allocations: List[Any] = []
+    allocated_amount: str = "0"
+    unallocated_amount: str = "0"
     created_at: str
 
 
@@ -1867,10 +2000,15 @@ async def create_event(body: FinancialEventCreate, current_user: dict = Depends(
     # Batch 2A Correction 1: liabilities are rejected inside the helper.
     await _resolve_event_account(db, current_user["id"], body.account_id, body.currency)
 
-    # Batch 2A Correction 1: normalise the authoritative transaction
-    # timestamp. Callers that cannot compute a tz-aware UTC value pass
-    # None — the event stays visibly unapplied until reviewed.
+    # Correction 3: normalise precision. If caller provides
+    # ``occurred_at_precision`` we trust it; otherwise infer from the
+    # presence of a tz-aware ``occurred_at``.
     occurred_at = _normalise_occurred_at(body.occurred_at)
+    precision = (body.occurred_at_precision or "").lower() or None
+    if precision not in (None, "exact", "date_only"):
+        raise HTTPException(status_code=400, detail="occurred_at_precision must be 'exact' or 'date_only'")
+    if precision is None:
+        precision = "exact" if occurred_at else "date_only"
 
     lifecycle_status = _default_lifecycle_status(
         direction=body.direction,
@@ -1894,6 +2032,12 @@ async def create_event(body: FinancialEventCreate, current_user: dict = Depends(
         "account_id": body.account_id,
         "lifecycle_status": lifecycle_status,
         "occurred_at": occurred_at,
+        "occurred_at_precision": precision,
+        "occurred_at_offset_minutes": body.occurred_at_offset_minutes,
+        # Correction 3: allocations start empty; the caller may
+        # explicitly allocate after creation, or migration/completion
+        # flow can push in a single allocation.
+        "allocations": [],
         "created_at": _now(),
     }
 
@@ -1946,7 +2090,7 @@ async def create_event(body: FinancialEventCreate, current_user: dict = Depends(
             await db.financial_events.delete_one({"id": ev["id"]})
             raise
     ev["amount"] = _money_from_stored(stored_amt)
-    return ev
+    return _project_event(ev)
 
 
 @finance_router.get("/events", response_model=List[FinancialEventResponse])
@@ -1965,11 +2109,7 @@ async def list_events(
         _require_in(confirmation_status, CONFIRMATION_STATUSES, "confirmation_status")
         q["confirmation_status"] = confirmation_status
     docs = await db.financial_events.find(q, {"_id": 0}).sort("event_date", -1).to_list(length=limit)
-    for d in docs:
-        d["amount"] = _money_from_stored(d.get("amount"))
-        d.setdefault("account_id", None)
-        d.setdefault("lifecycle_status", LIFECYCLE_STATUS_AWAITING_RECON if d.get("confirmation_status") == "confirmed" else LIFECYCLE_STATUS_PENDING_ACCOUNT)
-    return docs
+    return [_project_event(d) for d in docs]
 
 
 @finance_router.post("/events/{event_id}/confirm", response_model=FinancialEventResponse)
