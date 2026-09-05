@@ -2048,13 +2048,14 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
             # 2. Otherwise interpret the check-in ``date+time`` as UTC
             #    (documented fallback — no per-user timezone is stored).
             occurred_at_iso = _normalise_occurred_at(body.occurred_at)
-            if not occurred_at_iso and body.date:
-                try:
-                    _t = body.time or "00:00"
-                    _dt = datetime.fromisoformat(f"{body.date}T{_t}:00+00:00")
-                    occurred_at_iso = _dt.astimezone(timezone.utc).isoformat()
-                except Exception:
-                    occurred_at_iso = None
+            # Correction 3: NEVER invent a UTC time from a naive date+time.
+            # If the client didn't send a tz-aware ``occurred_at`` we
+            # keep the moment unknown and tag the event with
+            # ``occurred_at_precision='date_only'`` so ``money_service``
+            # applies it via calendar-date rules and surfaces a review
+            # prompt only when same-day ordering could affect a
+            # balance.
+            occurred_at_precision = "exact" if occurred_at_iso else "date_only"
             fev = {
                 "id": str(uuid.uuid4()),
                 "user_id": current_user["id"],
@@ -2071,6 +2072,8 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                 "account_id": resolved_account_id,
                 "lifecycle_status": lifecycle_status,
                 "occurred_at": occurred_at_iso,
+                "occurred_at_precision": occurred_at_precision,
+                "allocations": [],
                 "created_at": _fnow(),
             }
             dup_id = await _dedupe_check(db, current_user["id"], fev)

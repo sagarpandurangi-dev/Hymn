@@ -34,6 +34,14 @@ export default function ExpectedIncome() {
   const [receiveAccountLabel, setReceiveAccountLabel] = useState<string>("Choose account");
   const [receiveAccountPickerOpen, setReceiveAccountPickerOpen] = useState(false);
   const [receiveDate, setReceiveDate] = useState<string>("");
+  const [receiveMode, setReceiveMode] = useState<"full" | "partial">("full");
+  const [receivePartialAmount, setReceivePartialAmount] = useState<string>("");
+  // Correction 3: partial-receipt via allocations on an existing
+  // APPLIED inflow event.
+  const [allocateSheet, setAllocateSheet] = useState<any | null>(null);
+  const [allocateEvents, setAllocateEvents] = useState<any[]>([]);
+  const [allocateSelectedEventId, setAllocateSelectedEventId] = useState<string | null>(null);
+  const [allocateAmount, setAllocateAmount] = useState<string>("");
 
   const load = useCallback(async () => { setLoading(true); try { setRows(await api.listExpectedIncome()); } catch { /* ignore */ } setLoading(false); }, []);
   useEffect(() => { load(); }, [load]);
@@ -75,12 +83,52 @@ export default function ExpectedIncome() {
     try {
       const occ = toLocalTimezoneIso(receiveDate, "12:00");
       if (!occ) throw new Error("Invalid date");
-      await api.markExpectedReceived(receiveTarget.id, {
+      const payload: any = {
         account_id: receiveAccountId,
         occurred_at: occ,
         event_date: receiveDate,
-      });
+      };
+      if (receiveMode === "partial" && receivePartialAmount) {
+        payload.actual_amount = receivePartialAmount;
+        payload.partial = true;
+      }
+      await api.markExpectedReceived(receiveTarget.id, payload);
       setReceiveTarget(null);
+      setReceiveMode("full");
+      setReceivePartialAmount("");
+      load();
+    } catch (e: any) {
+      Alert.alert("Error", e?.message || "");
+    }
+  };
+
+  // Correction 3 — link an existing APPLIED inflow event to this
+  // expected income via an allocation.
+  const openAllocate = async (row: any) => {
+    setAllocateSheet(row);
+    setAllocateSelectedEventId(null);
+    setAllocateAmount("");
+    try {
+      const evs = await api.listFinancialEvents({ currency: row.currency, confirmation_status: "confirmed", limit: 200 });
+      const eligible = (evs || []).filter((e: any) => {
+        if (e.direction !== "inflow") return false;
+        if (e.currency !== row.currency) return false;
+        if (!["awaiting_reconciliation", "matched", "resolved_unplanned"].includes(e.lifecycle_status)) return false;
+        const unalloc = parseFloat(e.unallocated_amount || "0");
+        return isFinite(unalloc) && unalloc > 0;
+      });
+      setAllocateEvents(eligible);
+    } catch { setAllocateEvents([]); }
+  };
+  const submitAllocate = async () => {
+    if (!allocateSheet || !allocateSelectedEventId || !allocateAmount) return;
+    try {
+      await api.createAllocation(allocateSelectedEventId, {
+        target_type: "expected_income",
+        target_id: allocateSheet.id,
+        amount: allocateAmount,
+      });
+      setAllocateSheet(null);
       load();
     } catch (e: any) {
       Alert.alert("Error", e?.message || "");
@@ -114,18 +162,28 @@ export default function ExpectedIncome() {
                     <View style={{ flexDirection: "row", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                       <Text style={[financeType.rowLabel, { maxWidth: 180 }]} numberOfLines={1}>{r.title}</Text>
                       <FoldPill label={r.classification} tone={r.classification === "confirmed" ? "ok" : "neutral"} size="xs" />
-                      {r.received ? <FoldPill label="Received" tone="ok" size="xs" /> : null}
+                      {r.received ? <FoldPill label="Received" tone="ok" size="xs" /> :
+                        parseFloat(r.received_amount || "0") > 0 ? <FoldPill label="Partial" tone="warn" size="xs" /> : null}
                       {!r.received && r.included_in_forecast ? <FoldPill label="In forecast" tone="info" size="xs" /> : null}
                     </View>
                   }
-                  meta={`${dateLabel(r.expected_date)}`}
+                  meta={
+                    parseFloat(r.received_amount || "0") > 0 && !r.received
+                      ? `${dateLabel(r.expected_date)} · ${r.currency} ${formatMoney(r.received_amount)} of ${formatMoney(r.amount)} received`
+                      : `${dateLabel(r.expected_date)}`
+                  }
                   right={
                     <View style={{ flexDirection: "row", alignItems: "center", gap: financeSpace.sm }}>
                       <FoldAmount currency={r.currency} value={formatMoney(r.amount)} tone="positive" />
                       {!r.received ? (
-                        <Pressable onPress={() => markReceived(r)} style={styles.smallBtn} testID={`ei-received-${r.id}`}>
-                          <Text style={styles.smallBtnText}>Received</Text>
-                        </Pressable>
+                        <>
+                          <Pressable onPress={() => markReceived(r)} style={styles.smallBtn} testID={`ei-received-${r.id}`}>
+                            <Text style={styles.smallBtnText}>Received</Text>
+                          </Pressable>
+                          <Pressable onPress={() => openAllocate(r)} style={[styles.smallBtn, { backgroundColor: financeColors.pillInk }]} testID={`ei-link-${r.id}`}>
+                            <Text style={styles.smallBtnText}>Link event</Text>
+                          </Pressable>
+                        </>
                       ) : null}
                       <Pressable onPress={() => remove(r.id)} hitSlop={12} testID={`ei-remove-${r.id}`} style={styles.iconTrash}>
                         <Ionicons name="trash-outline" size={14} color={financeColors.danger} />
@@ -209,7 +267,21 @@ export default function ExpectedIncome() {
             </Pressable>
             <Text style={styles.label}>RECEIVED ON</Text>
             <DateTimeField mode="date" value={receiveDate} onChange={setReceiveDate} testID="ei-receive-date" />
-            <Pressable style={[styles.primary, (!receiveAccountId || !receiveDate) && { opacity: 0.5 }]} disabled={!receiveAccountId || !receiveDate} onPress={submitReceived} testID="ei-receive-submit">
+            <Text style={styles.label}>AMOUNT</Text>
+            <View style={{ flexDirection: "row", gap: financeSpace.sm }}>
+              {(["full", "partial"] as const).map((m) => (
+                <Pressable key={m} onPress={() => setReceiveMode(m)} style={[styles.chip, receiveMode === m && styles.chipSel]} testID={`ei-receive-mode-${m}`}>
+                  <Text style={[styles.chipText, receiveMode === m && styles.chipTextSel]}>{m === "full" ? "Full amount" : "Partial"}</Text>
+                </Pressable>
+              ))}
+            </View>
+            {receiveMode === "partial" ? (
+              <>
+                <Text style={[styles.label, { marginTop: financeSpace.sm }]}>PARTIAL AMOUNT ({receiveTarget?.currency || currency})</Text>
+                <TextInput style={styles.input} value={receivePartialAmount} onChangeText={setReceivePartialAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} testID="ei-receive-partial" />
+              </>
+            ) : null}
+            <Pressable style={[styles.primary, (!receiveAccountId || !receiveDate || (receiveMode === "partial" && !receivePartialAmount)) && { opacity: 0.5 }]} disabled={!receiveAccountId || !receiveDate || (receiveMode === "partial" && !receivePartialAmount)} onPress={submitReceived} testID="ei-receive-submit">
               <Text style={styles.primaryText}>Confirm received</Text>
             </Pressable>
           </View>
@@ -231,6 +303,41 @@ export default function ExpectedIncome() {
         }}
         onClose={() => setReceiveAccountPickerOpen(false)}
       />
+
+      <Modal visible={!!allocateSheet} animationType="slide" transparent onRequestClose={() => setAllocateSheet(null)}>
+        <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={styles.sheetCard}>
+            <View style={styles.sheetHead}>
+              <Text style={styles.sheetTitle}>Link received event</Text>
+              <Pressable onPress={() => setAllocateSheet(null)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
+            </View>
+            <Text style={styles.sheetBody}>Pick an existing inflow event to classify against this expected income. Allocations only classify money — they never move an account balance.</Text>
+            <Text style={styles.label}>EVENT</Text>
+            {allocateEvents.length === 0 ? (
+              <Text style={{ fontSize: 12, color: financeColors.inkFaint, marginTop: 4 }}>No confirmed {allocateSheet?.currency} inflow events with unallocated amount right now.</Text>
+            ) : (
+              <ScrollView style={{ maxHeight: 220 }}>
+                {allocateEvents.map((e) => (
+                  <Pressable
+                    key={e.id}
+                    onPress={() => setAllocateSelectedEventId(e.id)}
+                    style={[styles.eventRow, allocateSelectedEventId === e.id && styles.eventRowSel]}
+                    testID={`ei-allocate-event-${e.id}`}
+                  >
+                    <Text style={styles.eventPrimary} numberOfLines={1}>{e.description || "Untitled event"}</Text>
+                    <Text style={styles.eventMeta}>{dateLabel(e.event_date)} · {allocateSheet?.currency} {formatMoney(e.amount)} · unallocated {formatMoney(e.unallocated_amount || "0")}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )}
+            <Text style={styles.label}>AMOUNT ({allocateSheet?.currency})</Text>
+            <TextInput style={styles.input} value={allocateAmount} onChangeText={setAllocateAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} testID="ei-allocate-amount" />
+            <Pressable style={[styles.primary, (!allocateSelectedEventId || !allocateAmount) && { opacity: 0.5 }]} disabled={!allocateSelectedEventId || !allocateAmount} onPress={submitAllocate} testID="ei-allocate-submit">
+              <Text style={styles.primaryText}>Apply to this expected income</Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -259,4 +366,8 @@ const styles = StyleSheet.create({
   primaryText: { color: "#FBFBF6", fontSize: 13, fontWeight: "700", letterSpacing: 0.4 },
   secondary: { paddingVertical: financeSpace.md, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, alignItems: "center", flex: 1, marginTop: financeSpace.md },
   secondaryText: { color: financeColors.ink, fontSize: 13, fontWeight: "600" },
+  eventRow: { paddingHorizontal: financeSpace.md, paddingVertical: financeSpace.sm, borderRadius: financeRadius.sm, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, backgroundColor: "#FFFFFF", marginBottom: financeSpace.xs },
+  eventRowSel: { borderColor: financeColors.ink, backgroundColor: financeColors.pillBg },
+  eventPrimary: { fontSize: 13, color: financeColors.ink, fontWeight: "600" },
+  eventMeta: { fontSize: 11, color: financeColors.inkMuted, marginTop: 2 },
 });

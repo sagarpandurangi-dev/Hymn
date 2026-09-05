@@ -390,8 +390,10 @@ export const api = {
   reviewFinancialCommitment: (id: string, payload: { decision: "keep" | "complete" | "cancel" | "postpone"; new_due_date?: string; actual_amount?: string | number; actual_event_id?: string; account_id?: string; occurred_at?: string }) =>
     request<any>(`/finance/commitments/${id}/review`, { method: "POST", body: payload, auth: true }),
   // Correction 2: narrow endpoint to fix an unapplied event's
-  // account/time so it flows into the money service.
-  patchEventAssignment: (id: string, payload: { account_id?: string | null; occurred_at?: string | null; event_date?: string }) =>
+  // account/time so it flows into the money service. Correction 3
+  // adds optional precision + device-timezone offset fields so the
+  // frontend never has to invent a noon/midnight time.
+  patchEventAssignment: (id: string, payload: { account_id?: string | null; occurred_at?: string | null; event_date?: string; occurred_at_precision?: "exact" | "date_only"; occurred_at_offset_minutes?: number | null }) =>
     request<any>(`/finance/events/${id}/assignment`, { method: "PATCH", body: payload, auth: true }),
   getTaskLinkedCommitment: (taskId: string) =>
     request<any>(`/finance/task-linked-commitment/${taskId}`, { auth: true }),
@@ -412,6 +414,16 @@ export const api = {
     request<any>(`/finance/events/${id}/confirm`, { method: "POST", auth: true }),
   rejectFinancialEvent: (id: string) =>
     request<any>(`/finance/events/${id}/reject`, { method: "POST", auth: true }),
+
+  // Correction 3 — allocation CRUD. Allocations classify slices of a
+  // single financial event to commitments / expected incomes. They
+  // never move the account balance.
+  createAllocation: (eventId: string, payload: { target_type: "commitment" | "expected_income"; target_id: string; amount: string | number }) =>
+    request<any>(`/finance/events/${eventId}/allocations`, { method: "POST", body: payload, auth: true }),
+  updateAllocation: (eventId: string, allocationId: string, payload: { amount: string | number }) =>
+    request<any>(`/finance/events/${eventId}/allocations/${allocationId}`, { method: "PATCH", body: payload, auth: true }),
+  voidAllocation: (eventId: string, allocationId: string) =>
+    request<any>(`/finance/events/${eventId}/allocations/${allocationId}/void`, { method: "POST", auth: true }),
 
   listDedupeCandidates: () => request<any[]>("/finance/dedupe-candidates", { auth: true }),
   resolveDedupe: (candidateId: string, resolution: "same" | "different", canonical_event_id?: string) =>

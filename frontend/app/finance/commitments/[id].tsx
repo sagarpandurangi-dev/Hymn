@@ -11,7 +11,7 @@ import { FoldAmount, FoldCard, FoldHero, FoldPill, FoldRow, FoldSectionHeader, f
 import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
 import { dateLabel, formatMoney } from "@/src/lib/finance/format";
 
-type Action = "complete" | "cancel" | "postpone" | "keep-active" | null;
+type Action = "complete" | "cancel" | "postpone" | "keep-active" | "allocate" | null;
 
 // Correction 2: build a device-local, timezone-aware ISO 8601 timestamp
 // so the backend can normalise it to UTC without ever silently
@@ -31,10 +31,10 @@ function nowLocalIso(): string {
 }
 
 const STATE_TONE: Record<string, "neutral" | "info" | "ok" | "err" | "warn"> = {
-  draft: "neutral", reserved: "info", completed: "ok", cancelled: "neutral", expired: "err",
+  draft: "neutral", reserved: "info", partial: "warn", completed: "ok", cancelled: "neutral", expired: "err",
 };
 const STATE_LABEL: Record<string, string> = {
-  draft: "Draft", reserved: "Reserved", completed: "Completed", cancelled: "Cancelled", expired: "Expired",
+  draft: "Draft", reserved: "Reserved", partial: "Partial", completed: "Completed", cancelled: "Cancelled", expired: "Expired",
 };
 
 export default function CommitmentDetail() {
@@ -52,6 +52,12 @@ export default function CommitmentDetail() {
   const [accountId, setAccountId] = useState<string | null>(null);
   const [accountLabel, setAccountLabel] = useState<string>("Choose account");
   const [accountPickerOpen, setAccountPickerOpen] = useState(false);
+  // Correction 3 — partial payment via allocations on an existing
+  // APPLIED event. The picker below lists confirmed outflow events
+  // of the same currency that still have unallocated amount left.
+  const [eligibleEvents, setEligibleEvents] = useState<any[]>([]);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [allocateAmount, setAllocateAmount] = useState<string>("");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -60,6 +66,23 @@ export default function CommitmentDetail() {
       setC(doc);
       const trail = await api.getFinancialAudit("financial_commitment", id).catch(() => ({ entries: [] }));
       setAudit(trail?.entries || []);
+      // Correction 3 — load candidate events for the "record partial
+      // payment" flow. We only surface confirmed events whose
+      // lifecycle is applied and whose currency matches the
+      // commitment. The backend refuses any allocation that would
+      // over-allocate the parent event.
+      try {
+        const evs = await api.listFinancialEvents({ currency: doc.currency, confirmation_status: "confirmed", limit: 200 });
+        const cur = doc.currency;
+        const eligible = (evs || []).filter((e: any) => {
+          if (e.direction !== "outflow") return false;
+          if (e.currency !== cur) return false;
+          if (!["awaiting_reconciliation", "matched", "resolved_unplanned"].includes(e.lifecycle_status)) return false;
+          const unalloc = parseFloat(e.unallocated_amount || "0");
+          return isFinite(unalloc) && unalloc > 0;
+        });
+        setEligibleEvents(eligible);
+      } catch { /* non-fatal */ }
     } catch (e: any) {
       Alert.alert("Error", e?.message || "Could not load commitment");
     }
@@ -90,8 +113,17 @@ export default function CommitmentDetail() {
         await api.postponeFinancialCommitment(c.id, newDue);
       } else if (a === "keep-active") {
         await api.keepActiveFinancialCommitment(c.id);
+      } else if (a === "allocate") {
+        if (!selectedEventId) { Alert.alert("Pick an event", "Choose an existing spending event to allocate from."); setBusy(false); return; }
+        if (!allocateAmount) { Alert.alert("Amount required", "Enter how much of the event to apply to this commitment."); setBusy(false); return; }
+        await api.createAllocation(selectedEventId, {
+          target_type: "commitment",
+          target_id: c.id,
+          amount: allocateAmount,
+        });
       }
       setAction(null); setActualAmount(""); setNewDue(""); setAccountId(null); setAccountLabel("Choose account");
+      setSelectedEventId(null); setAllocateAmount("");
       await load();
     } catch (e: any) {
       Alert.alert("Action failed", e?.message || "");
@@ -112,11 +144,12 @@ export default function CommitmentDetail() {
     </SafeAreaView>
   );
 
-  const canComplete = c.state === "reserved" || c.state === "expired";
-  const canCancel = c.state === "draft" || c.state === "reserved" || c.state === "expired";
-  const canPostpone = c.state === "reserved" || c.state === "expired";
+  const canComplete = c.state === "reserved" || c.state === "expired" || c.state === "partial";
+  const canCancel = c.state === "draft" || c.state === "reserved" || c.state === "expired" || c.state === "partial";
+  const canPostpone = c.state === "reserved" || c.state === "expired" || c.state === "partial";
   const canReserve = c.state === "draft";
   const canKeepActive = c.state === "expired";
+  const canAllocate = ["reserved", "expired", "partial"].includes(c.state) && eligibleEvents.length > 0;
 
   return (
     <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
@@ -133,6 +166,20 @@ export default function CommitmentDetail() {
         <FoldHero currency={c.currency} amount={formatMoney(c.amount)} size="xl" caption={`Due ${dateLabel(c.due_date)} · ${c.priority} priority`} />
         {c.original_due_date && c.original_due_date !== c.due_date ? (
           <Text style={styles.meta}>Original due {dateLabel(c.original_due_date)} · postponed {c.postpone_count}×</Text>
+        ) : null}
+
+        {/* Correction 3 — payment progress derived from active
+            allocations on APPLIED events. Always shown once any
+            payment has landed (even if state is still 'reserved'
+            because the last allocation didn't cover the full amount). */}
+        {parseFloat(c.paid_amount || "0") > 0 ? (
+          <View>
+            <FoldSectionHeader label="Payment progress" />
+            <FoldCard>
+              <FoldRow first label="Paid" right={<FoldAmount currency={c.currency} value={formatMoney(c.paid_amount)} tone="positive" />} />
+              <FoldRow label="Remaining" right={<FoldAmount currency={c.currency} value={formatMoney(c.remaining_amount)} tone={parseFloat(c.remaining_amount || "0") > 0 ? "muted" : "positive"} />} />
+            </FoldCard>
+          </View>
         ) : null}
 
         {c.task_id ? (
@@ -161,6 +208,7 @@ export default function CommitmentDetail() {
         <View style={styles.actionsRow}>
           {canReserve ? <Pressable style={styles.primary} disabled={busy} onPress={reserve} testID="fc-reserve"><Text style={styles.primaryText}>Reserve now</Text></Pressable> : null}
           {canComplete ? <Pressable style={styles.primary} disabled={busy} onPress={() => setAction("complete")} testID="fc-complete-open"><Text style={styles.primaryText}>Complete</Text></Pressable> : null}
+          {canAllocate ? <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("allocate")} testID="fc-allocate-open"><Text style={styles.secondaryText}>Record partial payment</Text></Pressable> : null}
           {canPostpone ? <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("postpone")} testID="fc-postpone-open"><Text style={styles.secondaryText}>Postpone</Text></Pressable> : null}
           {canKeepActive ? <Pressable style={styles.secondary} disabled={busy} onPress={() => run("keep-active")} testID="fc-keep-active"><Text style={styles.secondaryText}>Keep active</Text></Pressable> : null}
           {canCancel ? <Pressable style={styles.danger} disabled={busy} onPress={() => setAction("cancel")} testID="fc-cancel-open"><Text style={styles.dangerText}>Cancel</Text></Pressable> : null}
@@ -192,7 +240,7 @@ export default function CommitmentDetail() {
         <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.sheetCard}>
             <View style={styles.sheetHead}>
-              <Text style={styles.sheetTitle}>{action === "complete" ? "Complete" : action === "cancel" ? "Cancel" : action === "postpone" ? "Postpone" : ""}</Text>
+              <Text style={styles.sheetTitle}>{action === "complete" ? "Complete" : action === "cancel" ? "Cancel" : action === "postpone" ? "Postpone" : action === "allocate" ? "Record partial payment" : ""}</Text>
               <Pressable onPress={() => setAction(null)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
             {action === "complete" ? (
@@ -229,6 +277,34 @@ export default function CommitmentDetail() {
                 <DateTimeField mode="date" value={newDue} onChange={setNewDue} testID="fc-postpone-date" />
                 <Pressable style={[styles.primary, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("postpone")} testID="fc-postpone-submit">
                   <Text style={styles.primaryText}>Confirm postpone</Text>
+                </Pressable>
+              </>
+            ) : null}
+            {action === "allocate" ? (
+              <>
+                <Text style={styles.sheetBody}>Pick an existing spending event and how much of it to apply to this commitment. The event stays as-is — allocations only classify the money, they never move an account balance.</Text>
+                <Text style={styles.label}>EVENT</Text>
+                {eligibleEvents.length === 0 ? (
+                  <Text style={{ fontSize: 12, color: financeColors.inkFaint, marginTop: 4 }}>No confirmed {c.currency} outflow events with unallocated amount right now.</Text>
+                ) : (
+                  <ScrollView style={{ maxHeight: 220 }}>
+                    {eligibleEvents.map((e) => (
+                      <Pressable
+                        key={e.id}
+                        onPress={() => setSelectedEventId(e.id)}
+                        style={[styles.eventRow, selectedEventId === e.id && styles.eventRowSel]}
+                        testID={`fc-allocate-event-${e.id}`}
+                      >
+                        <Text style={styles.eventPrimary} numberOfLines={1}>{e.description || "Untitled event"}</Text>
+                        <Text style={styles.eventMeta}>{dateLabel(e.event_date)} · {c.currency} {formatMoney(e.amount)} · unallocated {formatMoney(e.unallocated_amount || "0")}</Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                )}
+                <Text style={styles.label}>AMOUNT ({c.currency})</Text>
+                <TextInput value={allocateAmount} onChangeText={setAllocateAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} style={styles.input} testID="fc-allocate-amount" />
+                <Pressable style={[styles.primary, (busy || !selectedEventId || !allocateAmount) && { opacity: 0.5 }]} disabled={busy || !selectedEventId || !allocateAmount} onPress={() => run("allocate")} testID="fc-allocate-submit">
+                  <Text style={styles.primaryText}>Apply to this commitment</Text>
                 </Pressable>
               </>
             ) : null}
@@ -279,4 +355,8 @@ const styles = StyleSheet.create({
   sheetBody: { ...financeType.body, color: financeColors.inkMuted } as any,
   label: { ...financeType.sectionLabel } as any,
   input: { backgroundColor: "#FFFFFF", borderRadius: financeRadius.sm, paddingHorizontal: financeSpace.lg, paddingVertical: financeSpace.md, fontSize: 15, color: financeColors.ink, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  eventRow: { paddingHorizontal: financeSpace.md, paddingVertical: financeSpace.sm, borderRadius: financeRadius.sm, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, backgroundColor: "#FFFFFF", marginBottom: financeSpace.xs },
+  eventRowSel: { borderColor: financeColors.ink, backgroundColor: financeColors.pillBg },
+  eventPrimary: { fontSize: 13, color: financeColors.ink, fontWeight: "600" },
+  eventMeta: { fontSize: 11, color: financeColors.inkMuted, marginTop: 2 },
 });

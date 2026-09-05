@@ -53,7 +53,7 @@ finance_router = APIRouter(prefix="/finance", tags=["finance"])
 # Constants
 # ============================================================================
 
-COMMITMENT_STATES = ("draft", "reserved", "completed", "cancelled", "expired")
+COMMITMENT_STATES = ("draft", "reserved", "partial", "completed", "cancelled", "expired")
 PRIORITIES = ("low", "medium", "high", "critical")
 CHANGE_SOURCES = (
     "manual", "checkin", "sms", "bank_statement", "credit_card_statement",
@@ -74,7 +74,7 @@ EVENT_SOURCES = (
 )
 EVENT_DIRECTIONS = ("outflow", "inflow")
 CONFIRMATION_STATUSES = ("pending", "confirmed", "rejected")
-DEDUPE_STATUSES = ("pending", "confirmed_same", "rejected")
+DEDUPE_STATUSES = ("pending", "resolving", "confirmed_same", "rejected")
 
 # Batch 2A: explicit lifecycle statuses for financial events. The
 # authoritative money service (money_service.py) applies inflows/outflows
@@ -413,8 +413,13 @@ async def _validate_allocation_target(
     direction: str,
 ) -> dict:
     """Ensure the allocation target belongs to the caller, matches the
-    parent event currency, and is compatible with the event direction.
-    Returns the target document.
+    parent event currency, is compatible with the event direction and
+    is in an allocatable lifecycle state. Returns the target document.
+
+    Correction 3 rules:
+      * ``commitment`` target must be draft/reserved/expired/partial —
+        completed/cancelled commitments refuse further allocation.
+      * ``expected_income`` target must be not fully received.
     """
     _require_in(target_type, ("commitment", "expected_income"), "target_type")
     if target_type == "commitment":
@@ -423,6 +428,12 @@ async def _validate_allocation_target(
         doc = await _read_commitment_by_id(db, user_id, target_id)
         if not doc:
             raise HTTPException(status_code=404, detail="Commitment not found")
+        state = doc.get("state")
+        if state in ("cancelled", "completed"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Commitment is {state} and cannot receive further allocations",
+            )
     else:
         if direction != "inflow":
             raise HTTPException(status_code=400, detail="Only inflow events can allocate to expected income")
@@ -431,9 +442,62 @@ async def _validate_allocation_target(
         )
         if not doc:
             raise HTTPException(status_code=404, detail="Expected income not found")
+        if doc.get("received") is True:
+            raise HTTPException(
+                status_code=409,
+                detail="Expected income is fully received and cannot receive further allocations",
+            )
     if doc.get("currency") != currency:
         raise HTTPException(status_code=400, detail="Allocation currency must match target currency")
     return doc
+
+
+ALLOCATABLE_EVENT_LIFECYCLES = frozenset({
+    LIFECYCLE_STATUS_AWAITING_RECON,
+    LIFECYCLE_STATUS_MATCHED,
+    LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
+})
+
+
+async def _load_allocatable_event(db, user_id: str, event_id: str) -> dict:
+    """Load an event AND enforce the shared allocation preconditions:
+       * ownership
+       * confirmed + APPLIED lifecycle (has account, tz-aware occurred_at)
+       * not void
+    Raises HTTP errors on failure. Returns the raw event document.
+    """
+    ev = await db.financial_events.find_one(
+        {"id": event_id, "user_id": user_id}, {"_id": 0},
+    )
+    if not ev:
+        raise HTTPException(status_code=404, detail="Financial Event not found")
+    if ev.get("confirmation_status") != "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail="Event must be confirmed before allocating",
+        )
+    if ev.get("lifecycle_status") not in ALLOCATABLE_EVENT_LIFECYCLES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Event lifecycle does not allow allocations "
+                f"(current: {ev.get('lifecycle_status')})."
+            ),
+        )
+    if not ev.get("account_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Event must have an asset account before allocating",
+        )
+    # Enforce trustworthy timestamp — allocations must not depend on
+    # a naive/missing occurred_at.
+    from money_service import parse_utc as _parse_utc
+    if _parse_utc(ev.get("occurred_at")) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Event must have a timezone-aware occurred_at before allocating",
+        )
+    return ev
 
 
 async def _conditional_push_allocation(
@@ -442,16 +506,12 @@ async def _conditional_push_allocation(
     """Conditionally append an allocation to ``financial_events``,
     enforcing that active allocations never exceed the event amount.
 
-    Uses an ``$expr`` guard so the update writes only when the current
-    active-allocation sum + this allocation still fits within the
-    event's ``amount``. The check runs atomically at the single-
-    document level in MongoDB.
+    Uses a filter that matches the exact allocations array we read.
+    If a concurrent write has changed the array we retry a small
+    number of times before failing with 409 so the client can retry
+    idempotently.
     """
-    # We compute the current sum in Python from a fresh read, then use
-    # a filter that matches only if the array shape hasn't changed
-    # since we read it (via array length + total). For safety we retry
-    # once on conflict.
-    for _ in range(3):
+    for _ in range(5):
         ev = await db.financial_events.find_one({"id": event_id, "user_id": user_id}, {"_id": 0})
         if not ev:
             raise HTTPException(status_code=404, detail="Financial Event not found")
@@ -467,7 +527,7 @@ async def _conditional_push_allocation(
                 ),
             )
         # Conditional push — filter by exact allocations array so a
-        # concurrent write invalidates our attempt.
+        # concurrent write invalidates our attempt and forces a retry.
         result = await db.financial_events.update_one(
             {"id": event_id, "user_id": user_id, "allocations": allocs},
             {"$push": {"allocations": allocation}, "$set": {"updated_at": _now()}},
@@ -475,6 +535,121 @@ async def _conditional_push_allocation(
         if result.modified_count == 1:
             return allocation
     raise HTTPException(status_code=409, detail="Concurrent allocation conflict; retry")
+
+
+async def _conditional_update_allocation(
+    db, user_id: str, event_id: str, allocation_id: str, new_amount: Decimal,
+) -> dict:
+    """Update an existing allocation's amount atomically without allowing
+    the resulting active-allocation total to exceed the parent event's
+    ``amount``. Idempotent: writing the same amount is a no-op and the
+    current allocation is returned.
+    """
+    for _ in range(5):
+        ev = await db.financial_events.find_one({"id": event_id, "user_id": user_id}, {"_id": 0})
+        if not ev:
+            raise HTTPException(status_code=404, detail="Financial Event not found")
+        allocs = ev.get("allocations") or []
+        target = next((a for a in allocs if a.get("id") == allocation_id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Allocation not found")
+        if target.get("status") != "active":
+            raise HTTPException(status_code=409, detail="Cannot update a voided allocation")
+        current_active = _sum_active_allocations(allocs)
+        target_active_amount = _decimal_from_stored(target.get("amount"))
+        event_amount = _decimal_from_stored(ev.get("amount"))
+        prospective = current_active - target_active_amount + new_amount
+        if prospective > event_amount:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Allocation update exceeds event amount. "
+                    f"Unallocated remaining: {_quantize_out(event_amount - (current_active - target_active_amount))}"
+                ),
+            )
+        if new_amount == target_active_amount:
+            # Idempotent no-op.
+            return target
+        # Build the new allocations array with the target rewritten.
+        new_allocs = []
+        for a in allocs:
+            if a.get("id") == allocation_id:
+                new_allocs.append({**a, "amount": Decimal128(new_amount), "updated_at": _now()})
+            else:
+                new_allocs.append(a)
+        result = await db.financial_events.update_one(
+            {"id": event_id, "user_id": user_id, "allocations": allocs},
+            {"$set": {"allocations": new_allocs, "updated_at": _now()}},
+        )
+        if result.modified_count == 1:
+            return new_allocs[[a.get("id") for a in new_allocs].index(allocation_id)]
+    raise HTTPException(status_code=409, detail="Concurrent allocation conflict; retry")
+
+
+async def _conditional_void_allocation(
+    db, user_id: str, event_id: str, allocation_id: str,
+) -> dict:
+    """Void an allocation. Idempotent: voiding an already-voided
+    allocation returns the current shape without another mutation.
+    """
+    for _ in range(5):
+        ev = await db.financial_events.find_one({"id": event_id, "user_id": user_id}, {"_id": 0})
+        if not ev:
+            raise HTTPException(status_code=404, detail="Financial Event not found")
+        allocs = ev.get("allocations") or []
+        target = next((a for a in allocs if a.get("id") == allocation_id), None)
+        if not target:
+            raise HTTPException(status_code=404, detail="Allocation not found")
+        if target.get("status") == "void":
+            return target
+        new_allocs = []
+        for a in allocs:
+            if a.get("id") == allocation_id:
+                new_allocs.append({**a, "status": "void", "voided_at": _now(), "updated_at": _now()})
+            else:
+                new_allocs.append(a)
+        result = await db.financial_events.update_one(
+            {"id": event_id, "user_id": user_id, "allocations": allocs},
+            {"$set": {"allocations": new_allocs, "updated_at": _now()}},
+        )
+        if result.modified_count == 1:
+            return new_allocs[[a.get("id") for a in new_allocs].index(allocation_id)]
+    raise HTTPException(status_code=409, detail="Concurrent allocation conflict; retry")
+
+
+async def _aggregate_allocations_for_target(
+    db, user_id: str, target_type: str, target_id: str, currency: str,
+) -> Decimal:
+    """Sum the currently-active allocation amounts across ALL events
+    targeting a single commitment/expected_income row (N-to-1). Only
+    counts allocations whose parent event is currently APPLIED (not
+    void/rejected).
+    """
+    rows = await db.financial_events.find(
+        {
+            "user_id": user_id,
+            "confirmation_status": "confirmed",
+            "lifecycle_status": {"$in": list(APPLIED_LIFECYCLE_STATUSES)},
+            "allocations": {"$elemMatch": {
+                "target_type": target_type,
+                "target_id": target_id,
+                "status": "active",
+            }},
+        },
+        {"_id": 0, "allocations": 1, "currency": 1},
+    ).to_list(length=5000)
+    total = Decimal(0)
+    for r in rows:
+        if r.get("currency") != currency:
+            continue
+        for a in r.get("allocations") or []:
+            if (
+                a.get("status") == "active"
+                and a.get("target_type") == target_type
+                and a.get("target_id") == target_id
+            ):
+                total += _decimal_from_stored(a.get("amount"))
+    return total
 
 
 
@@ -527,6 +702,10 @@ class FinancialCommitmentResponse(BaseModel):
     variance: Optional[str] = None
     unused_reservation: Optional[str] = None
     overrun_amount: Optional[str] = None
+    # Correction 3 — derived from ACTIVE allocations across every
+    # APPLIED event pointing at this commitment.
+    paid_amount: str = "0"
+    remaining_amount: str = "0"
     completed_at: Optional[str] = None
     cancelled_at: Optional[str] = None
     postpone_count: int
@@ -863,6 +1042,22 @@ def _project_commitment(doc: dict) -> dict:
         doc["unused_reservation"] = _money_from_stored(doc.get("unused_reservation"))
     if doc.get("overrun_amount") is not None:
         doc["overrun_amount"] = _money_from_stored(doc.get("overrun_amount"))
+    # Correction 3 — allocation-derived aggregates. Both fields default
+    # to "0" so the UI can render deterministic partial-payment
+    # progress even for commitments that never received an allocation.
+    if doc.get("paid_amount") is not None:
+        doc["paid_amount"] = _money_from_stored(doc.get("paid_amount"))
+    else:
+        doc["paid_amount"] = "0"
+    if doc.get("remaining_amount") is not None:
+        doc["remaining_amount"] = _money_from_stored(doc.get("remaining_amount"))
+    else:
+        try:
+            planned = Decimal(str(doc.get("amount") or 0))
+            paid = Decimal(str(doc.get("paid_amount") or 0))
+            doc["remaining_amount"] = _quantize_out(planned - paid if planned - paid > 0 else Decimal(0))
+        except Exception:
+            doc["remaining_amount"] = "0"
     # Derived overdue marker
     doc["is_overdue"] = (
         doc.get("state") in _OVERDUE_STATES and
@@ -993,6 +1188,8 @@ _COMMITMENT_FIELDS = (
     "domain_id", "goal_id", "project_id", "task_id",
     "resource_allocation_id",
     "actual_amount", "variance", "unused_reservation", "overrun_amount",
+    # Correction 3 — allocation-derived aggregates.
+    "paid_amount", "remaining_amount",
     "completed_at", "cancelled_at",
     "postpone_count", "last_reviewed_at", "next_review_date",
     "source",
@@ -1049,7 +1246,7 @@ async def _read_all_commitments(
     if state:
         extras["state"] = state
     elif not include_terminal:
-        extras["state"] = {"$in": ["draft", "reserved", "expired"]}
+        extras["state"] = {"$in": ["draft", "reserved", "partial", "expired"]}
     return await _find_commitment_allocations(db, extras)
 
 
@@ -1731,13 +1928,18 @@ async def commitments_due_for_review(current_user: dict = Depends(get_current_us
 
 async def _reserved_totals(db, user_id: str) -> dict:
     """Return per-currency reserved-money totals and the commitments causing
-    the lien. Reads from the allocation read model — only ``state='reserved'``
-    or ``'expired'`` count (Draft doesn't reserve; completed/cancelled have
-    already released)."""
+    the lien. Reads from the allocation read model — only ``state='reserved'``,
+    ``'partial'`` or ``'expired'`` count (Draft doesn't reserve;
+    completed/cancelled have already released).
+
+    Correction 3: partial commitments retain their reservation for the
+    unpaid remainder — we count ``remaining_amount`` when present,
+    otherwise fall back to the full amount for reserved/expired rows.
+    """
     rows = await db.resource_allocations.find(
         {"user_id": user_id, "resource_type": "money",
          "financial_commitment_id": {"$ne": None},
-         "state": {"$in": ["reserved", "expired"]}},
+         "state": {"$in": ["reserved", "partial", "expired"]}},
         {"_id": 0},
     ).to_list(length=5000)
     per_currency: dict = {}
@@ -1747,7 +1949,11 @@ async def _reserved_totals(db, user_id: str) -> dict:
             continue
         cur = d.get("currency") or ""
         b = per_currency.setdefault(cur, {"reserved": Decimal(0), "items": []})
-        b["reserved"] += _decimal_from_stored(d.get("amount"))
+        if d.get("state") == "partial":
+            remaining = _decimal_from_stored(d.get("remaining_amount"))
+            b["reserved"] += remaining if remaining > 0 else Decimal(0)
+        else:
+            b["reserved"] += _decimal_from_stored(d.get("amount"))
         b["items"].append(_project_commitment(d))
     out = []
     for cur, b in per_currency.items():
@@ -1864,7 +2070,7 @@ async def _forecast_12_months(db, user_id: str) -> dict:
 
     # Reserved commitments per (currency, due_month) — read from allocation model
     reserved_docs = await _find_commitment_allocations(
-        db, {"user_id": user_id, "state": {"$in": ["reserved", "expired"]}},
+        db, {"user_id": user_id, "state": {"$in": ["reserved", "partial", "expired"]}},
     )
 
     current_month = _today_iso()[:7]
@@ -2112,6 +2318,21 @@ async def list_events(
     return [_project_event(d) for d in docs]
 
 
+async def _event_has_pending_dedupe(db, user_id: str, event_id: str) -> bool:
+    """Return True when this event is currently referenced by an OPEN
+    dedupe candidate (``pending`` or ``resolving`` status). Callers use
+    this to refuse generic confirm/reject/assignment paths that would
+    silently bypass the dedupe resolution journey.
+    """
+    row = await db.financial_dedupe_candidates.find_one(
+        {"user_id": user_id,
+         "$or": [{"event_a_id": event_id}, {"event_b_id": event_id}],
+         "status": {"$in": ["pending", "resolving"]}},
+        {"_id": 0, "id": 1},
+    )
+    return bool(row)
+
+
 @finance_router.post("/events/{event_id}/confirm", response_model=FinancialEventResponse)
 async def confirm_event(event_id: str, current_user: dict = Depends(get_current_user)):
     db = get_db()
@@ -2119,6 +2340,15 @@ async def confirm_event(event_id: str, current_user: dict = Depends(get_current_
     if not ev:
         raise HTTPException(status_code=404, detail="Financial Event not found")
     _require(ev.get("confirmation_status") != "confirmed", "Event is already confirmed")
+    # Correction 3: generic confirm MUST NOT bypass an open dedupe case.
+    if await _event_has_pending_dedupe(db, current_user["id"], event_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This event is part of an open deduplication case. "
+                "Resolve the dedupe candidate before confirming."
+            ),
+        )
     await db.financial_events.update_one(
         {"id": event_id, "user_id": current_user["id"]},
         {"$set": {"confirmation_status": "confirmed"}},
@@ -2140,6 +2370,15 @@ async def reject_event(event_id: str, current_user: dict = Depends(get_current_u
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Financial Event not found")
+    # Correction 3: generic reject MUST NOT bypass an open dedupe case.
+    if await _event_has_pending_dedupe(db, current_user["id"], event_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This event is part of an open deduplication case. "
+                "Resolve the dedupe candidate before rejecting."
+            ),
+        )
     await db.financial_events.update_one(
         {"id": event_id, "user_id": current_user["id"]},
         {"$set": {"confirmation_status": "rejected", "lifecycle_status": LIFECYCLE_STATUS_VOID}},
@@ -2166,6 +2405,10 @@ class EventAssignmentPayload(BaseModel):
     account_id: Optional[str] = None
     occurred_at: Optional[str] = None
     event_date: Optional[str] = None
+    # Correction 3: allow the client to declare precision + device
+    # timezone offset without ever inventing a wall-clock time.
+    occurred_at_precision: Optional[str] = None  # 'exact' | 'date_only'
+    occurred_at_offset_minutes: Optional[int] = None
 
 
 @finance_router.patch("/events/{event_id}/assignment", response_model=FinancialEventResponse)
@@ -2210,6 +2453,17 @@ async def update_event_assignment(
             status_code=409,
             detail="This event has been voided and cannot be edited.",
         )
+    # Correction 3: never let the assignment path silently reopen a
+    # ``resolved_unplanned`` event — it was already applied to the
+    # balance and its ownership decision is final.
+    if ev.get("lifecycle_status") == LIFECYCLE_STATUS_RESOLVED_UNPLANNED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This event was resolved as an unplanned actual. "
+                "Reversing the resolution requires a reconciliation flow, not assignment."
+            ),
+        )
 
     updates: dict = {}
 
@@ -2230,6 +2484,17 @@ async def update_event_assignment(
             )
         updates["occurred_at"] = normalised
 
+    # Correction 3: precision + offset are the trust anchor when
+    # ``occurred_at`` is absent. ``date_only`` says we only have a
+    # calendar date and money_service must apply it via date rules.
+    if "occurred_at_precision" in body.dict(exclude_unset=True):
+        prec = (body.occurred_at_precision or "").lower() or None
+        if prec not in (None, "exact", "date_only"):
+            raise HTTPException(status_code=400, detail="occurred_at_precision must be 'exact' or 'date_only'")
+        updates["occurred_at_precision"] = prec
+    if "occurred_at_offset_minutes" in body.dict(exclude_unset=True):
+        updates["occurred_at_offset_minutes"] = body.occurred_at_offset_minutes
+
     if "event_date" in body.dict(exclude_unset=True) and body.event_date:
         _require_date_str(body.event_date, "event_date")
         updates["event_date"] = body.event_date
@@ -2244,15 +2509,23 @@ async def update_event_assignment(
         return ev
 
     # Compute the resulting lifecycle_status based on the projected
-    # state after the write.
+    # state after the write. Correction 3: ``date_only`` precision
+    # (with an event_date) is enough to apply an account-linked event
+    # via calendar-date rules — same-day ambiguity is surfaced by
+    # ``money_service``.
     from money_service import parse_utc as _parse_utc
     proj_account = updates.get("account_id", ev.get("account_id"))
     proj_occ = updates.get("occurred_at", ev.get("occurred_at"))
+    proj_prec = updates.get("occurred_at_precision", ev.get("occurred_at_precision"))
+    proj_event_date = updates.get("event_date", ev.get("event_date"))
     current_lifecycle = ev.get("lifecycle_status")
+    time_trust_ok = _parse_utc(proj_occ) is not None or (
+        (proj_prec == "date_only") and isinstance(proj_event_date, str) and len(proj_event_date) >= 10
+    )
     if current_lifecycle == LIFECYCLE_STATUS_PENDING_DEDUPE:
         # Do NOT promote — dedupe must be resolved through its own flow.
         new_lifecycle = LIFECYCLE_STATUS_PENDING_DEDUPE
-    elif proj_account and _parse_utc(proj_occ) is not None and ev.get("confirmation_status") == "confirmed":
+    elif proj_account and time_trust_ok and ev.get("confirmation_status") == "confirmed":
         new_lifecycle = LIFECYCLE_STATUS_AWAITING_RECON
     else:
         new_lifecycle = LIFECYCLE_STATUS_PENDING_ACCOUNT
@@ -2260,9 +2533,14 @@ async def update_event_assignment(
 
     result = await db.financial_events.find_one_and_update(
         {"id": event_id, "user_id": current_user["id"],
-         # Guard: refuse to write over a matched/void event even if a
-         # race intervenes between the initial read and this call.
-         "lifecycle_status": {"$nin": [LIFECYCLE_STATUS_MATCHED, LIFECYCLE_STATUS_VOID]}},
+         # Guard: refuse to write over a matched/void/resolved event
+         # even if a race intervenes between the initial read and this
+         # call.
+         "lifecycle_status": {"$nin": [
+             LIFECYCLE_STATUS_MATCHED,
+             LIFECYCLE_STATUS_VOID,
+             LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
+         ]}},
         {"$set": updates},
         return_document=False,
     )
@@ -2289,6 +2567,237 @@ async def update_event_assignment(
     return fresh
 
 
+# ---------------------------------------------------------------------
+# Correction 3 — Allocation CRUD endpoints.
+#
+# Allocations classify a slice of an event's amount to a specific
+# commitment or expected-income record. They NEVER change the parent
+# account balance — the event is the sole account-affecting movement.
+#
+# Rules:
+#   * The parent event must be owned by the caller, confirmed, applied
+#     (has account_id + tz-aware occurred_at + lifecycle in the applied
+#     set), and NOT void.
+#   * Currency, direction and target lifecycle are validated.
+#   * The sum of ACTIVE allocations on the event may never exceed the
+#     event's ``amount``. This is enforced via an atomic conditional
+#     update on the ``allocations`` array.
+#   * All operations are idempotent on retry: same amount → no-op;
+#     re-voiding a voided allocation → no-op.
+# ---------------------------------------------------------------------
+
+class AllocationCreatePayload(BaseModel):
+    target_type: str  # 'commitment' | 'expected_income'
+    target_id: str
+    amount: Any
+
+
+class AllocationUpdatePayload(BaseModel):
+    amount: Any
+
+
+@finance_router.post("/events/{event_id}/allocations", response_model=FinancialEventResponse, status_code=201)
+async def create_allocation(
+    event_id: str,
+    body: AllocationCreatePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """Add an allocation slice on a financial event. The event must be
+    applied; the target must be an in-progress commitment (for outflow)
+    or a not-yet-received expected income (for inflow). Enforces
+    over-allocation atomicity via a conditional update on the array.
+    """
+    db = get_db()
+    ev = await _load_allocatable_event(db, current_user["id"], event_id)
+    _require_in(body.target_type, ("commitment", "expected_income"), "target_type")
+    target = await _validate_allocation_target(
+        db, current_user["id"], body.target_type, body.target_id,
+        currency=ev.get("currency") or "", direction=ev.get("direction") or "",
+    )
+    stored = _money_to_stored(body.amount, "amount")
+    amount_dec = _decimal_from_stored(stored)
+    if amount_dec <= 0:
+        raise HTTPException(status_code=400, detail="Allocation amount must be greater than zero")
+    allocation = _allocation_shape(
+        target_type=body.target_type, target_id=body.target_id,
+        amount_stored=stored, currency=ev.get("currency") or "",
+    )
+    await _conditional_push_allocation(
+        db, current_user["id"], event_id, allocation, amount_dec,
+    )
+    await _audit(
+        db, current_user["id"], "financial_event", event_id, "updated",
+        source="manual",
+        new_value={
+            "allocation_created": {
+                "id": allocation["id"],
+                "target_type": body.target_type,
+                "target_id": body.target_id,
+                "amount": _quantize_out(amount_dec),
+                "currency": ev.get("currency"),
+            },
+        },
+    )
+    # Propagate lifecycle to targets — recompute paid/received state
+    # for commitments and expected incomes touched by this allocation.
+    await _apply_allocation_effects(
+        db, current_user["id"],
+        target_type=body.target_type, target_id=body.target_id,
+        currency=ev.get("currency") or "",
+    )
+    fresh = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
+    return _project_event(fresh or ev)
+
+
+@finance_router.patch("/events/{event_id}/allocations/{allocation_id}", response_model=FinancialEventResponse)
+async def update_allocation(
+    event_id: str,
+    allocation_id: str,
+    body: AllocationUpdatePayload,
+    current_user: dict = Depends(get_current_user),
+):
+    """Update an allocation's amount. Idempotent; refuses to exceed the
+    parent event's amount.
+    """
+    db = get_db()
+    ev = await _load_allocatable_event(db, current_user["id"], event_id)
+    stored = _money_to_stored(body.amount, "amount")
+    amount_dec = _decimal_from_stored(stored)
+    if amount_dec <= 0:
+        raise HTTPException(status_code=400, detail="Allocation amount must be greater than zero")
+    updated = await _conditional_update_allocation(
+        db, current_user["id"], event_id, allocation_id, amount_dec,
+    )
+    await _audit(
+        db, current_user["id"], "financial_event", event_id, "updated",
+        source="manual",
+        new_value={"allocation_updated": {"id": allocation_id, "amount": _quantize_out(amount_dec)}},
+    )
+    await _apply_allocation_effects(
+        db, current_user["id"],
+        target_type=updated.get("target_type") or "",
+        target_id=updated.get("target_id") or "",
+        currency=ev.get("currency") or "",
+    )
+    fresh = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
+    return _project_event(fresh or ev)
+
+
+@finance_router.post("/events/{event_id}/allocations/{allocation_id}/void", response_model=FinancialEventResponse)
+async def void_allocation(
+    event_id: str,
+    allocation_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Void an allocation. Idempotent."""
+    db = get_db()
+    ev = await _load_allocatable_event(db, current_user["id"], event_id)
+    voided = await _conditional_void_allocation(
+        db, current_user["id"], event_id, allocation_id,
+    )
+    await _audit(
+        db, current_user["id"], "financial_event", event_id, "updated",
+        source="manual",
+        new_value={"allocation_voided": {"id": allocation_id}},
+    )
+    await _apply_allocation_effects(
+        db, current_user["id"],
+        target_type=voided.get("target_type") or "",
+        target_id=voided.get("target_id") or "",
+        currency=ev.get("currency") or "",
+    )
+    fresh = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
+    return _project_event(fresh or ev)
+
+
+async def _apply_allocation_effects(
+    db, user_id: str, *, target_type: str, target_id: str, currency: str,
+) -> None:
+    """Derive partial/completed state on the allocation target from the
+    sum of ACTIVE allocations across every APPLIED event referencing
+    it. Never modifies account balances.
+
+    * ``commitment``: state may transition reserved/expired -> partial
+      when paid > 0 and paid < amount, or -> completed when
+      paid >= amount. When paid returns to zero (all voided) we return
+      to reserved/expired based on due_date. Completion is only reached
+      through allocations; the historic ``/complete`` flow still writes
+      the completion event exactly once via ``_apply_complete``.
+    * ``expected_income``: received=True when received_amount >= amount;
+      otherwise received=False with a persisted ``received_amount``.
+    """
+    if not target_type or not target_id:
+        return
+    total = await _aggregate_allocations_for_target(
+        db, user_id, target_type, target_id, currency,
+    )
+    if target_type == "commitment":
+        c = await _read_commitment_by_id(db, user_id, target_id)
+        if not c:
+            return
+        planned = _decimal_from_stored(c.get("amount"))
+        # Compute the target lifecycle state based on paid coverage.
+        new_state: Optional[str] = None
+        if total <= 0:
+            # Revert to reserved (or expired if due date already past).
+            if c.get("state") in ("partial",):
+                new_state = "expired" if (c.get("due_date") or "") < _today_iso() else "reserved"
+        elif total < planned:
+            if c.get("state") in ("reserved", "expired"):
+                new_state = "partial"
+        else:  # total >= planned
+            if c.get("state") in ("reserved", "expired", "partial"):
+                new_state = "completed"
+        updates: dict = {
+            "paid_amount": Decimal128(total),
+            "remaining_amount": Decimal128(planned - total if planned - total > 0 else Decimal(0)),
+        }
+        if new_state and new_state != c.get("state"):
+            updates["state"] = new_state
+            if new_state == "completed":
+                updates["completed_at"] = _now()
+                updates["actual_amount"] = Decimal128(total)
+                variance = planned - total
+                updates["variance"] = Decimal128(variance)
+                updates["unused_reservation"] = Decimal128(variance if variance > 0 else Decimal(0))
+                updates["overrun_amount"] = Decimal128(-variance if variance < 0 else Decimal(0))
+                updates["status"] = "consumed"
+                updates["consumed_amount"] = Decimal128(total)
+                updates["released_amount"] = Decimal128(variance if variance > 0 else Decimal(0))
+        await _update_lifecycle(db, target_id, updates)
+        if new_state and new_state != c.get("state"):
+            await _audit(
+                db, user_id, "financial_commitment", target_id,
+                "completed" if new_state == "completed" else "updated",
+                source="manual",
+                new_value={"state": new_state, "paid_amount": _quantize_out(total)},
+            )
+    else:  # expected_income
+        d = await db.expected_incomes.find_one({"id": target_id, "user_id": user_id}, {"_id": 0})
+        if not d:
+            return
+        expected = _decimal_from_stored(d.get("amount"))
+        received_flag = total >= expected and expected > 0
+        updates: dict = {
+            "received_amount": Decimal128(total),
+            "remaining_amount": Decimal128(expected - total if expected - total > 0 else Decimal(0)),
+            "received": received_flag,
+            "updated_at": _now(),
+        }
+        # Preserve compatibility with older ``received_event_id`` UI —
+        # once fully received via allocations we record the LAST event
+        # id that pushed us over the threshold. Optional bookkeeping.
+        await db.expected_incomes.update_one(
+            {"id": target_id, "user_id": user_id},
+            {"$set": updates},
+        )
+        await _audit(
+            db, user_id, "financial_event", target_id, "updated",
+            source="manual",
+            new_value={"kind": "expected_income_allocation_effect",
+                       "received_amount": _quantize_out(total),
+                       "received": received_flag},
+        )
 
 
 # --------- Deduplication resolution ---------
@@ -2296,7 +2805,7 @@ async def update_event_assignment(
 async def list_dedupe_candidates(current_user: dict = Depends(get_current_user)):
     db = get_db()
     rows = await db.financial_dedupe_candidates.find(
-        {"user_id": current_user["id"], "status": "pending"}, {"_id": 0},
+        {"user_id": current_user["id"], "status": {"$in": ["pending", "resolving"]}}, {"_id": 0},
     ).to_list(length=200)
     # Expand referenced events for the client
     out = []
@@ -2382,20 +2891,22 @@ async def resolve_dedupe(
     if not ev_a or not ev_b:
         raise HTTPException(status_code=404, detail="Referenced event missing")
 
-    # Winning-only mutation: use conditional pending -> terminal on the
-    # candidate row. Only the winner proceeds to the event writes.
+    # Correction 3: recoverable + atomic transitions.
+    #   pending -> resolving (claim; single winner)
+    #   resolving -> terminal (only after event writes succeed)
+    #   on any failure inside the event writes we revert
+    #   resolving -> pending so a client can safely retry.
     now = _now()
     claimed = await db.financial_dedupe_candidates.find_one_and_update(
         {"id": candidate_id, "user_id": current_user["id"], "status": "pending"},
-        {"$set": {"status": terminal_status,
-                   "resolved_at": now,
-                   "canonical_event_id": body.canonical_event_id
-                       or (row["event_a_id"] if body.resolution == "same" else None)}},
+        {"$set": {"status": "resolving",
+                   "resolving_at": now,
+                   "resolving_intent": terminal_status}},
         return_document=False,
     )
     if claimed is None:
-        # A concurrent request won. Re-read to return the winning
-        # result idempotently.
+        # A concurrent request won or the row is already resolved.
+        # Re-read to return the winning result idempotently.
         latest = await db.financial_dedupe_candidates.find_one(
             {"id": candidate_id, "user_id": current_user["id"]}, {"_id": 0},
         )
@@ -2408,57 +2919,86 @@ async def resolve_dedupe(
             other = row["event_b_id"] if canonical == row["event_a_id"] else row["event_a_id"]
             return {"detail": "merged", "canonical_event_id": canonical,
                     "retired_event_id": other, "already_resolved": True}
+        if latest.get("status") == "resolving":
+            # Another writer is mid-flight. Refuse but keep the row
+            # recoverable — the winner will still complete or revert.
+            raise HTTPException(status_code=409, detail="Candidate is being resolved by another request; retry shortly")
         raise HTTPException(status_code=409, detail=f"Candidate in unexpected state '{latest.get('status')}'")
 
-    if body.resolution == "different":
-        # Apply the pending event exactly once — filtered on user_id.
-        pending_ev = ev_b
-        new_lifecycle = (
-            LIFECYCLE_STATUS_AWAITING_RECON if pending_ev.get("account_id")
+    try:
+        if body.resolution == "different":
+            pending_ev = ev_b
+            new_lifecycle = (
+                LIFECYCLE_STATUS_AWAITING_RECON if pending_ev.get("account_id")
+                else LIFECYCLE_STATUS_PENDING_ACCOUNT
+            )
+            await db.financial_events.update_one(
+                {"id": row["event_b_id"], "user_id": current_user["id"]},
+                {"$set": {
+                    "confirmation_status": "confirmed",
+                    "lifecycle_status": new_lifecycle,
+                }},
+            )
+            await _audit(
+                db, current_user["id"], "financial_event", row["event_b_id"], "reconciled",
+                source="reconciliation",
+                new_value={"dedupe_resolution": "different", "lifecycle_status": new_lifecycle},
+            )
+            # Only NOW flip the candidate to its terminal state.
+            await db.financial_dedupe_candidates.update_one(
+                {"id": candidate_id, "user_id": current_user["id"], "status": "resolving"},
+                {"$set": {"status": terminal_status,
+                           "resolved_at": _now(),
+                           "canonical_event_id": None}},
+            )
+            return {"detail": "kept both", "lifecycle_status": new_lifecycle}
+
+        # resolution == 'same' — canonicalise and retire the other.
+        canonical = body.canonical_event_id or row["event_a_id"]
+        other = row["event_b_id"] if canonical == row["event_a_id"] else row["event_a_id"]
+        canonical_doc = ev_a if canonical == row["event_a_id"] else ev_b
+        canon_lifecycle = (
+            LIFECYCLE_STATUS_AWAITING_RECON if canonical_doc.get("account_id")
             else LIFECYCLE_STATUS_PENDING_ACCOUNT
         )
         await db.financial_events.update_one(
-            {"id": row["event_b_id"], "user_id": current_user["id"]},
+            {"id": canonical, "user_id": current_user["id"]},
+            {"$set": {"confirmation_status": "confirmed", "lifecycle_status": canon_lifecycle}},
+        )
+        await db.financial_events.update_one(
+            {"id": other, "user_id": current_user["id"]},
             {"$set": {
-                "confirmation_status": "confirmed",
-                "lifecycle_status": new_lifecycle,
+                "confirmation_status": "rejected",
+                "lifecycle_status": LIFECYCLE_STATUS_VOID,
+                "dedup_of": canonical,
             }},
         )
         await _audit(
-            db, current_user["id"], "financial_event", row["event_b_id"], "reconciled",
+            db, current_user["id"], "financial_event", canonical, "reconciled",
             source="reconciliation",
-            new_value={"dedupe_resolution": "different", "lifecycle_status": new_lifecycle},
+            new_value={"dedupe_resolution": "same", "retired_event_id": other,
+                       "canonical_lifecycle_status": canon_lifecycle,
+                       "retired_lifecycle_status": LIFECYCLE_STATUS_VOID},
         )
-        return {"detail": "kept both", "lifecycle_status": new_lifecycle}
-
-    # resolution == 'same' — canonicalise and retire the other.
-    canonical = body.canonical_event_id or row["event_a_id"]
-    other = row["event_b_id"] if canonical == row["event_a_id"] else row["event_a_id"]
-    canonical_doc = ev_a if canonical == row["event_a_id"] else ev_b
-    canon_lifecycle = (
-        LIFECYCLE_STATUS_AWAITING_RECON if canonical_doc.get("account_id")
-        else LIFECYCLE_STATUS_PENDING_ACCOUNT
-    )
-    await db.financial_events.update_one(
-        {"id": canonical, "user_id": current_user["id"]},
-        {"$set": {"confirmation_status": "confirmed", "lifecycle_status": canon_lifecycle}},
-    )
-    await db.financial_events.update_one(
-        {"id": other, "user_id": current_user["id"]},
-        {"$set": {
-            "confirmation_status": "rejected",
-            "lifecycle_status": LIFECYCLE_STATUS_VOID,
-            "dedup_of": canonical,
-        }},
-    )
-    await _audit(
-        db, current_user["id"], "financial_event", canonical, "reconciled",
-        source="reconciliation",
-        new_value={"dedupe_resolution": "same", "retired_event_id": other,
-                   "canonical_lifecycle_status": canon_lifecycle,
-                   "retired_lifecycle_status": LIFECYCLE_STATUS_VOID},
-    )
-    return {"detail": "merged", "canonical_event_id": canonical, "retired_event_id": other}
+        # Flip to terminal only after both event writes succeeded.
+        await db.financial_dedupe_candidates.update_one(
+            {"id": candidate_id, "user_id": current_user["id"], "status": "resolving"},
+            {"$set": {"status": terminal_status,
+                       "resolved_at": _now(),
+                       "canonical_event_id": canonical}},
+        )
+        return {"detail": "merged", "canonical_event_id": canonical, "retired_event_id": other}
+    except Exception:
+        # Revert resolving -> pending so the client can retry.
+        try:
+            await db.financial_dedupe_candidates.update_one(
+                {"id": candidate_id, "user_id": current_user["id"], "status": "resolving"},
+                {"$set": {"status": "pending"},
+                 "$unset": {"resolving_at": "", "resolving_intent": ""}},
+            )
+        except Exception:
+            pass
+        raise
 
 
 # ============================================================================
@@ -2532,7 +3072,7 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
     all_commitments.sort(key=lambda d: (d.get("due_date") or "", d.get("created_at") or ""))
     active_commitments = [
         _project_commitment(d) for d in all_commitments
-        if d.get("state") in ("draft", "reserved", "expired")
+        if d.get("state") in ("draft", "reserved", "partial", "expired")
     ]
     terminal_commitments = [
         _project_commitment(d) for d in all_commitments
@@ -2604,6 +3144,57 @@ async def ensure_finance_indexes(database) -> None:
         {"$set": {"occurred_at": None}},
     )
 
+    # 2b. Correction 3 — ensure the embedded ``allocations`` array is
+    #     present on every event so allocation writes never target
+    #     schemaless rows. Idempotent.
+    await database.financial_events.update_many(
+        {"allocations": {"$exists": False}},
+        {"$set": {"allocations": []}},
+    )
+
+    # 2c. Correction 3 — backfill ``occurred_at_precision``:
+    #     * tz-aware ``occurred_at`` present  -> 'exact'
+    #     * otherwise                          -> 'date_only'
+    #     This does NOT invent a time; it declares that we only trust
+    #     the calendar date. Idempotent.
+    await database.financial_events.update_many(
+        {"occurred_at_precision": {"$exists": False}, "occurred_at": {"$ne": None}},
+        {"$set": {"occurred_at_precision": "exact"}},
+    )
+    await database.financial_events.update_many(
+        {"occurred_at_precision": {"$exists": False}},
+        {"$set": {"occurred_at_precision": "date_only"}},
+    )
+
+    # 2d. Correction 3 — backfill legacy ``commitment_id`` rows into
+    #     the new allocations array. If a confirmed event carries a
+    #     commitment_id but no matching allocation, insert one covering
+    #     the full event amount so read/write paths become consistent.
+    #     Idempotent: only rows with an empty allocations array are
+    #     touched.
+    async for ev in database.financial_events.find(
+        {"commitment_id": {"$ne": None},
+         "confirmation_status": "confirmed",
+         "allocations": []},
+        {"_id": 0, "id": 1, "user_id": 1, "commitment_id": 1,
+         "amount": 1, "currency": 1, "created_at": 1},
+    ):
+        alloc = {
+            "id": _uuid(),
+            "target_type": "commitment",
+            "target_id": ev.get("commitment_id"),
+            "amount": ev.get("amount"),
+            "currency": ev.get("currency"),
+            "status": "active",
+            "created_at": ev.get("created_at") or _now(),
+            "updated_at": _now(),
+            "migrated_from_commitment_id": True,
+        }
+        await database.financial_events.update_one(
+            {"id": ev["id"], "user_id": ev.get("user_id"), "allocations": []},
+            {"$set": {"allocations": [alloc], "updated_at": _now()}},
+        )
+
     # 3. lifecycle_status backfill — Correction 1 rules:
     #    * rejected                          -> void
     #    * confirmed AND no account_id        -> pending_account_assignment
@@ -2669,7 +3260,7 @@ async def ensure_finance_indexes(database) -> None:
     # account" warning. Idempotent — restart-safe.
     open_dedupe_event_ids: set = set()
     async for row in database.financial_dedupe_candidates.find(
-        {"status": "pending"}, {"_id": 0, "event_a_id": 1, "event_b_id": 1},
+        {"status": {"$in": ["pending", "resolving"]}}, {"_id": 0, "event_a_id": 1, "event_b_id": 1},
     ):
         for k in ("event_a_id", "event_b_id"):
             v = row.get(k)

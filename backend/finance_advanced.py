@@ -94,6 +94,9 @@ class ExpectedIncomeResponse(BaseModel):
     included_in_forecast: bool
     received: bool
     received_event_id: Optional[str]
+    # Correction 3 — derived aggregates.
+    received_amount: str = "0"
+    remaining_amount: str = "0"
     created_at: str
     updated_at: str
 
@@ -136,6 +139,21 @@ async def create_expected_income(body: ExpectedIncomeCreate, current_user: dict 
 def _project_expected(doc: dict) -> dict:
     d = dict(doc)
     d["amount"] = _money_from_stored(d.get("amount"))
+    # Correction 3 — surface allocation-derived aggregates.
+    if d.get("received_amount") is not None:
+        d["received_amount"] = _money_from_stored(d.get("received_amount"))
+    else:
+        d["received_amount"] = "0"
+    if d.get("remaining_amount") is not None:
+        d["remaining_amount"] = _money_from_stored(d.get("remaining_amount"))
+    else:
+        try:
+            from decimal import Decimal as _Dec
+            expected = _Dec(str(d.get("amount") or 0))
+            got = _Dec(str(d.get("received_amount") or 0))
+            d["remaining_amount"] = _quantize_out(expected - got if expected - got > 0 else _Dec(0))
+        except Exception:
+            d["remaining_amount"] = "0"
     return d
 
 
@@ -179,6 +197,10 @@ class ExpectedIncomeReceivePayload(BaseModel):
     # Correction 2: canonical fields for the auto-created inflow.
     account_id: Optional[str] = None
     occurred_at: Optional[str] = None
+    # Correction 3: when True, the auto-created event is smaller than
+    # the expected income and an allocation is written so the receipt
+    # accumulates without prematurely flipping ``received=True``.
+    partial: bool = False
 
 
 @advanced_router.post("/expected-income/{income_id}/received", response_model=ExpectedIncomeResponse)
@@ -186,25 +208,28 @@ async def mark_expected_received(
     income_id: str, body: ExpectedIncomeReceivePayload = Body(default_factory=ExpectedIncomeReceivePayload),
     current_user: dict = Depends(get_current_user),
 ):
-    """Mark expected income as received. Creates a confirmed inflow event
-    exactly once (Correction 2: with account_id + occurred_at) so it
-    never doubles with the planned line and increases the receiving
-    account's effective balance the moment it is applied.
+    """Mark an expected income as received. Correction 3 supports both
+    full and partial receipts: partial receipts write an allocation and
+    let ``_apply_allocation_effects`` maintain ``received_amount`` and
+    ``received`` from the sum of ACTIVE allocations across every
+    APPLIED inflow event.
 
-    Rules (Correction 2):
-    * If ``event_id`` is supplied, the referenced event MUST belong to
-      the caller, match the expected income's currency, be confirmed,
-      applied, and carry an ASSET account of the same currency.
-    * Otherwise ``account_id`` + ``occurred_at`` are REQUIRED for the
-      auto-created inflow. Account is validated (user + currency +
-      asset). ``occurred_at`` must be tz-aware.
-    * The received transition is CONDITIONAL — concurrent callers
-      cannot create two inflows.
+    Rules:
+    * ``event_id``: reference an existing applied inflow event (same
+      currency, has account, tz-aware occurred_at). An allocation is
+      pushed onto the event.
+    * ``account_id`` + ``occurred_at``: auto-create an inflow event of
+      ``actual_amount`` (or the full expected amount) and push a same-
+      sized allocation onto it.
+    * All writes are conditional / idempotent.
     """
     db = get_db()
     from finance_manager import (  # noqa: WPS433 local imports
         _resolve_event_account,
         _normalise_occurred_at,
+        _allocation_shape,
+        _conditional_push_allocation,
+        _apply_allocation_effects,
         LIFECYCLE_STATUS_AWAITING_RECON,
     )
     from money_service import parse_utc as _parse_utc, APPLIED_LIFECYCLE_STATUSES
@@ -212,7 +237,10 @@ async def mark_expected_received(
     d = await db.expected_incomes.find_one({"id": income_id, "user_id": current_user["id"]}, {"_id": 0})
     if not d:
         raise HTTPException(status_code=404, detail="Expected income not found")
-    _require(not d.get("received"), "This expected income is already received")
+    _require(not d.get("received"), "This expected income is already fully received")
+
+    expected_amt = _decimal_from_stored(d.get("amount"))
+    auto_created_event_id: Optional[str] = None
 
     if body.event_id:
         ev = await db.financial_events.find_one(
@@ -233,7 +261,14 @@ async def mark_expected_received(
             )
         await _resolve_event_account(db, current_user["id"], ev["account_id"], ev["currency"])
         event_id = ev["id"]
-        auto_created_event_id: Optional[str] = None
+        # Allocation amount: prefer explicit actual_amount; else the
+        # smaller of (event.amount, expected.amount) so we never over-
+        # allocate on a large deposit.
+        if body.actual_amount is not None and body.actual_amount != "":
+            alloc_amt = _decimal_from_stored(_money_to_stored(body.actual_amount, "actual_amount"))
+        else:
+            ev_amt = _decimal_from_stored(ev.get("amount"))
+            alloc_amt = ev_amt if ev_amt <= expected_amt else expected_amt
     else:
         if not body.account_id:
             raise HTTPException(
@@ -249,7 +284,7 @@ async def mark_expected_received(
         await _resolve_event_account(db, current_user["id"], body.account_id, d.get("currency") or "")
 
         amt = (
-            _decimal_from_stored(d.get("amount")) if not body.actual_amount
+            expected_amt if not body.actual_amount
             else _decimal_from_stored(_money_to_stored(body.actual_amount, "actual_amount"))
         )
         event_id = _uuid()
@@ -269,9 +304,12 @@ async def mark_expected_received(
             "account_id": body.account_id,
             "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON,
             "occurred_at": occurred_at,
+            "occurred_at_precision": "exact",
+            "allocations": [],
             "created_at": _now(),
         })
         auto_created_event_id = event_id
+        alloc_amt = amt
         await _audit(
             db, current_user["id"], "financial_event", event_id, "created",
             source="manual",
@@ -281,16 +319,19 @@ async def mark_expected_received(
                        "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
         )
 
-    # Conditional transition on the expected_incomes row — only ONE
-    # request may flip received=False to received=True. If we lose the
-    # race, roll back the auto-created event so we don't leave two
-    # inflows on the account.
-    claimed = await db.expected_incomes.find_one_and_update(
-        {"id": income_id, "user_id": current_user["id"], "received": False},
-        {"$set": {"received": True, "received_event_id": event_id, "updated_at": _now()}},
-        return_document=False,
-    )
-    if claimed is None:
+    # Push the allocation onto the parent event. Enforces the
+    # over-allocation ceiling atomically. If it fails and we just
+    # created the event, roll it back so the balance isn't credited
+    # by an event that failed to classify.
+    try:
+        allocation = _allocation_shape(
+            target_type="expected_income", target_id=income_id,
+            amount_stored=Decimal128(alloc_amt), currency=d.get("currency") or "",
+        )
+        await _conditional_push_allocation(
+            db, current_user["id"], event_id, allocation, alloc_amt,
+        )
+    except Exception:
         if auto_created_event_id:
             await db.financial_events.delete_one({"id": auto_created_event_id, "user_id": current_user["id"]})
             await db.financial_audit.delete_many({
@@ -298,17 +339,22 @@ async def mark_expected_received(
                 "record_id": auto_created_event_id,
                 "user_id": current_user["id"],
             })
-        # Return the current state idempotently.
-        fresh = await db.expected_incomes.find_one({"id": income_id, "user_id": current_user["id"]}, {"_id": 0})
-        if fresh and fresh.get("received"):
-            return _project_expected(fresh)
-        raise HTTPException(
-            status_code=409,
-            detail="Expected income state changed concurrently; refresh and try again.",
-        )
-    d["received"] = True
-    d["received_event_id"] = event_id
-    return _project_expected(d)
+        raise
+
+    # Derive received_amount / received flag from the sum of ACTIVE
+    # allocations across every APPLIED event. Also stamps the last
+    # received_event_id for legacy UI compatibility.
+    await _apply_allocation_effects(
+        db, current_user["id"],
+        target_type="expected_income", target_id=income_id,
+        currency=d.get("currency") or "",
+    )
+    await db.expected_incomes.update_one(
+        {"id": income_id, "user_id": current_user["id"]},
+        {"$set": {"received_event_id": event_id, "updated_at": _now()}},
+    )
+    fresh = await db.expected_incomes.find_one({"id": income_id, "user_id": current_user["id"]}, {"_id": 0})
+    return _project_expected(fresh or d)
 
 
 @advanced_router.delete("/expected-income/{income_id}", status_code=200)
@@ -472,6 +518,18 @@ async def reconcile_confirm(
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
 
+    # Correction 3: refuse to reconcile when an active dedupe candidate
+    # references this event — the user must resolve dedupe first.
+    from finance_manager import _event_has_pending_dedupe  # noqa: WPS433
+    if await _event_has_pending_dedupe(db, current_user["id"], event_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This event is part of an open deduplication case. "
+                "Resolve the dedupe candidate before reconciling."
+            ),
+        )
+
     if ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED:
         if ev.get("commitment_id") == body.commitment_id:
             c_existing = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
@@ -580,6 +638,17 @@ async def reconcile_reject(event_id: str, current_user: dict = Depends(get_curre
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    # Correction 3: refuse when an active dedupe case exists.
+    from finance_manager import _event_has_pending_dedupe  # noqa: WPS433
+    if await _event_has_pending_dedupe(db, current_user["id"], event_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This event is part of an open deduplication case. "
+                "Resolve the dedupe candidate before rejecting."
+            ),
+        )
 
     # Already-resolved => idempotent no-op (no extra audit).
     if ev.get("lifecycle_status") == LIFECYCLE_STATUS_RESOLVED_UNPLANNED:

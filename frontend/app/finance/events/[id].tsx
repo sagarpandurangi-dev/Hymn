@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
@@ -10,24 +10,22 @@ import { FoldCard, FoldRow, foldPageStyle } from "@/src/components/finance/foldU
 import { financeColors, financeSpace } from "@/src/lib/finance/theme";
 import { formatMoney } from "@/src/lib/finance/format";
 
-// Correction 2: this screen is the pending-event resolution journey.
-// Users land here from the Finance "Pending account" warning. They can
-// see WHY the event is pending, pick a same-currency asset account,
-// confirm/correct when it occurred, save it, and return to Finance
-// with the warning removed.
+// Correction 3: pending-event resolution journey.
+//
+// Rules:
+//   * We ONLY collect a calendar date here — we never invent a
+//     wall-clock time. The backend applies the event by calendar-date
+//     rules (occurred_at_precision='date_only') until it detects
+//     same-day ambiguity, at which point the user is prompted to
+//     supply an explicit time.
 
 function pad(n: number, w = 2) { return String(n).padStart(w, "0"); }
 
-// Construct a device-local, timezone-aware ISO 8601 timestamp from a
-// YYYY-MM-DD date at 12:00 local time. The backend normalises to UTC.
-function localIsoAtNoon(dateYmd: string): string {
-  const [y, m, d] = dateYmd.split("-").map((v) => parseInt(v, 10));
-  const dt = new Date(y, (m || 1) - 1, d || 1, 12, 0, 0);
-  const off = -dt.getTimezoneOffset();
-  const sign = off >= 0 ? "+" : "-";
-  const oh = pad(Math.floor(Math.abs(off) / 60));
-  const om = pad(Math.abs(off) % 60);
-  return `${pad(dt.getFullYear(), 4)}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())}T${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}${sign}${oh}:${om}`;
+// Device-local UTC offset (minutes east of UTC). The backend uses this
+// to compute the correct local calendar date on ``date_only`` events
+// without ever guessing a time.
+function localOffsetMinutes(): number {
+  return -new Date().getTimezoneOffset();
 }
 
 export default function PendingEventDetail() {
@@ -82,6 +80,9 @@ export default function PendingEventDetail() {
     if (ev.review_reason === "missing_occurred_at") {
       return "This event is confirmed but the exact moment it occurred is unknown. Confirm the date so Finance can decide which snapshot it applies to.";
     }
+    if (ev.review_reason === "same_day_time_ambiguous") {
+      return "This event lands on the same calendar day as your last snapshot — Finance needs the local time to decide whether it happened before or after that snapshot.";
+    }
     return "This event needs your review.";
   }, [ev]);
 
@@ -93,11 +94,13 @@ export default function PendingEventDetail() {
     try {
       await api.patchEventAssignment(ev.id, {
         account_id: accountId,
-        // Correction 2: send a tz-aware ISO — anchor the transaction
-        // at local noon of the reported calendar date so it can't fall
-        // into the previous day for eastern hemispheres or the next
-        // day for western hemispheres.
-        occurred_at: localIsoAtNoon(eventDate),
+        // Correction 3: do NOT send an invented noon/midnight time.
+        // Send the calendar date with ``date_only`` precision plus
+        // the device offset so the backend can reason about which
+        // local day the transaction fell on.
+        occurred_at: null,
+        occurred_at_precision: "date_only",
+        occurred_at_offset_minutes: localOffsetMinutes(),
         event_date: eventDate,
       });
       router.replace("/(tabs)/finance");
@@ -133,7 +136,7 @@ export default function PendingEventDetail() {
               <Text style={{ color: accountId ? financeColors.ink : financeColors.inkFaint }}>{accountLabel}</Text>
             </Pressable>
 
-            <Text style={styles.label}>WHEN IT OCCURRED</Text>
+            <Text style={styles.label}>WHEN IT OCCURRED (DATE)</Text>
             <DateTimeField mode="date" value={eventDate} onChange={setEventDate} testID="pending-event-date" />
 
             <Pressable style={[styles.primary, (!canSave || busy) && { opacity: 0.5 }]} onPress={save} disabled={!canSave || busy} testID="pending-event-save">
@@ -141,7 +144,7 @@ export default function PendingEventDetail() {
             </Pressable>
           </>
         ) : (
-          <Pressable style={styles.primary} onPress={() => router.push("/finance/reconcile")} testID="pending-event-open-dedupe">
+          <Pressable style={styles.primary} onPress={() => router.push("/finance/reconciliation")} testID="pending-event-open-dedupe">
             <Text style={styles.primaryText}>Open deduplication</Text>
           </Pressable>
         )}
@@ -169,8 +172,8 @@ export default function PendingEventDetail() {
 const styles = StyleSheet.create({
   value: { color: financeColors.ink, fontSize: 14 },
   label: { color: financeColors.inkFaint, fontSize: 11, letterSpacing: 1, marginTop: financeSpace.md },
-  input: { borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, borderRadius: 12, padding: financeSpace.md, backgroundColor: financeColors.surface },
+  input: { borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, borderRadius: 12, padding: financeSpace.md, backgroundColor: financeColors.card },
   reason: { color: financeColors.ink, fontSize: 14, lineHeight: 20 },
   primary: { backgroundColor: financeColors.ink, borderRadius: 12, paddingVertical: financeSpace.md, alignItems: "center", marginTop: financeSpace.lg },
-  primaryText: { color: financeColors.surface, fontSize: 14, fontWeight: "600" },
+  primaryText: { color: financeColors.card, fontSize: 14, fontWeight: "600" },
 });
