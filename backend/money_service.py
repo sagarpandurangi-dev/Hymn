@@ -120,7 +120,9 @@ def reservation_amount_for_commitment(record: Any) -> Decimal:
     if not isinstance(record, dict):
         return Decimal(0)
     original = _to_decimal(record.get("amount"))
-    if original < 0:
+    # Correction 4A.1: guard against NaN / +Inf / -Inf on stored
+    # amounts. A non-finite original cannot reserve anything.
+    if (not original.is_finite()) or original < 0:
         original = Decimal(0)
     state = record.get("state")
     if state in ("reserved", "expired"):
@@ -130,10 +132,21 @@ def reservation_amount_for_commitment(record: Any) -> Decimal:
         # derive from paid_amount. Clamp to [0, original] in either
         # case so we never over- or under-reserve because of stale
         # aggregates.
+        #
+        # Correction 4A.1: non-finite aggregates are treated as
+        # untrustworthy — we conservatively reserve the full original
+        # amount rather than releasing or over-reserving.
         if "remaining_amount" in record and record.get("remaining_amount") is not None:
             remaining = _to_decimal(record.get("remaining_amount"))
+            if not remaining.is_finite():
+                return original
         else:
-            remaining = original - _to_decimal(record.get("paid_amount"))
+            paid = _to_decimal(record.get("paid_amount"))
+            if not paid.is_finite():
+                return original
+            remaining = original - paid
+            if not remaining.is_finite():
+                return original
         if remaining < Decimal(0):
             return Decimal(0)
         if remaining > original:

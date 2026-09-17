@@ -792,8 +792,20 @@ async def _twin_forecasts(db, user_id: str) -> dict:
             debt_payments = _decimal_from_stored(summary["debt_payments"])
             savings = _decimal_from_stored(summary["savings"])
             investments = _decimal_from_stored(summary["investments"])
-            # Financial Commitments due this month (skip those already reconciled to an event)
-            fc_this_month = [c for c in reserved_by_month[m] if c["id"] not in reserved_ids_reconciled_this_cur]
+            # Financial Commitments due this month.
+            #
+            # Correction 4A.1: partial commitments MUST remain in the
+            # forecast even when their id appears on a linked event —
+            # the linked event only covered part of the amount, and
+            # the outstanding remainder is still reserved. The legacy
+            # linked-event exclusion is preserved for reserved and
+            # expired commitments (their reconciliation via an event
+            # is what completes them).
+            fc_this_month = [
+                c for c in reserved_by_month[m]
+                if c.get("state") == "partial"
+                or c["id"] not in reserved_ids_reconciled_this_cur
+            ]
             # Correction 4A: reservation deducted per commitment comes
             # from the canonical helper. Never sum the stored
             # ``amount`` here or partial commitments would either
