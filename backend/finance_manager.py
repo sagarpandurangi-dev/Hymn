@@ -359,9 +359,9 @@ def _normalise_occurred_at(v: Any) -> Optional[str]:
 
 
 def _allocation_shape(*, target_type: str, target_id: str, amount_stored: Decimal128,
-                       currency: str) -> dict:
+                       currency: str, idempotency_key: Optional[str] = None) -> dict:
     now = _now()
-    return {
+    shape = {
         "id": _uuid(),
         "target_type": target_type,
         "target_id": target_id,
@@ -371,6 +371,60 @@ def _allocation_shape(*, target_type: str, target_id: str, amount_stored: Decima
         "created_at": now,
         "updated_at": now,
     }
+    if idempotency_key:
+        # Correction 4B: stable key supplied by the caller so a retry
+        # of a single submission does not create a second allocation.
+        shape["idempotency_key"] = idempotency_key
+    return shape
+
+
+def _match_allocation_by_idempotency_key(
+    allocations: Any,
+    *,
+    idempotency_key: str,
+    target_type: str,
+    target_id: str,
+    amount: Decimal,
+    currency: str,
+) -> Optional[dict]:
+    """Correction 4B — single canonical retry-match helper.
+
+    Return the allocation whose ``idempotency_key`` equals the caller's
+    key when every other identity-defining field (target_type,
+    target_id, amount, currency) also matches.
+
+    Raises ``HTTPException(409)`` when the key exists but any field
+    differs: the key MUST NOT be reused across distinct submissions.
+
+    Returns ``None`` when no allocation carries the key at all.
+
+    Monetary equality is compared on ``Decimal`` values — never on
+    strings, floats, or storage-format encodings.
+    """
+    if not isinstance(allocations, list):
+        return None
+    for a in allocations:
+        if not isinstance(a, dict):
+            continue
+        existing_key = a.get("idempotency_key")
+        if not existing_key or existing_key != idempotency_key:
+            continue
+        existing_amount = _decimal_from_stored(a.get("amount"))
+        if (
+            a.get("target_type") == target_type
+            and a.get("target_id") == target_id
+            and (a.get("currency") or "") == currency
+            and existing_amount == amount
+        ):
+            return a
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Idempotency key already used with different allocation "
+                "parameters. Use a new key for a different submission."
+            ),
+        )
+    return None
 
 
 def _sum_active_allocations(allocations: Any) -> Decimal:
@@ -502,7 +556,7 @@ async def _load_allocatable_event(db, user_id: str, event_id: str) -> dict:
 
 async def _conditional_push_allocation(
     db, user_id: str, event_id: str, allocation: dict, amount: Decimal,
-) -> dict:
+) -> tuple:
     """Conditionally append an allocation to ``financial_events``,
     enforcing that active allocations never exceed the event amount.
 
@@ -510,12 +564,33 @@ async def _conditional_push_allocation(
     If a concurrent write has changed the array we retry a small
     number of times before failing with 409 so the client can retry
     idempotently.
+
+    Correction 4B: returns ``(allocation, created)`` where
+    ``created`` is False when we detected the same
+    ``idempotency_key`` already present on the event. In that case
+    the returned allocation is the pre-existing one and the caller
+    MUST NOT re-audit or re-run allocation effects.
     """
+    idem_key = allocation.get("idempotency_key")
     for _ in range(5):
         ev = await db.financial_events.find_one({"id": event_id, "user_id": user_id}, {"_id": 0})
         if not ev:
             raise HTTPException(status_code=404, detail="Financial Event not found")
         allocs = ev.get("allocations") or []
+        # Correction 4B: retry-safety — same key on the event means we
+        # already applied this submission. A conflicting key raises
+        # 409 through the shared matcher.
+        if idem_key:
+            existing = _match_allocation_by_idempotency_key(
+                allocs,
+                idempotency_key=idem_key,
+                target_type=allocation.get("target_type") or "",
+                target_id=allocation.get("target_id") or "",
+                amount=amount,
+                currency=allocation.get("currency") or "",
+            )
+            if existing is not None:
+                return existing, False
         current_active = _sum_active_allocations(allocs)
         event_amount = _decimal_from_stored(ev.get("amount"))
         if current_active + amount > event_amount:
@@ -533,7 +608,7 @@ async def _conditional_push_allocation(
             {"$push": {"allocations": allocation}, "$set": {"updated_at": _now()}},
         )
         if result.modified_count == 1:
-            return allocation
+            return allocation, True
     raise HTTPException(status_code=409, detail="Concurrent allocation conflict; retry")
 
 
@@ -2592,6 +2667,10 @@ class AllocationCreatePayload(BaseModel):
     target_type: str  # 'commitment' | 'expected_income'
     target_id: str
     amount: Any
+    # Correction 4B: required. The client generates a stable non-secret
+    # identifier for one submission attempt so a network retry or an
+    # accidental double-tap does not create a second allocation.
+    idempotency_key: str
 
 
 class AllocationUpdatePayload(BaseModel):
@@ -2608,45 +2687,93 @@ async def create_allocation(
     applied; the target must be an in-progress commitment (for outflow)
     or a not-yet-received expected income (for inflow). Enforces
     over-allocation atomicity via a conditional update on the array.
+
+    Correction 4B — idempotent: repeat requests carrying the same
+    ``idempotency_key`` + identical (target_type, target_id, amount,
+    currency) return the current projected event without creating a
+    duplicate allocation. Reusing the key with any differing field
+    returns HTTP 409.
     """
     db = get_db()
-    ev = await _load_allocatable_event(db, current_user["id"], event_id)
+
+    # Correction 4B — validate the idempotency key BEFORE any lifecycle
+    # gate so a retry landing after the first request completed (and
+    # possibly moved the target to completed / received) still returns
+    # the existing allocation instead of failing target validation.
+    idempotency_key = (body.idempotency_key or "").strip()
+    if not idempotency_key or len(idempotency_key) < 16 or len(idempotency_key) > 128:
+        raise HTTPException(
+            status_code=400,
+            detail="idempotency_key must be between 16 and 128 characters",
+        )
+
     _require_in(body.target_type, ("commitment", "expected_income"), "target_type")
-    target = await _validate_allocation_target(
-        db, current_user["id"], body.target_type, body.target_id,
-        currency=ev.get("currency") or "", direction=ev.get("direction") or "",
-    )
     stored = _money_to_stored(body.amount, "amount")
     amount_dec = _decimal_from_stored(stored)
     if amount_dec <= 0:
         raise HTTPException(status_code=400, detail="Allocation amount must be greater than zero")
+
+    # Ownership-only read (no lifecycle check yet) so a retry can find
+    # its own already-persisted allocation.
+    existing_ev = await db.financial_events.find_one(
+        {"id": event_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not existing_ev:
+        raise HTTPException(status_code=404, detail="Financial Event not found")
+
+    prior = _match_allocation_by_idempotency_key(
+        existing_ev.get("allocations") or [],
+        idempotency_key=idempotency_key,
+        target_type=body.target_type,
+        target_id=body.target_id,
+        amount=amount_dec,
+        currency=existing_ev.get("currency") or "",
+    )
+    if prior is not None:
+        # Retry of a submission we already handled. Do NOT re-audit,
+        # do NOT re-run target effects, do NOT re-validate the target
+        # lifecycle (the first call may already have completed the
+        # commitment / marked the income received).
+        return _project_event(existing_ev)
+
+    # First-time creation path — now enforce the full event + target
+    # preconditions.
+    ev = await _load_allocatable_event(db, current_user["id"], event_id)
+    await _validate_allocation_target(
+        db, current_user["id"], body.target_type, body.target_id,
+        currency=ev.get("currency") or "", direction=ev.get("direction") or "",
+    )
     allocation = _allocation_shape(
         target_type=body.target_type, target_id=body.target_id,
         amount_stored=stored, currency=ev.get("currency") or "",
+        idempotency_key=idempotency_key,
     )
-    await _conditional_push_allocation(
+    written, created = await _conditional_push_allocation(
         db, current_user["id"], event_id, allocation, amount_dec,
     )
-    await _audit(
-        db, current_user["id"], "financial_event", event_id, "updated",
-        source="manual",
-        new_value={
-            "allocation_created": {
-                "id": allocation["id"],
-                "target_type": body.target_type,
-                "target_id": body.target_id,
-                "amount": _quantize_out(amount_dec),
-                "currency": ev.get("currency"),
+    if created:
+        await _audit(
+            db, current_user["id"], "financial_event", event_id, "updated",
+            source="manual",
+            new_value={
+                "allocation_created": {
+                    "id": written["id"],
+                    "target_type": body.target_type,
+                    "target_id": body.target_id,
+                    "amount": _quantize_out(amount_dec),
+                    "currency": ev.get("currency"),
+                    "idempotency_key": idempotency_key,
+                },
             },
-        },
-    )
-    # Propagate lifecycle to targets — recompute paid/received state
-    # for commitments and expected incomes touched by this allocation.
-    await _apply_allocation_effects(
-        db, current_user["id"],
-        target_type=body.target_type, target_id=body.target_id,
-        currency=ev.get("currency") or "",
-    )
+        )
+        # Propagate lifecycle to targets — recompute paid/received
+        # state for commitments and expected incomes touched by this
+        # allocation.
+        await _apply_allocation_effects(
+            db, current_user["id"],
+            target_type=body.target_type, target_id=body.target_id,
+            currency=ev.get("currency") or "",
+        )
     fresh = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     return _project_event(fresh or ev)
 

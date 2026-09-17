@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { api } from "@/src/lib/api";
+import { api, createAllocationIdempotencyKey } from "@/src/lib/api";
 import DateTimeField from "@/src/components/DateTimeField";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
 import AccountPickerModal from "@/src/components/AccountPickerModal";
@@ -58,6 +58,12 @@ export default function CommitmentDetail() {
   const [eligibleEvents, setEligibleEvents] = useState<any[]>([]);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [allocateAmount, setAllocateAmount] = useState<string>("");
+  // Correction 4B — one idempotency key per allocation submission.
+  // Generated when the user first taps "Apply". Reused verbatim on
+  // retry (network error, timeout) so the backend recognises the
+  // retry and does not create a duplicate allocation. Cleared on
+  // success, close, event change, amount change, and fresh journey.
+  const allocateIdemKeyRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -116,11 +122,20 @@ export default function CommitmentDetail() {
       } else if (a === "allocate") {
         if (!selectedEventId) { Alert.alert("Pick an event", "Choose an existing spending event to allocate from."); setBusy(false); return; }
         if (!allocateAmount) { Alert.alert("Amount required", "Enter how much of the event to apply to this commitment."); setBusy(false); return; }
+        // Correction 4B — mint one key on first submit, reuse it on
+        // retry so the backend can dedupe an accidental double-tap
+        // or a network retry.
+        if (!allocateIdemKeyRef.current) {
+          allocateIdemKeyRef.current = createAllocationIdempotencyKey();
+        }
         await api.createAllocation(selectedEventId, {
           target_type: "commitment",
           target_id: c.id,
           amount: allocateAmount,
+          idempotency_key: allocateIdemKeyRef.current,
         });
+        // Only clear on success — an error must preserve the key.
+        allocateIdemKeyRef.current = null;
       }
       setAction(null); setActualAmount(""); setNewDue(""); setAccountId(null); setAccountLabel("Choose account");
       setSelectedEventId(null); setAllocateAmount("");
@@ -208,7 +223,7 @@ export default function CommitmentDetail() {
         <View style={styles.actionsRow}>
           {canReserve ? <Pressable style={styles.primary} disabled={busy} onPress={reserve} testID="fc-reserve"><Text style={styles.primaryText}>Reserve now</Text></Pressable> : null}
           {canComplete ? <Pressable style={styles.primary} disabled={busy} onPress={() => setAction("complete")} testID="fc-complete-open"><Text style={styles.primaryText}>Complete</Text></Pressable> : null}
-          {canAllocate ? <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("allocate")} testID="fc-allocate-open"><Text style={styles.secondaryText}>Record partial payment</Text></Pressable> : null}
+          {canAllocate ? <Pressable style={styles.secondary} disabled={busy} onPress={() => { allocateIdemKeyRef.current = null; setSelectedEventId(null); setAllocateAmount(""); setAction("allocate"); }} testID="fc-allocate-open"><Text style={styles.secondaryText}>Record partial payment</Text></Pressable> : null}
           {canPostpone ? <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("postpone")} testID="fc-postpone-open"><Text style={styles.secondaryText}>Postpone</Text></Pressable> : null}
           {canKeepActive ? <Pressable style={styles.secondary} disabled={busy} onPress={() => run("keep-active")} testID="fc-keep-active"><Text style={styles.secondaryText}>Keep active</Text></Pressable> : null}
           {canCancel ? <Pressable style={styles.danger} disabled={busy} onPress={() => setAction("cancel")} testID="fc-cancel-open"><Text style={styles.dangerText}>Cancel</Text></Pressable> : null}
@@ -236,12 +251,12 @@ export default function CommitmentDetail() {
         </View>
       </ScrollView>
 
-      <Modal visible={!!action} animationType="slide" transparent onRequestClose={() => setAction(null)}>
+      <Modal visible={!!action} animationType="slide" transparent onRequestClose={() => { allocateIdemKeyRef.current = null; setAction(null); }}>
         <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.sheetCard}>
             <View style={styles.sheetHead}>
               <Text style={styles.sheetTitle}>{action === "complete" ? "Complete" : action === "cancel" ? "Cancel" : action === "postpone" ? "Postpone" : action === "allocate" ? "Record partial payment" : ""}</Text>
-              <Pressable onPress={() => setAction(null)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
+              <Pressable onPress={() => { allocateIdemKeyRef.current = null; setAction(null); }} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
             {action === "complete" ? (
               <>
@@ -291,7 +306,7 @@ export default function CommitmentDetail() {
                     {eligibleEvents.map((e) => (
                       <Pressable
                         key={e.id}
-                        onPress={() => setSelectedEventId(e.id)}
+                        onPress={() => { allocateIdemKeyRef.current = null; setSelectedEventId(e.id); }}
                         style={[styles.eventRow, selectedEventId === e.id && styles.eventRowSel]}
                         testID={`fc-allocate-event-${e.id}`}
                       >
@@ -302,7 +317,7 @@ export default function CommitmentDetail() {
                   </ScrollView>
                 )}
                 <Text style={styles.label}>AMOUNT ({c.currency})</Text>
-                <TextInput value={allocateAmount} onChangeText={setAllocateAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} style={styles.input} testID="fc-allocate-amount" />
+                <TextInput value={allocateAmount} onChangeText={(v) => { allocateIdemKeyRef.current = null; setAllocateAmount(v); }} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} style={styles.input} testID="fc-allocate-amount" />
                 <Pressable style={[styles.primary, (busy || !selectedEventId || !allocateAmount) && { opacity: 0.5 }]} disabled={busy || !selectedEventId || !allocateAmount} onPress={() => run("allocate")} testID="fc-allocate-submit">
                   <Text style={styles.primaryText}>Apply to this commitment</Text>
                 </Pressable>

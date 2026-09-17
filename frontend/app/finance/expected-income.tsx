@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { api } from "@/src/lib/api";
+import { api, createAllocationIdempotencyKey } from "@/src/lib/api";
 import DateTimeField from "@/src/components/DateTimeField";
 import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
 import AccountPickerModal from "@/src/components/AccountPickerModal";
@@ -42,6 +42,9 @@ export default function ExpectedIncome() {
   const [allocateEvents, setAllocateEvents] = useState<any[]>([]);
   const [allocateSelectedEventId, setAllocateSelectedEventId] = useState<string | null>(null);
   const [allocateAmount, setAllocateAmount] = useState<string>("");
+  // Correction 4B — same idempotency contract as commitments/[id].
+  const allocateIdemKeyRef = useRef<string | null>(null);
+  const [allocateBusy, setAllocateBusy] = useState(false);
 
   const load = useCallback(async () => { setLoading(true); try { setRows(await api.listExpectedIncome()); } catch { /* ignore */ } setLoading(false); }, []);
   useEffect(() => { load(); }, [load]);
@@ -105,6 +108,8 @@ export default function ExpectedIncome() {
   // Correction 3 — link an existing APPLIED inflow event to this
   // expected income via an allocation.
   const openAllocate = async (row: any) => {
+    // Correction 4B — fresh journey resets the idempotency key.
+    allocateIdemKeyRef.current = null;
     setAllocateSheet(row);
     setAllocateSelectedEventId(null);
     setAllocateAmount("");
@@ -120,18 +125,34 @@ export default function ExpectedIncome() {
       setAllocateEvents(eligible);
     } catch { setAllocateEvents([]); }
   };
+  const closeAllocateSheet = () => {
+    allocateIdemKeyRef.current = null;
+    setAllocateSheet(null);
+  };
   const submitAllocate = async () => {
     if (!allocateSheet || !allocateSelectedEventId || !allocateAmount) return;
+    if (allocateBusy) return;
+    setAllocateBusy(true);
     try {
+      // Correction 4B — mint the key on first submit, reuse verbatim
+      // on retry so the backend recognises it as the same submission.
+      if (!allocateIdemKeyRef.current) {
+        allocateIdemKeyRef.current = createAllocationIdempotencyKey();
+      }
       await api.createAllocation(allocateSelectedEventId, {
         target_type: "expected_income",
         target_id: allocateSheet.id,
         amount: allocateAmount,
+        idempotency_key: allocateIdemKeyRef.current,
       });
+      allocateIdemKeyRef.current = null;
       setAllocateSheet(null);
       load();
     } catch (e: any) {
+      // Preserve the key so an unchanged retry stays safe.
       Alert.alert("Error", e?.message || "");
+    } finally {
+      setAllocateBusy(false);
     }
   };
   const remove = async (id: string) => { try { await api.deleteExpectedIncome(id); load(); } catch (e: any) { Alert.alert("Error", e?.message || ""); } };
@@ -304,12 +325,12 @@ export default function ExpectedIncome() {
         onClose={() => setReceiveAccountPickerOpen(false)}
       />
 
-      <Modal visible={!!allocateSheet} animationType="slide" transparent onRequestClose={() => setAllocateSheet(null)}>
+      <Modal visible={!!allocateSheet} animationType="slide" transparent onRequestClose={closeAllocateSheet}>
         <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.sheetCard}>
             <View style={styles.sheetHead}>
               <Text style={styles.sheetTitle}>Link received event</Text>
-              <Pressable onPress={() => setAllocateSheet(null)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
+              <Pressable onPress={closeAllocateSheet} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
             <Text style={styles.sheetBody}>Pick an existing inflow event to classify against this expected income. Allocations only classify money — they never move an account balance.</Text>
             <Text style={styles.label}>EVENT</Text>
@@ -320,7 +341,7 @@ export default function ExpectedIncome() {
                 {allocateEvents.map((e) => (
                   <Pressable
                     key={e.id}
-                    onPress={() => setAllocateSelectedEventId(e.id)}
+                    onPress={() => { allocateIdemKeyRef.current = null; setAllocateSelectedEventId(e.id); }}
                     style={[styles.eventRow, allocateSelectedEventId === e.id && styles.eventRowSel]}
                     testID={`ei-allocate-event-${e.id}`}
                   >
@@ -331,9 +352,9 @@ export default function ExpectedIncome() {
               </ScrollView>
             )}
             <Text style={styles.label}>AMOUNT ({allocateSheet?.currency})</Text>
-            <TextInput style={styles.input} value={allocateAmount} onChangeText={setAllocateAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} testID="ei-allocate-amount" />
-            <Pressable style={[styles.primary, (!allocateSelectedEventId || !allocateAmount) && { opacity: 0.5 }]} disabled={!allocateSelectedEventId || !allocateAmount} onPress={submitAllocate} testID="ei-allocate-submit">
-              <Text style={styles.primaryText}>Apply to this expected income</Text>
+            <TextInput style={styles.input} value={allocateAmount} onChangeText={(v) => { allocateIdemKeyRef.current = null; setAllocateAmount(v); }} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} testID="ei-allocate-amount" />
+            <Pressable style={[styles.primary, (!allocateSelectedEventId || !allocateAmount || allocateBusy) && { opacity: 0.5 }]} disabled={!allocateSelectedEventId || !allocateAmount || allocateBusy} onPress={submitAllocate} testID="ei-allocate-submit">
+              <Text style={styles.primaryText}>{allocateBusy ? "Saving…" : "Apply to this expected income"}</Text>
             </Pressable>
           </View>
         </KeyboardAvoidingView>

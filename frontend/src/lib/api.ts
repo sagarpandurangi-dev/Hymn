@@ -4,6 +4,26 @@ const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
 
 export type ApiError = { status: number; message: string };
 
+// Correction 4B — allocation idempotency key generator.
+//
+// Produces a non-secret identifier that is stable within a single
+// submission attempt but reliably unique across sessions and rapid
+// retries. Combines wall clock, an in-memory counter that survives
+// hot reload for the current bundle, and Math.random() so callers
+// never need a dependency to guarantee uniqueness.
+//
+// Layout: `alloc-<base36 timestamp>-<base36 counter>-<base36 random>`
+// Length is comfortably inside the backend's 16..128 window.
+let __allocIdemCounter = 0;
+export function createAllocationIdempotencyKey(): string {
+  __allocIdemCounter = (__allocIdemCounter + 1) >>> 0;
+  const ts = Date.now().toString(36);
+  const counter = __allocIdemCounter.toString(36).padStart(4, "0");
+  const rand = Math.floor(Math.random() * 0xFFFFFFFF).toString(36).padStart(6, "0");
+  const rand2 = Math.floor(Math.random() * 0xFFFFFFFF).toString(36).padStart(6, "0");
+  return `alloc-${ts}-${counter}-${rand}${rand2}`;
+}
+
 /** Recurrence cadence vocabulary — shared with `backend/recurrence.py`. */
 export type RecurrenceCadence =
   | "daily"
@@ -418,7 +438,7 @@ export const api = {
   // Correction 3 — allocation CRUD. Allocations classify slices of a
   // single financial event to commitments / expected incomes. They
   // never move the account balance.
-  createAllocation: (eventId: string, payload: { target_type: "commitment" | "expected_income"; target_id: string; amount: string | number }) =>
+  createAllocation: (eventId: string, payload: { target_type: "commitment" | "expected_income"; target_id: string; amount: string | number; idempotency_key: string }) =>
     request<any>(`/finance/events/${eventId}/allocations`, { method: "POST", body: payload, auth: true }),
   updateAllocation: (eventId: string, allocationId: string, payload: { amount: string | number }) =>
     request<any>(`/finance/events/${eventId}/allocations/${allocationId}`, { method: "PATCH", body: payload, auth: true }),
