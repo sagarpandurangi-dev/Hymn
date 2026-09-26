@@ -66,7 +66,7 @@ AUDIT_ACTIONS = (
 )
 AUDIT_RECORD_TYPES = (
     "financial_commitment", "financial_account", "monthly_money_commitment",
-    "financial_event", "resource_allocation",
+    "financial_event", "resource_allocation", "expected_income",
 )
 EVENT_SOURCES = (
     "checkin", "sms", "bank_statement", "credit_card_statement",
@@ -614,11 +614,14 @@ async def _conditional_push_allocation(
 
 async def _conditional_update_allocation(
     db, user_id: str, event_id: str, allocation_id: str, new_amount: Decimal,
-) -> dict:
+) -> tuple:
     """Update an existing allocation's amount atomically without allowing
     the resulting active-allocation total to exceed the parent event's
     ``amount``. Idempotent: writing the same amount is a no-op and the
     current allocation is returned.
+
+    Correction 2B1: returns ``(allocation, changed)`` so callers can
+    audit exactly once — same-amount retries return ``changed=False``.
     """
     for _ in range(5):
         ev = await db.financial_events.find_one({"id": event_id, "user_id": user_id}, {"_id": 0})
@@ -643,8 +646,8 @@ async def _conditional_update_allocation(
                 ),
             )
         if new_amount == target_active_amount:
-            # Idempotent no-op.
-            return target
+            # Idempotent no-op — no database write.
+            return target, False
         # Build the new allocations array with the target rewritten.
         new_allocs = []
         for a in allocs:
@@ -657,15 +660,18 @@ async def _conditional_update_allocation(
             {"$set": {"allocations": new_allocs, "updated_at": _now()}},
         )
         if result.modified_count == 1:
-            return new_allocs[[a.get("id") for a in new_allocs].index(allocation_id)]
+            return new_allocs[[a.get("id") for a in new_allocs].index(allocation_id)], True
     raise HTTPException(status_code=409, detail="Concurrent allocation conflict; retry")
 
 
 async def _conditional_void_allocation(
     db, user_id: str, event_id: str, allocation_id: str,
-) -> dict:
+) -> tuple:
     """Void an allocation. Idempotent: voiding an already-voided
     allocation returns the current shape without another mutation.
+
+    Correction 2B1: returns ``(allocation, changed)`` — repeat calls
+    return ``changed=False`` so callers can audit exactly once.
     """
     for _ in range(5):
         ev = await db.financial_events.find_one({"id": event_id, "user_id": user_id}, {"_id": 0})
@@ -676,7 +682,7 @@ async def _conditional_void_allocation(
         if not target:
             raise HTTPException(status_code=404, detail="Allocation not found")
         if target.get("status") == "void":
-            return target
+            return target, False
         new_allocs = []
         for a in allocs:
             if a.get("id") == allocation_id:
@@ -688,7 +694,7 @@ async def _conditional_void_allocation(
             {"$set": {"allocations": new_allocs, "updated_at": _now()}},
         )
         if result.modified_count == 1:
-            return new_allocs[[a.get("id") for a in new_allocs].index(allocation_id)]
+            return new_allocs[[a.get("id") for a in new_allocs].index(allocation_id)], True
     raise HTTPException(status_code=409, detail="Concurrent allocation conflict; retry")
 
 
@@ -1638,6 +1644,28 @@ async def _apply_complete(
         # Confirmed events only.
         _require(linked_event.get("confirmation_status") == "confirmed",
                  "Linked event must be confirmed before completing a commitment")
+        # Correction 2B1: enforce direction + applied lifecycle +
+        # timezone-aware occurred_at BEFORE mutating anything so an
+        # inflow event cannot complete an expense commitment.
+        if linked_event.get("direction") != "outflow":
+            raise HTTPException(
+                status_code=400,
+                detail="Only outflow events can complete an expense commitment",
+            )
+        if linked_event.get("lifecycle_status") not in APPLIED_LIFECYCLE_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Linked event lifecycle is not applied "
+                    f"(current: {linked_event.get('lifecycle_status')})."
+                ),
+            )
+        from money_service import parse_utc as _parse_utc  # noqa: WPS433
+        if _parse_utc(linked_event.get("occurred_at")) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Linked event must have a timezone-aware occurred_at",
+            )
         actual = _decimal_from_stored(linked_event.get("amount"))
     else:
         if actual_amount_raw is None or actual_amount_raw == "":
@@ -2734,7 +2762,25 @@ async def create_allocation(
         # do NOT re-run target effects, do NOT re-validate the target
         # lifecycle (the first call may already have completed the
         # commitment / marked the income received).
-        return _project_event(existing_ev)
+        #
+        # Correction 2B1: DO re-run _apply_allocation_effects for the
+        # existing allocation's target so a previous attempt that
+        # saved the allocation but stopped before updating the target
+        # is repaired on retry. This never re-audits and never
+        # touches the allocation itself.
+        try:
+            await _apply_allocation_effects(
+                db, current_user["id"],
+                target_type=prior.get("target_type") or "",
+                target_id=prior.get("target_id") or "",
+                currency=existing_ev.get("currency") or "",
+            )
+        except Exception:  # noqa: BLE001 — best effort repair; never fail an idempotent retry
+            pass
+        refreshed = await db.financial_events.find_one(
+            {"id": event_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        return _project_event(refreshed or existing_ev)
 
     # First-time creation path — now enforce the full event + target
     # preconditions.
@@ -2794,14 +2840,15 @@ async def update_allocation(
     amount_dec = _decimal_from_stored(stored)
     if amount_dec <= 0:
         raise HTTPException(status_code=400, detail="Allocation amount must be greater than zero")
-    updated = await _conditional_update_allocation(
+    updated, changed = await _conditional_update_allocation(
         db, current_user["id"], event_id, allocation_id, amount_dec,
     )
-    await _audit(
-        db, current_user["id"], "financial_event", event_id, "updated",
-        source="manual",
-        new_value={"allocation_updated": {"id": allocation_id, "amount": _quantize_out(amount_dec)}},
-    )
+    if changed:
+        await _audit(
+            db, current_user["id"], "financial_event", event_id, "updated",
+            source="manual",
+            new_value={"allocation_updated": {"id": allocation_id, "amount": _quantize_out(amount_dec)}},
+        )
     await _apply_allocation_effects(
         db, current_user["id"],
         target_type=updated.get("target_type") or "",
@@ -2821,14 +2868,15 @@ async def void_allocation(
     """Void an allocation. Idempotent."""
     db = get_db()
     ev = await _load_allocatable_event(db, current_user["id"], event_id)
-    voided = await _conditional_void_allocation(
+    voided, changed = await _conditional_void_allocation(
         db, current_user["id"], event_id, allocation_id,
     )
-    await _audit(
-        db, current_user["id"], "financial_event", event_id, "updated",
-        source="manual",
-        new_value={"allocation_voided": {"id": allocation_id}},
-    )
+    if changed:
+        await _audit(
+            db, current_user["id"], "financial_event", event_id, "updated",
+            source="manual",
+            new_value={"allocation_voided": {"id": allocation_id}},
+        )
     await _apply_allocation_effects(
         db, current_user["id"],
         target_type=voided.get("target_type") or "",
@@ -2842,18 +2890,15 @@ async def void_allocation(
 async def _apply_allocation_effects(
     db, user_id: str, *, target_type: str, target_id: str, currency: str,
 ) -> None:
-    """Derive partial/completed state on the allocation target from the
-    sum of ACTIVE allocations across every APPLIED event referencing
-    it. Never modifies account balances.
+    """Derive lifecycle + cached monetary aggregates on the allocation
+    target from the sum of ACTIVE allocations across every APPLIED
+    event referencing it. Never modifies account balances.
 
-    * ``commitment``: state may transition reserved/expired -> partial
-      when paid > 0 and paid < amount, or -> completed when
-      paid >= amount. When paid returns to zero (all voided) we return
-      to reserved/expired based on due_date. Completion is only reached
-      through allocations; the historic ``/complete`` flow still writes
-      the completion event exactly once via ``_apply_complete``.
-    * ``expected_income``: received=True when received_amount >= amount;
-      otherwise received=False with a persisted ``received_amount``.
+    Correction 2B1: canonical recomputation rules for both target
+    types. Reduces or voids reopen a previously completed commitment;
+    reducing an expected-income allocation below the expected amount
+    reopens it. Audit is written only when state or cached totals
+    actually change.
     """
     if not target_type or not target_id:
         return
@@ -2865,68 +2910,112 @@ async def _apply_allocation_effects(
         if not c:
             return
         planned = _decimal_from_stored(c.get("amount"))
-        # Compute the target lifecycle state based on paid coverage.
-        new_state: Optional[str] = None
-        if total <= 0:
-            # Revert to reserved (or expired if due date already past).
-            if c.get("state") in ("partial",):
-                new_state = "expired" if (c.get("due_date") or "") < _today_iso() else "reserved"
-        elif total < planned:
-            if c.get("state") in ("reserved", "expired"):
-                new_state = "partial"
-        else:  # total >= planned
-            if c.get("state") in ("reserved", "expired", "partial"):
-                new_state = "completed"
-        updates: dict = {
-            "paid_amount": Decimal128(total),
-            "remaining_amount": Decimal128(planned - total if planned - total > 0 else Decimal(0)),
-        }
-        if new_state and new_state != c.get("state"):
-            updates["state"] = new_state
-            if new_state == "completed":
+        if planned < 0:
+            planned = Decimal(0)
+        paid = total if total > 0 else Decimal(0)
+        remaining = planned - paid if planned - paid > 0 else Decimal(0)
+        consumed = paid if paid <= planned else planned
+        overrun = paid - planned if paid > planned else Decimal(0)
+
+        current_state = c.get("state")
+        due_date = c.get("due_date") or ""
+        if paid == 0:
+            new_state = "expired" if due_date and due_date < _today_iso() else "reserved"
+            updates: dict = {
+                "state": new_state,
+                "status": "reserved",
+                "paid_amount": Decimal128(paid),
+                "remaining_amount": Decimal128(planned),
+                "consumed_amount": Decimal128(Decimal(0)),
+                "released_amount": Decimal128(Decimal(0)),
+                "completed_at": None,
+                "actual_amount": None,
+                "variance": None,
+                "unused_reservation": None,
+                "overrun_amount": Decimal128(Decimal(0)),
+            }
+        elif paid < planned:
+            new_state = "partial"
+            updates = {
+                "state": new_state,
+                "status": "reserved",
+                "paid_amount": Decimal128(paid),
+                "remaining_amount": Decimal128(remaining),
+                "consumed_amount": Decimal128(consumed),
+                "released_amount": Decimal128(Decimal(0)),
+                "completed_at": None,
+                "actual_amount": Decimal128(paid),
+                "variance": Decimal128(planned - paid),
+                "unused_reservation": None,
+                "overrun_amount": Decimal128(Decimal(0)),
+            }
+        else:  # paid >= planned
+            new_state = "completed"
+            updates = {
+                "state": new_state,
+                "status": "consumed",
+                "paid_amount": Decimal128(paid),
+                "remaining_amount": Decimal128(Decimal(0)),
+                "consumed_amount": Decimal128(planned),
+                "released_amount": Decimal128(Decimal(0)),
+                "actual_amount": Decimal128(paid),
+                "variance": Decimal128(planned - paid),
+                "unused_reservation": Decimal128(Decimal(0)),
+                "overrun_amount": Decimal128(overrun),
+            }
+            # Only set completed_at when it is missing so re-runs
+            # don't rewrite the historical timestamp.
+            if not c.get("completed_at"):
                 updates["completed_at"] = _now()
-                updates["actual_amount"] = Decimal128(total)
-                variance = planned - total
-                updates["variance"] = Decimal128(variance)
-                updates["unused_reservation"] = Decimal128(variance if variance > 0 else Decimal(0))
-                updates["overrun_amount"] = Decimal128(-variance if variance < 0 else Decimal(0))
-                updates["status"] = "consumed"
-                updates["consumed_amount"] = Decimal128(total)
-                updates["released_amount"] = Decimal128(variance if variance > 0 else Decimal(0))
         await _update_lifecycle(db, target_id, updates)
-        if new_state and new_state != c.get("state"):
+        if new_state != current_state:
             await _audit(
                 db, user_id, "financial_commitment", target_id,
-                "completed" if new_state == "completed" else "updated",
+                "completed" if new_state == "completed"
+                else ("reopened" if current_state == "completed" else "updated"),
                 source="manual",
-                new_value={"state": new_state, "paid_amount": _quantize_out(total)},
+                new_value={"state": new_state, "paid_amount": _quantize_out(paid),
+                           "remaining_amount": _quantize_out(remaining),
+                           "consumed_amount": _quantize_out(consumed),
+                           "overrun_amount": _quantize_out(overrun)},
             )
     else:  # expected_income
         d = await db.expected_incomes.find_one({"id": target_id, "user_id": user_id}, {"_id": 0})
         if not d:
             return
         expected = _decimal_from_stored(d.get("amount"))
-        received_flag = total >= expected and expected > 0
+        if expected < 0:
+            expected = Decimal(0)
+        received_amount = total if total > 0 else Decimal(0)
+        remaining_amount = expected - received_amount if expected - received_amount > 0 else Decimal(0)
+        received_flag = (received_amount >= expected) and (expected > 0)
+
+        prev_received_amount = _decimal_from_stored(d.get("received_amount"))
+        prev_remaining = _decimal_from_stored(d.get("remaining_amount"))
+        prev_flag = bool(d.get("received"))
+        totals_changed = (
+            received_amount != prev_received_amount
+            or remaining_amount != prev_remaining
+            or received_flag != prev_flag
+        )
         updates: dict = {
-            "received_amount": Decimal128(total),
-            "remaining_amount": Decimal128(expected - total if expected - total > 0 else Decimal(0)),
+            "received_amount": Decimal128(received_amount),
+            "remaining_amount": Decimal128(remaining_amount),
             "received": received_flag,
             "updated_at": _now(),
         }
-        # Preserve compatibility with older ``received_event_id`` UI —
-        # once fully received via allocations we record the LAST event
-        # id that pushed us over the threshold. Optional bookkeeping.
         await db.expected_incomes.update_one(
             {"id": target_id, "user_id": user_id},
             {"$set": updates},
         )
-        await _audit(
-            db, user_id, "financial_event", target_id, "updated",
-            source="manual",
-            new_value={"kind": "expected_income_allocation_effect",
-                       "received_amount": _quantize_out(total),
-                       "received": received_flag},
-        )
+        if totals_changed:
+            await _audit(
+                db, user_id, "expected_income", target_id, "updated",
+                source="manual",
+                new_value={"received_amount": _quantize_out(received_amount),
+                           "remaining_amount": _quantize_out(remaining_amount),
+                           "received": received_flag},
+            )
 
 
 # --------- Deduplication resolution ---------

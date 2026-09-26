@@ -248,6 +248,13 @@ async def mark_expected_received(
         )
         if not ev:
             raise HTTPException(status_code=404, detail="Referenced event not found")
+        # Correction 2B1: an outflow event cannot satisfy expected
+        # income. Enforce direction BEFORE any mutation-adjacent work.
+        if ev.get("direction") != "inflow":
+            raise HTTPException(
+                status_code=400,
+                detail="Only inflow events can satisfy expected income",
+            )
         _require(ev.get("currency") == d.get("currency"),
                  "Event currency must match expected income currency")
         _require(ev.get("confirmation_status") == "confirmed",
@@ -538,6 +545,28 @@ async def reconcile_confirm(
         raise HTTPException(
             status_code=409,
             detail="Event is already matched to a different commitment",
+        )
+
+    # Correction 2B1: enforce direction + confirmation + applied
+    # lifecycle before mutating anything.
+    from money_service import APPLIED_LIFECYCLE_STATUSES as _APPLIED  # noqa: WPS433
+    if ev.get("direction") != "outflow":
+        raise HTTPException(
+            status_code=400,
+            detail="Only outflow events can reconcile against an expense commitment",
+        )
+    if ev.get("confirmation_status") != "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail="Event must be confirmed before reconciling",
+        )
+    if ev.get("lifecycle_status") not in _APPLIED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Event lifecycle is not applied "
+                f"(current: {ev.get('lifecycle_status')})."
+            ),
         )
 
     if not ev.get("account_id"):
