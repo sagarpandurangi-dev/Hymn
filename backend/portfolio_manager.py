@@ -301,29 +301,15 @@ def _quantize_out(d: Decimal) -> str:
 
 
 def compute_time_union_and_overlap(intervals: List[Tuple[int, int]]) -> Tuple[int, int]:
-    """Return (union_minutes, overlap_minutes) for a list of [start, end) minute intervals.
+    """Backwards-compatible re-export of the canonical implementation.
 
-    overlap_minutes is the sum of individual lengths minus the union length —
-    i.e. the total minutes that get double-counted when intervals overlap. It
-    is NOT the length of the intersection.
+    Batch 2B2 moved the union/overlap logic to ``time_service``. Any
+    module that historically imported this name from
+    ``portfolio_manager`` keeps working; this trivial wrapper just
+    forwards to the single source of truth.
     """
-    if not intervals:
-        return 0, 0
-    ivs = [(int(s), int(e)) for s, e in intervals if int(e) > int(s)]
-    if not ivs:
-        return 0, 0
-    total = sum(e - s for s, e in ivs)
-    ivs.sort()
-    merged: List[List[int]] = [[ivs[0][0], ivs[0][1]]]
-    for s, e in ivs[1:]:
-        if s <= merged[-1][1]:
-            if e > merged[-1][1]:
-                merged[-1][1] = e
-        else:
-            merged.append([s, e])
-    union = sum(e - s for s, e in merged)
-    overlap = total - union
-    return union, overlap
+    from time_service import compute_time_union_and_overlap as _canonical  # noqa: WPS433
+    return _canonical(intervals)
 
 
 # ============================================================================
@@ -531,6 +517,17 @@ class DailyCommitmentSummary(BaseModel):
     flexibility: str
 
 
+class DailyReservationSummary(BaseModel):
+    id: str
+    owner_type: str
+    owner_id: Optional[str] = None
+    start_time: str
+    end_time: str
+    allocation_mode: str
+    status: str
+    fixed_or_flexible: str
+
+
 class DailyTimeCapacityResponse(BaseModel):
     date: str
     day_of_week: str
@@ -538,12 +535,27 @@ class DailyTimeCapacityResponse(BaseModel):
     committed_minutes: int
     available_minutes: int
     overlapping_minutes: int
+    # Batch 2B2 — canonical decomposition.
+    baseline_committed_minutes: int = 0
+    reserved_minutes: int = 0
     commitments: List[DailyCommitmentSummary]
+    reservations: List[DailyReservationSummary] = []
 
 
 class WeeklyTimeCapacityResponse(BaseModel):
     week_start_date: str
     days: List[DailyTimeCapacityResponse]
+    # Batch 2B2 — weekly aggregates + description of the calculation
+    # basis so callers can render "recorded uncommitted time" rather
+    # than misleading "free time".
+    total_minutes: int = 10080
+    committed_minutes: int = 0
+    available_minutes: int = 0
+    overlapping_minutes: int = 0
+    baseline_committed_minutes: int = 0
+    reserved_minutes: int = 0
+    capacity_basis: str = "recorded_commitments_and_active_reservations"
+    is_estimate: bool = True
 
 
 class MonthlyMoneyPositionResponse(BaseModel):
@@ -890,7 +902,7 @@ async def update_time_commitment(commitment_id: str, body: TimeCommitmentUpdate,
     await db.time_commitments.update_one(
         {"id": commitment_id, "user_id": current_user["id"]}, {"$set": merged},
     )
-    updated = await db.time_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    updated = await db.time_commitments.find_one({"id": commitment_id, "user_id": current_user["id"]}, {"_id": 0})
     return updated
 
 
@@ -905,34 +917,41 @@ async def delete_time_commitment(commitment_id: str, current_user: dict = Depend
 # ---------------- Time capacity (derived) ----------------
 async def _daily_capacity(user_id: str, day: str) -> DailyTimeCapacityResponse:
     _require_date_str(day, "date")
-    d = _parse_date(day)
-    wd = _weekday_name(d)
-    docs = await db.time_commitments.find(
-        {
-            "user_id": user_id,
-            "day_of_week": wd,
-            "effective_from": {"$lte": day},
-            "$or": [{"effective_until": None}, {"effective_until": {"$gte": day}}],
-        },
-        {"_id": 0},
-    ).to_list(length=5000)
-    intervals = [(_hhmm_to_minutes(x["start_time"]), _hhmm_to_minutes(x["end_time"])) for x in docs]
-    committed, overlap = compute_time_union_and_overlap(intervals)
-    docs.sort(key=lambda x: x.get("start_time", ""))
+    from time_service import load_day_time_capacity  # noqa: WPS433
+    try:
+        cap = await load_day_time_capacity(db, user_id, day)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
     return DailyTimeCapacityResponse(
-        date=day,
-        day_of_week=wd,
-        total_minutes=1440,
-        committed_minutes=committed,
-        available_minutes=1440 - committed,
-        overlapping_minutes=overlap,
+        date=cap["date"],
+        day_of_week=cap["day_of_week"],
+        total_minutes=cap["total_minutes"],
+        committed_minutes=cap["committed_minutes"],
+        available_minutes=cap["available_minutes"],
+        overlapping_minutes=cap["overlapping_minutes"],
+        baseline_committed_minutes=cap["baseline_committed_minutes"],
+        reserved_minutes=cap["reserved_minutes"],
         commitments=[
             DailyCommitmentSummary(
                 id=x["id"], title=x["title"],
                 start_time=x["start_time"], end_time=x["end_time"],
                 commitment_type=x["commitment_type"], flexibility=x["flexibility"],
             )
-            for x in docs
+            for x in cap["commitments"]
+        ],
+        reservations=[
+            DailyReservationSummary(
+                id=x["id"],
+                owner_type=x.get("owner_type") or "",
+                owner_id=x.get("owner_id"),
+                start_time=x.get("start_time") or "",
+                end_time=x.get("end_time") or "",
+                allocation_mode=x.get("allocation_mode") or "",
+                status=x.get("status") or "",
+                fixed_or_flexible=x.get("fixed_or_flexible") or "flexible",
+            )
+            for x in cap["reservations"]
+            if x.get("start_time") and x.get("end_time")
         ],
     )
 
@@ -951,13 +970,57 @@ async def get_weekly_time_capacity(
     current_user: dict = Depends(get_current_user),
 ):
     _require_date_str(week_start_date, "week_start_date")
-    d = _parse_date(week_start_date)
-    _require(d.weekday() == 0, "week_start_date must be a Monday")
+    from time_service import load_week_time_capacity  # noqa: WPS433
+    try:
+        cap = await load_week_time_capacity(db, current_user["id"], week_start_date)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
     days: List[DailyTimeCapacityResponse] = []
-    for i in range(7):
-        di = d + timedelta(days=i)
-        days.append(await _daily_capacity(current_user["id"], di.isoformat()))
-    return WeeklyTimeCapacityResponse(week_start_date=week_start_date, days=days)
+    for daycap in cap["days"]:
+        days.append(DailyTimeCapacityResponse(
+            date=daycap["date"],
+            day_of_week=daycap["day_of_week"],
+            total_minutes=daycap["total_minutes"],
+            committed_minutes=daycap["committed_minutes"],
+            available_minutes=daycap["available_minutes"],
+            overlapping_minutes=daycap["overlapping_minutes"],
+            baseline_committed_minutes=daycap["baseline_committed_minutes"],
+            reserved_minutes=daycap["reserved_minutes"],
+            commitments=[
+                DailyCommitmentSummary(
+                    id=x["id"], title=x["title"],
+                    start_time=x["start_time"], end_time=x["end_time"],
+                    commitment_type=x["commitment_type"], flexibility=x["flexibility"],
+                )
+                for x in daycap["commitments"]
+            ],
+            reservations=[
+                DailyReservationSummary(
+                    id=x["id"],
+                    owner_type=x.get("owner_type") or "",
+                    owner_id=x.get("owner_id"),
+                    start_time=x.get("start_time") or "",
+                    end_time=x.get("end_time") or "",
+                    allocation_mode=x.get("allocation_mode") or "",
+                    status=x.get("status") or "",
+                    fixed_or_flexible=x.get("fixed_or_flexible") or "flexible",
+                )
+                for x in daycap["reservations"]
+                if x.get("start_time") and x.get("end_time")
+            ],
+        ))
+    return WeeklyTimeCapacityResponse(
+        week_start_date=cap["week_start_date"],
+        days=days,
+        total_minutes=cap["total_minutes"],
+        committed_minutes=cap["committed_minutes"],
+        available_minutes=cap["available_minutes"],
+        overlapping_minutes=cap["overlapping_minutes"],
+        baseline_committed_minutes=cap["baseline_committed_minutes"],
+        reserved_minutes=cap["reserved_minutes"],
+        capacity_basis=cap["capacity_basis"],
+        is_estimate=cap["is_estimate"],
+    )
 
 
 # ---------------- Financial accounts ----------------
@@ -1397,7 +1460,7 @@ async def update_resource_allocation(allocation_id: str, body: ResourceAllocatio
     await db.resource_allocations.update_one(
         {"id": allocation_id, "user_id": current_user["id"]}, {"$set": merged},
     )
-    updated = await db.resource_allocations.find_one({"id": allocation_id}, {"_id": 0})
+    updated = await db.resource_allocations.find_one({"id": allocation_id, "user_id": current_user["id"]}, {"_id": 0})
     return _project_allocation(updated)
 
 

@@ -36,7 +36,7 @@ import logging
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -131,31 +131,34 @@ async def _read_context(db, user_id: str, target_type: str, target_id: str) -> D
         {"_id": 0},
     ).to_list(length=200)
 
+    # Batch 2B2 — canonical weekly capacity via time_service.
+    today = datetime.now(timezone.utc).date()
+    monday = today - timedelta(days=today.weekday())
+    from time_service import load_week_time_capacity  # noqa: WPS433
+    capacity = await load_week_time_capacity(db, user_id, monday.isoformat())
+
     # Time commitments (recurring weekly). Only include currently-effective
     # ones (effective_from <= today AND (effective_until is null or >= today)).
-    today = datetime.now(timezone.utc).date().isoformat()
+    today_iso = today.isoformat()
     time_commitments = await db.time_commitments.find(
-        {"user_id": user_id, "effective_from": {"$lte": today}},
+        {"user_id": user_id, "effective_from": {"$lte": today_iso}},
         {"_id": 0},
     ).to_list(length=500)
     time_commitments = [
         tc for tc in time_commitments
-        if not tc.get("effective_until") or tc["effective_until"] >= today
+        if not tc.get("effective_until") or tc["effective_until"] >= today_iso
     ]
 
-    # Rough weekly capacity: 168h/week - sum(committed hours from time_commitments).
-    def _minutes(hhmm: str) -> int:
-        try:
-            h, m = hhmm.split(":")
-            return int(h) * 60 + int(m)
-        except Exception:
-            return 0
-    weekly_committed_minutes = 0
-    for tc in time_commitments:
-        weekly_committed_minutes += max(0, _minutes(tc.get("end_time", "0:0")) - _minutes(tc.get("start_time", "0:0")))
     weekly_capacity = {
-        "committed_hours_per_week": round(weekly_committed_minutes / 60.0, 1),
-        "free_hours_per_week_estimate": max(0.0, round(168 - weekly_committed_minutes / 60.0, 1)),
+        # Legacy keys — kept so downstream compatibility never breaks.
+        "committed_hours_per_week": round(capacity["committed_minutes"] / 60.0, 1),
+        "free_hours_per_week_estimate": round(capacity["available_minutes"] / 60.0, 1),
+        # Batch 2B2 — canonical decomposition.
+        "baseline_committed_hours_per_week": round(capacity["baseline_committed_minutes"] / 60.0, 1),
+        "reserved_hours_per_week": round(capacity["reserved_minutes"] / 60.0, 1),
+        "overlapping_hours_per_week": round(capacity["overlapping_minutes"] / 60.0, 1),
+        "capacity_basis": "recorded_commitments_and_active_reservations",
+        "is_estimate": True,
     }
 
     # Count active tasks with due dates across the user (workload heat).
@@ -445,9 +448,21 @@ def _context_prelude(ctx: Dict[str, Any]) -> str:
         lines.append("\nWEEKLY TIME COMMITMENTS: none recorded yet. Ask contextual questions if the user mentions a recurring life pattern.")
     wc = ctx.get("weekly_capacity") or {}
     if wc:
+        # Batch 2B2 — describe the number honestly. This is *recorded*
+        # uncommitted time (recurring commitments + active
+        # reservations), not guaranteed free / usable time. Missing
+        # sleep, meals, travel, caregiving or other unrecorded
+        # obligations may still occupy some of these hours.
         lines.append(
-            f"\nWEEKLY CAPACITY (rough): {wc.get('committed_hours_per_week', 0)}h committed to routines,"
-            f" ~{wc.get('free_hours_per_week_estimate', 0)}h remaining before sleep/breaks/other goals."
+            f"\nWEEKLY CAPACITY (recorded uncommitted time, estimate): "
+            f"{wc.get('committed_hours_per_week', 0)}h already recorded "
+            f"(baseline {wc.get('baseline_committed_hours_per_week', 0)}h + reservations "
+            f"{wc.get('reserved_hours_per_week', 0)}h; overlap "
+            f"{wc.get('overlapping_hours_per_week', 0)}h), ~"
+            f"{wc.get('free_hours_per_week_estimate', 0)}h remains uncommitted in the record."
+            "\nCAPACITY BASIS: This is recorded uncommitted time, not guaranteed free or usable time."
+            " Sleep, breaks, travel, caregiving and other obligations may be included in the remainder if the user hasn't recorded them."
+            " If a proposal's feasibility depends on time you don't know, ask the user rather than invent availability."
         )
     tc_up = ctx.get("upcoming_task_count", 0)
     if tc_up:

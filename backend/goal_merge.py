@@ -25,7 +25,7 @@ import json
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Depends, HTTPException
@@ -107,26 +107,13 @@ def _duplicate_pairs(all_outcomes: List[Dict[str, Any]]) -> List[List[str]]:
     return [ids for ids in buckets.values() if len(ids) > 1]
 
 
-def _minutes_of_commitments(commitments: List[dict]) -> int:
-    def _m(hhmm: str) -> int:
-        try:
-            h, m = hhmm.split(":")
-            return int(h) * 60 + int(m)
-        except Exception:
-            return 0
-    total = 0
-    for tc in commitments:
-        total += max(0, _m(tc.get("end_time", "0:0")) - _m(tc.get("start_time", "0:0")))
-    return total
-
-
 async def _capacity_snapshot(db, user_id: str) -> Dict[str, Any]:
-    today = datetime.now(timezone.utc).date().isoformat()
-    tcs = await db.time_commitments.find(
-        {"user_id": user_id, "effective_from": {"$lte": today}}, {"_id": 0},
-    ).to_list(length=1000)
-    tcs = [t for t in tcs if not t.get("effective_until") or t["effective_until"] >= today]
-    committed_min = _minutes_of_commitments(tcs)
+    # Batch 2B2 — canonical weekly capacity via time_service.
+    today = datetime.now(timezone.utc).date()
+    monday = today - timedelta(days=today.weekday())
+    from time_service import load_week_time_capacity  # noqa: WPS433
+    capacity = await load_week_time_capacity(db, user_id, monday.isoformat())
+
     open_tasks = await db.tasks.count_documents({
         "user_id": user_id, "status": {"$nin": ["done", "cancelled"]},
     })
@@ -137,8 +124,16 @@ async def _capacity_snapshot(db, user_id: str) -> Dict[str, Any]:
         "user_id": user_id, "status": "active",
     })
     return {
-        "committed_hours_per_week": round(committed_min / 60.0, 1),
-        "free_hours_per_week_estimate": max(0.0, round(168 - committed_min / 60.0, 1)),
+        # Legacy keys — kept so _capacity_conflicts and any callers
+        # keep working unchanged.
+        "committed_hours_per_week": round(capacity["committed_minutes"] / 60.0, 1),
+        "free_hours_per_week_estimate": round(capacity["available_minutes"] / 60.0, 1),
+        # Batch 2B2 — canonical decomposition.
+        "baseline_committed_hours_per_week": round(capacity["baseline_committed_minutes"] / 60.0, 1),
+        "reserved_hours_per_week": round(capacity["reserved_minutes"] / 60.0, 1),
+        "overlapping_hours_per_week": round(capacity["overlapping_minutes"] / 60.0, 1),
+        "capacity_basis": "recorded_commitments_and_active_reservations",
+        "is_estimate": True,
         "active_goals": active_goals,
         "active_projects": active_projects,
         "open_tasks": open_tasks,
