@@ -89,6 +89,35 @@ LIQUIDITY_TYPES = ("liquid", "semi_liquid", "illiquid")
 MONEY_COMMITMENT_TYPES = ("income", "expense", "saving", "investment", "debt_payment", "other")
 
 RESOURCE_TYPES = ("time", "money")
+
+# Batch 2B3 — the exact HTTP 400 message the generic Portfolio
+# resource-allocation API must return whenever the caller asks for
+# ``resource_type="money"``. Money reservations are owned by Finance
+# commitments and MUST NOT be created, listed, updated or deleted via
+# this generic route.
+_PORTFOLIO_MONEY_ALLOCATION_ERROR = (
+    "Money reservations are managed by Finance commitments; "
+    "use the Finance commitment endpoints"
+)
+
+
+def _portfolio_time_allocation_scope(user_id: str) -> dict:
+    """Return the mandatory MongoDB base filter for the generic
+    Portfolio resource-allocation endpoints.
+
+    Portfolio only manages TIME allocations that were not created by
+    Finance. Finance-owned rows carry ``financial_commitment_id`` and
+    live in the same collection; they are excluded here so the
+    generic list/update/delete surface can never mutate them.
+    """
+    return {
+        "user_id": user_id,
+        "resource_type": "time",
+        "$or": [
+            {"financial_commitment_id": {"$exists": False}},
+            {"financial_commitment_id": None},
+        ],
+    }
 ALLOCATION_MODES = ("one_time", "recurring")
 ALLOCATION_UNITS = ("minutes", "currency")
 ALLOCATION_STATUSES = ("proposed", "reserved", "consumed", "released", "cancelled")
@@ -724,6 +753,11 @@ def _validate_allocation(body, *, is_create: bool, existing: dict | None = None)
             _require(merged.get(req) is not None and merged.get(req) != "", f"{req} is required")
 
     _require_in(merged["resource_type"], RESOURCE_TYPES, "resource_type")
+    # Batch 2B3 — Portfolio manages only TIME allocations. Money
+    # reservations are Finance's exclusive domain and MUST NOT reach
+    # this validator.
+    if merged["resource_type"] != "time":
+        raise HTTPException(status_code=400, detail=_PORTFOLIO_MONEY_ALLOCATION_ERROR)
     _require_in(merged["owner_type"], OWNER_TYPES, "owner_type")
     _require_in(merged["allocation_mode"], ALLOCATION_MODES, "allocation_mode")
     _require_in(merged["unit"], ALLOCATION_UNITS, "unit")
@@ -738,54 +772,34 @@ def _validate_allocation(body, *, is_create: bool, existing: dict | None = None)
     else:
         _require(merged.get("owner_id"), f"owner_type={merged['owner_type']} requires owner_id")
 
-    # Resource-type-specific rules
-    if merged["resource_type"] == "time":
-        _require(merged["unit"] == "minutes", "resource_type=time requires unit=minutes")
-        _require(merged.get("currency") in (None, ""), "resource_type=time requires currency=null")
-        merged["currency"] = None
-        _require_time_str(merged.get("start_time"), "start_time")
-        _require_time_str(merged.get("end_time"), "end_time")
-        s = _hhmm_to_minutes(merged["start_time"])
-        e = _hhmm_to_minutes(merged["end_time"])
-        _require(e > s, "end_time must be later than start_time")
-        expected_qty = e - s
-        try:
-            qty_int = int(merged["quantity"])
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="quantity must be numeric")
-        _require(
-            qty_int == expected_qty,
-            f"quantity must equal duration in minutes (expected {expected_qty})",
-        )
-        merged["quantity"] = qty_int  # stored as int minutes
-        if merged["allocation_mode"] == "one_time":
-            _require_date_str(merged.get("date"), "date")
-            _require(merged.get("day_of_week") in (None, ""), "one_time time allocation requires day_of_week=null")
-            merged["day_of_week"] = None
-        else:  # recurring
-            _require(merged.get("date") in (None, ""), "recurring time allocation requires date=null")
-            merged["date"] = None
-            _require(merged.get("day_of_week"), "recurring time allocation requires day_of_week")
-            _require_in(merged["day_of_week"], DAY_OF_WEEK, "day_of_week")
-    else:  # money
-        _require(merged["unit"] == "currency", "resource_type=money requires unit=currency")
-        _require_currency(merged.get("currency"), "currency")
-        _require(merged.get("start_time") in (None, ""), "resource_type=money requires start_time=null")
-        _require(merged.get("end_time") in (None, ""), "resource_type=money requires end_time=null")
-        merged["start_time"] = None
-        merged["end_time"] = None
-        # Money quantity: Decimal128 with full validation.
-        if is_create or "quantity" in incoming:
-            merged["quantity"] = _money_to_stored(merged.get("quantity"), "quantity")
-        if merged["allocation_mode"] == "one_time":
-            _require_date_str(merged.get("date"), "date")
-        else:  # recurring — date may be null
-            if merged.get("date"):
-                _require_date_str(merged["date"], "date")
-        if merged.get("day_of_week"):
-            _require_in(merged["day_of_week"], DAY_OF_WEEK, "day_of_week")
-        else:
-            merged["day_of_week"] = None
+    # Time-allocation-only rules (Batch 2B3 removed the money branch).
+    _require(merged["unit"] == "minutes", "resource_type=time requires unit=minutes")
+    _require(merged.get("currency") in (None, ""), "resource_type=time requires currency=null")
+    merged["currency"] = None
+    _require_time_str(merged.get("start_time"), "start_time")
+    _require_time_str(merged.get("end_time"), "end_time")
+    s = _hhmm_to_minutes(merged["start_time"])
+    e = _hhmm_to_minutes(merged["end_time"])
+    _require(e > s, "end_time must be later than start_time")
+    expected_qty = e - s
+    try:
+        qty_int = int(merged["quantity"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="quantity must be numeric")
+    _require(
+        qty_int == expected_qty,
+        f"quantity must equal duration in minutes (expected {expected_qty})",
+    )
+    merged["quantity"] = qty_int  # stored as int minutes
+    if merged["allocation_mode"] == "one_time":
+        _require_date_str(merged.get("date"), "date")
+        _require(merged.get("day_of_week") in (None, ""), "one_time time allocation requires day_of_week=null")
+        merged["day_of_week"] = None
+    else:  # recurring
+        _require(merged.get("date") in (None, ""), "recurring time allocation requires date=null")
+        merged["date"] = None
+        _require(merged.get("day_of_week"), "recurring time allocation requires day_of_week")
+        _require_in(merged["day_of_week"], DAY_OF_WEEK, "day_of_week")
 
     return merged
 
@@ -1410,10 +1424,14 @@ async def list_resource_allocations(
     fixed_or_flexible: Optional[str] = None,
     unit: Optional[str] = None,
 ):
-    q: dict = {"user_id": current_user["id"]}
+    # Batch 2B3 — Portfolio API is time-allocation-only. Finance-owned
+    # rows (identified by a set financial_commitment_id) are excluded.
+    q: dict = _portfolio_time_allocation_scope(current_user["id"])
     if resource_type:
         _require_in(resource_type, RESOURCE_TYPES, "resource_type")
-        q["resource_type"] = resource_type
+        if resource_type != "time":
+            raise HTTPException(status_code=400, detail=_PORTFOLIO_MONEY_ALLOCATION_ERROR)
+        # ``time`` is already pinned by the base scope; no override.
     if owner_type:
         _require_in(owner_type, OWNER_TYPES, "owner_type")
         q["owner_type"] = owner_type
@@ -1447,10 +1465,17 @@ async def list_resource_allocations(
 
 @portfolio_router.put("/resource-allocations/{allocation_id}", response_model=ResourceAllocationResponse)
 async def update_resource_allocation(allocation_id: str, body: ResourceAllocationUpdate, current_user: dict = Depends(get_current_user)):
-    existing = await db.resource_allocations.find_one({"id": allocation_id, "user_id": current_user["id"]}, {"_id": 0})
+    # Batch 2B3 — restrict the update surface to Portfolio-owned time
+    # rows. Finance-owned rows (financial_commitment_id set) are
+    # invisible here and return 404 exactly like any other unknown id.
+    scope = {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id}
+    existing = await db.resource_allocations.find_one(scope, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Resource allocation not found")
     incoming = body.dict(exclude_unset=True)
+    # _validate_allocation now refuses resource_type != "time" with the
+    # exact money-allocation error, so a payload trying to flip a time
+    # row into a money row cannot succeed.
     merged = _validate_allocation(body, is_create=False, existing=existing)
     # If ownership has changed (either owner_type or owner_id in the payload),
     # revalidate that the new reference exists & is owned by the user.
@@ -1458,15 +1483,23 @@ async def update_resource_allocation(allocation_id: str, body: ResourceAllocatio
         await _validate_owner_reference(current_user["id"], merged["owner_type"], merged.get("owner_id"))
     merged["updated_at"] = _now()
     await db.resource_allocations.update_one(
-        {"id": allocation_id, "user_id": current_user["id"]}, {"$set": merged},
+        {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id},
+        {"$set": merged},
     )
-    updated = await db.resource_allocations.find_one({"id": allocation_id, "user_id": current_user["id"]}, {"_id": 0})
+    updated = await db.resource_allocations.find_one(
+        {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id},
+        {"_id": 0},
+    )
     return _project_allocation(updated)
 
 
 @portfolio_router.delete("/resource-allocations/{allocation_id}", status_code=200)
 async def delete_resource_allocation(allocation_id: str, current_user: dict = Depends(get_current_user)):
-    r = await db.resource_allocations.delete_one({"id": allocation_id, "user_id": current_user["id"]})
+    # Batch 2B3 — Finance-owned rows are excluded from the ownership
+    # scope, so they can never be deleted via this generic route.
+    r = await db.resource_allocations.delete_one(
+        {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id},
+    )
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Resource allocation not found")
     return {"detail": "Resource allocation deleted"}
