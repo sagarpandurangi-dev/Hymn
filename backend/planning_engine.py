@@ -2331,9 +2331,15 @@ async def read_draft_hierarchy(
         raise HTTPException(status_code=404, detail="Conversation not found")
     msg = _get_assistant_hierarchy_message(conv, message_id)
 
-    needs_backfill = (
-        not isinstance(msg.get("proposal_revision"), int)
-        or msg.get("proposal_operation_ids") is None
+    # Batch 2B8.2 — strict presence/validity checks. `type(x) is int` (not
+    # ``isinstance``) rejects booleans, which are ``int`` subclass instances
+    # in Python but must never be treated as revisions.
+    stored_revision_raw = msg.get("proposal_revision")
+    stored_operations_raw = msg.get("proposal_operation_ids")
+    needs_backfill = not (
+        type(stored_revision_raw) is int
+        and stored_revision_raw >= 1
+        and isinstance(stored_operations_raw, list)
     )
     plan = msg["proposal"].get("plan") or {}
     # Also backfill if any node is missing an id.
@@ -2346,22 +2352,30 @@ async def read_draft_hierarchy(
     if needs_backfill or not ids_ok:
         normalised = _normalise_draft_hierarchy(plan, message_id)
 
-        # Batch 2B8.1 — compare-and-set predicate:
-        # the update must only apply if the message still holds the exact
-        # proposal.plan, proposal_revision, and proposal_operation_ids
-        # values that we just read. A concurrent edit that changes any of
-        # them must cause this update to be a no-op.
+        # Batch 2B8.1 / 2B8.2 — compare-and-set predicate.
+        # Field PRESENCE and field VALIDITY are captured separately: the
+        # predicate must match the exact stored raw value when the field is
+        # present, even if that value is malformed (null, 0, True/False, a
+        # string, or a wrong-typed list). Only if the field is truly absent
+        # do we match ``{"$exists": False}``. This lets a subsequent write
+        # repair malformed fields instead of stalling forever.
         snapshot_plan = plan
-        snapshot_rev = msg.get("proposal_revision")
-        has_stored_rev = isinstance(snapshot_rev, int) and snapshot_rev >= 1
-        snapshot_ops_raw = msg.get("proposal_operation_ids")
-        has_stored_ops = isinstance(snapshot_ops_raw, list)
-        snapshot_ops: List[Any] = list(snapshot_ops_raw) if has_stored_ops else []
+        revision_field_present = "proposal_revision" in msg
+        operations_field_present = "proposal_operation_ids" in msg
+        snapshot_rev_raw = stored_revision_raw  # raw, unconverted
+        snapshot_ops_raw = stored_operations_raw  # raw, unconverted
 
-        # Never reset a higher revision to 1; preserve/initialise operation
-        # id list without truncating existing entries.
-        new_revision = snapshot_rev if has_stored_rev else 1
-        new_ops = list(snapshot_ops) if has_stored_ops else []
+        # Writing values are normalised strictly.
+        new_revision = (
+            snapshot_rev_raw
+            if type(snapshot_rev_raw) is int and snapshot_rev_raw >= 1
+            else 1
+        )
+        new_ops = (
+            list(snapshot_ops_raw)
+            if isinstance(snapshot_ops_raw, list)
+            else []
+        )
 
         elem_match: Dict[str, Any] = {
             "id": message_id,
@@ -2369,12 +2383,12 @@ async def read_draft_hierarchy(
             "materialization_state": {"$nin": ["applying", "applied"]},
             "proposal.plan": snapshot_plan,
         }
-        if has_stored_rev:
-            elem_match["proposal_revision"] = snapshot_rev
+        if revision_field_present:
+            elem_match["proposal_revision"] = snapshot_rev_raw
         else:
             elem_match["proposal_revision"] = {"$exists": False}
-        if has_stored_ops:
-            elem_match["proposal_operation_ids"] = snapshot_ops
+        if operations_field_present:
+            elem_match["proposal_operation_ids"] = snapshot_ops_raw
         else:
             elem_match["proposal_operation_ids"] = {"$exists": False}
 
@@ -2411,7 +2425,14 @@ async def read_draft_hierarchy(
         fresh_rev = msg.get("proposal_revision")
         fresh_ops = msg.get("proposal_operation_ids")
         fresh_is_valid = False
-        if isinstance(fresh_plan, dict) and isinstance(fresh_rev, int) and fresh_rev >= 1 and isinstance(fresh_ops, list):
+        # Batch 2B8.2 — exact int type check so booleans do not sneak in as
+        # revisions.
+        if (
+            isinstance(fresh_plan, dict)
+            and type(fresh_rev) is int
+            and fresh_rev >= 1
+            and isinstance(fresh_ops, list)
+        ):
             try:
                 _validate_plan_hierarchy(fresh_plan)
                 _collect_draft_ids(fresh_plan)
