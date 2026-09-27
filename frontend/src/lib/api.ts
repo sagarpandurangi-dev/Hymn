@@ -132,6 +132,98 @@ export type UserResponse = {
   post_creation_decomposition_preference?: PostCreationDecompositionPreference;
 };
 
+/**
+ * Batch 2B9 — Editable draft Plan → Phase → Milestone → Task → Required
+ * Check-in hierarchy shared with the backend `planning_engine.py`.
+ */
+export type PlanningRequiredCheckinDraft = {
+  id: string;
+  title: string;
+  prompt: string;
+  cadence: "once" | "daily" | "weekly" | "monthly" | "quarterly";
+};
+
+export type PlanningTaskDraft = {
+  id: string;
+  title: string;
+  description?: string | null;
+  due_date?: string | null;
+  priority: "low" | "medium" | "high";
+  required_checkins: PlanningRequiredCheckinDraft[];
+};
+
+export type PlanningMilestoneDraft = {
+  id: string;
+  title: string;
+  description?: string | null;
+  target_date?: string | null;
+  tasks: PlanningTaskDraft[];
+};
+
+export type PlanningPhaseDraft = {
+  id: string;
+  title: string;
+  description?: string | null;
+  milestones: PlanningMilestoneDraft[];
+};
+
+export type PlanningPlanDraft = {
+  id: string;
+  title: string;
+  phases: PlanningPhaseDraft[];
+};
+
+export type PlanningDraftHierarchyResponse = {
+  conversation_id: string;
+  message_id: string;
+  proposal_revision: number;
+  plan: PlanningPlanDraft;
+};
+
+export type PlanningHierarchyEntityType =
+  | "plan"
+  | "phase"
+  | "milestone"
+  | "task"
+  | "required_checkin";
+
+export type PlanningHierarchyOperationRequest = {
+  operation_id: string;
+  expected_revision: number;
+  action: "add" | "update" | "delete" | "move" | "duplicate";
+  entity_type: PlanningHierarchyEntityType;
+  entity_id?: string | null;
+  parent_id?: string | null;
+  position?: number | null;
+  values?: Record<string, unknown> | null;
+};
+
+/**
+ * RFC 4122 version-4 UUID generator. Dependency-free — combines Math.random
+ * with the standard v4 bit patterns. This id is used solely for backend
+ * idempotency of draft hierarchy operations; it is not a security token.
+ */
+export function createPlanningOperationId(): string {
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) {
+    bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0"));
+  return (
+    hex.slice(0, 4).join("") +
+    "-" +
+    hex.slice(4, 6).join("") +
+    "-" +
+    hex.slice(6, 8).join("") +
+    "-" +
+    hex.slice(8, 10).join("") +
+    "-" +
+    hex.slice(10, 16).join("")
+  );
+}
+
 export const api = {
   signup: (payload: {
     name: string;
@@ -508,10 +600,33 @@ export const api = {
     }),
   planningReset: (target_type: "goal" | "project", target_id: string) =>
     request<any>(`/planning/${target_type}/${target_id}/reset`, { method: "POST", auth: true }),
-  planningMaterialize: (conversation_id: string, message_id: string) =>
-    request<any>(`/planning/conversations/${conversation_id}/materialize`, {
-      method: "POST", body: { message_id }, auth: true,
-    }),
+  planningMaterialize: (
+    conversation_id: string,
+    message_id: string,
+    expected_proposal_revision?: number,
+  ) => {
+    const body: { message_id: string; expected_proposal_revision?: number } = { message_id };
+    if (typeof expected_proposal_revision === "number") {
+      body.expected_proposal_revision = expected_proposal_revision;
+    }
+    return request<any>(`/planning/conversations/${conversation_id}/materialize`, {
+      method: "POST", body, auth: true,
+    });
+  },
+  planningGetDraftHierarchy: (conversation_id: string, message_id: string) =>
+    request<PlanningDraftHierarchyResponse>(
+      `/planning/conversations/${conversation_id}/proposals/${message_id}/hierarchy`,
+      { auth: true },
+    ),
+  planningApplyDraftHierarchyOperation: (
+    conversation_id: string,
+    message_id: string,
+    operation: PlanningHierarchyOperationRequest,
+  ) =>
+    request<PlanningDraftHierarchyResponse & { operation_id: string }>(
+      `/planning/conversations/${conversation_id}/proposals/${message_id}/hierarchy/operations`,
+      { method: "POST", body: operation, auth: true },
+    ),
 
   // -- Goal Merge Wizard (manual) --
   mergePreview: (goal_ids: string[]) =>

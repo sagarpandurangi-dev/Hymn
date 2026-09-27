@@ -13,12 +13,17 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { api } from "@/src/lib/api";
+import { api, type PlanningPlanDraft } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
+import PlanDraftEditor from "@/src/components/PlanDraftEditor";
 
 type Proposal = {
   summary?: string;
   feasibility_note?: string;
+  // Batch 2B7 / 2B9 — durable Plan hierarchy. Present when the assistant
+  // proposes an editable Plan → Phase → Milestone → Task → Required
+  // Check-in hierarchy.
+  plan?: PlanningPlanDraft;
   expected_outcomes?: { title: string; target_value?: string; unit?: string; deadline?: string; outcome_type?: string }[];
   tasks?: { title: string; expected_outcome_title?: string; due_date?: string; priority?: string; commitment_type?: string; notes?: string }[];
   checkins?: { type: string; title: string; date: string; time: string; expected_outcome_title?: string; project_id?: string; notes?: string }[];
@@ -53,6 +58,9 @@ type Message = {
   proposal?: Proposal | null;
   materialized_at?: string | null;
   materialized_summary?: string | null;
+  // Batch 2B8 / 2B9 — draft revision and materialization state.
+  proposal_revision?: number | null;
+  materialization_state?: string | null;
 };
 
 type Conversation = {
@@ -213,8 +221,10 @@ export default function PlanningChatScreen() {
               <MessageBubble
                 key={m.id}
                 message={m}
+                conversationId={conv.id}
                 onApply={apply}
                 applying={applyingId === m.id}
+                onConversationUpdated={(next) => setConv(next as Conversation)}
               />
             ))}
 
@@ -272,21 +282,36 @@ export default function PlanningChatScreen() {
 }
 
 function MessageBubble({
-  message, onApply, applying,
+  message, conversationId, onApply, applying, onConversationUpdated,
 }: {
   message: Message;
+  conversationId: string;
   onApply: (m: Message) => void;
   applying: boolean;
+  onConversationUpdated: (conversation: unknown) => void;
 }) {
   const isUser = message.role === "user";
   const proposal = message.proposal;
   const applied = !!message.materialized_at;
+  const hasPlanHierarchy = !!proposal?.plan;
   return (
     <View style={{ marginVertical: spacing.xs, alignItems: isUser ? "flex-end" : "flex-start" }}>
       <View style={[styles.bubble, isUser ? styles.userBubble : styles.assistantBubble]}>
         <Text style={isUser ? styles.userText : styles.assistantText}>{message.content}</Text>
       </View>
-      {!isUser && proposal ? (
+      {!isUser && proposal && hasPlanHierarchy ? (
+        <PlanDraftEditor
+          conversationId={conversationId}
+          messageId={message.id}
+          initialPlan={proposal.plan as PlanningPlanDraft}
+          initialRevision={message.proposal_revision ?? null}
+          materializedAt={message.materialized_at}
+          materializedSummary={message.materialized_summary}
+          materializationState={message.materialization_state}
+          onConversationUpdated={onConversationUpdated}
+        />
+      ) : null}
+      {!isUser && proposal && !hasPlanHierarchy ? (
         <View style={styles.proposalCard} testID={`planning-proposal-${message.id}`}>
           <View style={styles.proposalHeader}>
             <Ionicons name="git-branch-outline" size={16} color={colors.brandPrimary} />
