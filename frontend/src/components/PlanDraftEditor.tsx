@@ -562,17 +562,28 @@ export default function PlanDraftEditor({
       onConversationUpdated(res.conversation);
     } catch (e: any) {
       if (e?.status === 409) {
+        // Batch 2B9.2 — full conflict recovery. Close any stale overlay,
+        // attempt to refresh, and truthfully surface success vs. failure.
+        closeTransientEditors();
         try {
           const fresh = await api.planningGetDraftHierarchy(conversationId, messageId);
           setPlan(fresh.plan);
           setRevision(fresh.proposal_revision);
           setPending(null);
-        } catch {
-          /* leave existing plan in place */
+          setLoadError(null);
+          setApplyError(
+            "This plan changed. I refreshed it—review it once more before adding it.",
+          );
+        } catch (refreshErr: any) {
+          // Do NOT claim refresh succeeded. Leave the currently displayed
+          // hierarchy in place, expose the refresh error so the visible
+          // "Refresh plan" banner appears, and keep the editor locked via
+          // interactionLocked.
+          setLoadError(refreshErr?.message || "Could not refresh this plan.");
+          setApplyError(
+            "This plan changed, but Hymn could not refresh it. Use Refresh plan before trying again.",
+          );
         }
-        setApplyError(
-          "This plan changed. I refreshed it—review it once more before adding it.",
-        );
       } else {
         setApplyError(e?.message || "Could not add this plan.");
       }
@@ -580,6 +591,7 @@ export default function PlanDraftEditor({
       setApplying(false);
     }
   }, [
+    closeTransientEditors,
     conversationId,
     loaded,
     materializedSummary,
@@ -593,8 +605,15 @@ export default function PlanDraftEditor({
 
   // Batch 2B9.1 — single lock covering: op in flight, apply in flight,
   // failed op waiting for Retry, or stale plan after a failed refresh.
+  // Batch 2B9.2 — also lock while a Refresh plan is in flight so mutation
+  // controls do not briefly unlock between clearing loadError and the
+  // fresh hierarchy landing.
   const interactionLocked =
-    busy || applying || pending !== null || (loaded && loadError !== null);
+    busy ||
+    applying ||
+    loading ||
+    pending !== null ||
+    (loaded && loadError !== null);
 
   if (currentlyApplying) {
     return (
