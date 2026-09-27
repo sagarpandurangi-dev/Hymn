@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { api, type PlanningPlanDraft } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import PlanDraftEditor from "@/src/components/PlanDraftEditor";
@@ -208,9 +208,9 @@ export default function PlanningChatScreen() {
             {(conv?.messages.length ?? 0) === 0 && (
               <View style={styles.welcomeCard}>
                 <Ionicons name="sparkles" size={22} color={colors.brandPrimary} />
-                <Text style={styles.welcomeTitle}>Let's plan this together.</Text>
+                <Text style={styles.welcomeTitle}>Let&apos;s plan this together.</Text>
                 <Text style={styles.welcomeBody}>
-                  Tell me what you want to accomplish, what's already tried, or what's blocking
+                  Tell me what you want to accomplish, what&apos;s already tried, or what&apos;s blocking
                   you. I can propose outcomes, tasks and cadences and apply them straight to
                   {tt === "goal" ? " this Goal" : " this Project"}.
                 </Text>

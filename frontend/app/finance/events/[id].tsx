@@ -19,8 +19,6 @@ import { formatMoney } from "@/src/lib/finance/format";
 //     same-day ambiguity, at which point the user is prompted to
 //     supply an explicit time.
 
-function pad(n: number, w = 2) { return String(n).padStart(w, "0"); }
-
 // Device-local UTC offset (minutes east of UTC). The backend uses this
 // to compute the correct local calendar date on ``date_only`` events
 // without ever guessing a time.

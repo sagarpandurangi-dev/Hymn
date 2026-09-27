@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { api, type RecurrenceSpec } from "@/src/lib/api";
 import { colors, spacing, TASK_PRIORITIES, TASK_STATUSES, TASK_ASSIGNMENT_TYPES } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";

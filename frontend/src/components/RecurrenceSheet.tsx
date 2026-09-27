@@ -14,7 +14,7 @@
 
 import { useEffect, useState } from "react";
 import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { colors, spacing } from "@/src/lib/theme";
 import type { RecurrenceSpec, RecurrenceCadence } from "@/src/lib/api";
 

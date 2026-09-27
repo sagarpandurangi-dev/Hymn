@@ -8,7 +8,7 @@
 
 import React from "react";
 import { Pressable, StyleSheet, Text, TextStyle, View, ViewStyle } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
 
 // ---------------------------------------------------------------------------
@@ -272,7 +272,7 @@ export function FoldBanner({
   tone = "neutral",
   testID,
 }: {
-  icon?: keyof typeof Ionicons.glyphMap;
+  icon?: React.ComponentProps<typeof Ionicons>["name"];
   text: string;
   action?: { label: string; onPress: () => void; testID?: string };
   tone?: "neutral" | "warn" | "info";

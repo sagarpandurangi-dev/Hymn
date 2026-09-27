@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
@@ -64,7 +64,7 @@ export default function KnowledgeScreen() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const all = (await api.listGoals()) as Goal[];
+      const all = (await api.listGoals()) as unknown as Goal[];
       const knowledgeGoals = all
         .filter((g) => (g.domain_name || "").toLowerCase() === "knowledge")
         .sort((a, b) => (a.status === "active" ? -1 : 1) - (b.status === "active" ? -1 : 1));

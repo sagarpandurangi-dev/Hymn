@@ -11,10 +11,10 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { api, type CalibrationProfile, type CalibrationBucket } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
@@ -55,16 +55,14 @@ export default function CalibrationScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       <View style={styles.header}>
-        <Ionicons.Button
-          name="chevron-back"
-          size={22}
-          color={colors.onSurface}
-          backgroundColor="transparent"
+        <Pressable
           onPress={() => router.back()}
-          iconStyle={{ marginRight: 0 }}
           style={styles.backBtn}
           testID="calibration-back"
-        />
+          hitSlop={8}
+        >
+          <Ionicons name="chevron-back" size={22} color={colors.onSurface} />
+        </Pressable>
         <Text style={styles.headerTitle}>Calibration</Text>
         <View style={{ width: 22 }} />
       </View>

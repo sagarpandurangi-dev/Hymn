@@ -1,11 +1,11 @@
 import { Tabs, useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { Modal, Pressable, StyleSheet, View, Text } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { useState } from "react";
+import React, { useState } from "react";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
-function TabIcon({ name, focused }: { name: keyof typeof Ionicons.glyphMap; focused: boolean }) {
+function TabIcon({ name, focused }: { name: React.ComponentProps<typeof Ionicons>["name"]; focused: boolean }) {
   return <Ionicons name={name} size={24} color={focused ? colors.onSurface : colors.onSurfaceTertiary} />;
 }
 function TabLabel({ label, focused }: { label: string; focused: boolean }) {
