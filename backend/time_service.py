@@ -116,6 +116,51 @@ def _weekday_name(d: _date) -> str:
     return _DAY_OF_WEEK[d.weekday()]
 
 
+def _record_interval(record: dict, record_kind: str) -> tuple:
+    """Correction 2B2.1 — strict interval extractor.
+
+    Refuses to silently exclude a queried baseline commitment or an
+    active reservation because its ``start_time`` / ``end_time`` is
+    missing or malformed. Overstating available time by dropping such
+    rows is worse than surfacing the data-integrity defect, so this
+    helper raises ``RuntimeError`` on any invalid value and lets the
+    caller propagate the failure.
+
+    ``record_kind`` is a short label used in the error message to
+    identify the collection (``"time_commitment"`` or
+    ``"resource_allocation"``).
+    """
+    record_id = record.get("id", "<unknown>") if isinstance(record, dict) else "<unknown>"
+    start_raw = record.get("start_time") if isinstance(record, dict) else None
+    end_raw = record.get("end_time") if isinstance(record, dict) else None
+    if not isinstance(start_raw, str) or not start_raw:
+        raise RuntimeError(
+            f"{record_kind} {record_id} is missing a start_time"
+        )
+    if not isinstance(end_raw, str) or not end_raw:
+        raise RuntimeError(
+            f"{record_kind} {record_id} is missing an end_time"
+        )
+    try:
+        start = hhmm_to_minutes(start_raw)
+    except ValueError as ex:
+        raise RuntimeError(
+            f"{record_kind} {record_id} has invalid start_time '{start_raw}'"
+        ) from ex
+    try:
+        end = hhmm_to_minutes(end_raw)
+    except ValueError as ex:
+        raise RuntimeError(
+            f"{record_kind} {record_id} has invalid end_time '{end_raw}'"
+        ) from ex
+    if not (0 <= start < end <= 1440):
+        raise RuntimeError(
+            f"{record_kind} {record_id} has out-of-range interval "
+            f"[{start}, {end}) — must satisfy 0 <= start < end <= 1440"
+        )
+    return start, end
+
+
 async def load_day_time_capacity(db, user_id: str, day: str) -> dict:
     """Compute recorded time capacity for a single ISO date.
 
@@ -151,27 +196,12 @@ async def load_day_time_capacity(db, user_id: str, day: str) -> dict:
         {"_id": 0},
     ).to_list(length=5000)
 
-    baseline_intervals = []
-    for x in baseline_docs:
-        try:
-            baseline_intervals.append(
-                (hhmm_to_minutes(x["start_time"]), hhmm_to_minutes(x["end_time"])),
-            )
-        except (KeyError, ValueError):
-            # A malformed row cannot silently distort capacity; skip
-            # it — the router-level validation prevents new bad rows.
-            continue
-
-    reservation_intervals = []
-    for x in reservation_docs:
-        if not x.get("start_time") or not x.get("end_time"):
-            continue
-        try:
-            reservation_intervals.append(
-                (hhmm_to_minutes(x["start_time"]), hhmm_to_minutes(x["end_time"])),
-            )
-        except ValueError:
-            continue
+    baseline_intervals = [
+        _record_interval(x, "time_commitment") for x in baseline_docs
+    ]
+    reservation_intervals = [
+        _record_interval(x, "resource_allocation") for x in reservation_docs
+    ]
 
     baseline_union, _b_overlap = compute_time_union_and_overlap(baseline_intervals)
     reservation_union, _r_overlap = compute_time_union_and_overlap(reservation_intervals)
