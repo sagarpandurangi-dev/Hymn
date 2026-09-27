@@ -308,21 +308,6 @@ Every response has TWO parts:
                            "expected_outcome_title": "for goal type",
                            "project_id": "for project type",
                            "notes": "optional short note"}],
- "existing_item_updates": [{"kind": "goal|project|task",
-                             "id": "existing id from context",
-                             "patch": {"title": "…", "notes": "…",
-                                        "priority": "low|medium|high",
-                                        "status": "active|paused|abandoned|completed|todo|in_progress|done|cancelled",
-                                        "due_date": "YYYY-MM-DD",
-                                        "deadline": "YYYY-MM-DD"}}],
- "existing_item_changes": [{"kind": "goal|project|task",
-                             "id": "existing id from context",
-                             "action": "postpone|cancel",
-                             "new_due_date": "YYYY-MM-DD if postpone, else omit",
-                             "reason": "one short line"}],
- "consolidations": [{"kind": "goal|project",
-                      "candidate_ids": ["id1", "id2", …],
-                      "reason": "why these look like duplicates in one line"}],
  "time_commitments": [{"title": "e.g. Job",
                         "day_of_week": "monday|tuesday|…|sunday",
                         "start_time": "HH:MM (24h)",
@@ -339,25 +324,17 @@ Every response has TWO parts:
 Rules for the proposal block:
 - Only propose additions/refinements to the current target — never delete
   its existing items.
+- Do not propose deleting, merging, postponing, cancelling, completing, renaming, or otherwise modifying existing Goals, Projects, Expected Outcomes, Tasks, or Check-ins. Explain any suggested trade-off conversationally. Hymn requires item-by-item user review before existing records may be changed.
 - For Goals: tasks MUST attach to a proposed or existing expected_outcome.
 - For Projects: tasks attach directly to the project (leave
   expected_outcome_title empty).
 - Keep it tight: 1–6 new outcomes and 1–20 new tasks per turn — smaller is better.
 - If the user is just asking a question or exploring, DO NOT include the
   proposal block. Only include it when proposing concrete additions.
-- `existing_item_changes` and `existing_item_updates` must reference the
-  EXACT id of a real item from the context prelude, and the item MUST NOT
-  have commitment_type="exclusive" — Hymn will refuse to apply changes
-  to exclusive items on the server side.
 - `checkin_recurrences` are expanded server-side into one check-in per
   matching day within [start_date, end_date] (including backfill into
   the past if the range straddles today). Prefer a recurrence over
   emitting 30 individual checkins.
-- `consolidations`: whenever you notice two or more items in the
-  portfolio that appear to be duplicates (near-identical titles, same
-  domain, overlapping outcomes), propose a consolidation. Provide ALL
-  candidate ids. Hymn will pick the richest survivor automatically
-  based on metadata density; you do NOT need to pick the survivor.
 - `time_commitments` should only be added when the user's message
   clearly established a recurring life pattern with an explicit or
   strongly-implied start/end time.
@@ -582,13 +559,6 @@ async def _get_or_create_conversation(db, user_id: str, target_type: str, target
     return doc
 
 
-async def _save_conversation(db, conv: dict) -> None:
-    conv["updated_at"] = _now()
-    await db.plan_conversations.replace_one(
-        {"id": conv["id"]}, dict(conv), upsert=True,
-    )
-
-
 def _shape_message(msg: dict) -> dict:
     """Public shape sent to the UI (never leaks the HYMN_PROPOSAL block into
     the visible content)."""
@@ -631,10 +601,6 @@ VALID_TC_TYPES = {"sleep", "work", "commute", "study", "meal", "caregiving",
                   "household", "health", "personal", "other"}
 VALID_TC_FLEX = {"fixed", "flexible"}
 VALID_CHECKIN_TYPES = {"goal", "project", "life"}
-VALID_TASK_STATUSES = {"todo", "in_progress", "done", "cancelled"}
-VALID_GOAL_STATUSES = {"active", "paused", "completed", "abandoned"}
-VALID_PROJECT_STATUSES = {"active", "paused", "completed", "abandoned"}
-VALID_UPDATE_FIELDS = {"title", "notes", "priority", "status", "due_date", "deadline"}
 _HHMM_RE = re.compile(r"^\d{1,2}:\d{2}$")
 
 _WEEKDAY_INDEX = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
@@ -675,54 +641,59 @@ def _iter_dates(start: str, end: str, days_of_week: Optional[List[str]] = None):
         cur = cur.fromordinal(cur.toordinal() + 1)
 
 
-async def _richness_score(db, user_id: str, kind: str, item: dict) -> int:
-    """Rank duplicates by metadata density. Higher = more info to keep."""
-    score = 0
-    if kind == "goal":
-        for f in ("target_outcome", "deadline", "notes", "checkin_cadence", "journey_type"):
-            v = item.get(f)
-            if isinstance(v, str) and v.strip():
-                score += 2
-        n_eo = await db.expected_outcomes.count_documents(
-            {"goal_id": item["id"], "user_id": user_id},
-        )
-        eo_ids = [
-            e["id"] async for e in db.expected_outcomes.find(
-                {"goal_id": item["id"], "user_id": user_id}, {"_id": 0, "id": 1},
-            )
-        ]
-        n_t = await db.tasks.count_documents(
-            {"expected_outcome_id": {"$in": eo_ids}, "user_id": user_id},
-        ) if eo_ids else 0
-        n_ci = await db.checkins.count_documents(
-            {"goal_id": item["id"], "user_id": user_id},
-        )
-        score += n_eo * 3 + n_t + n_ci
-    else:  # project
-        for f in ("description", "start_date", "target_end_date", "notes"):
-            v = item.get(f)
-            if isinstance(v, str) and v.strip():
-                score += 2
-        n_t = await db.tasks.count_documents(
-            {"project_id": item["id"], "user_id": user_id},
-        )
-        n_ci = await db.checkins.count_documents(
-            {"project_id": item["id"], "user_id": user_id},
-        )
-        score += n_t + n_ci
-    return score
+def _materialization_key(
+    conversation_id: str,
+    message_id: str,
+    artifact_kind: str,
+    artifact_position: str,
+) -> str:
+    """Deterministic key identifying a single additive artifact."""
+    return f"{conversation_id}:{message_id}:{artifact_kind}:{artifact_position}"
 
 
-def _is_exclusive(item: dict) -> bool:
-    return (item.get("commitment_type") or "postponable") == "exclusive"
+def _materialized_id(materialization_key: str) -> str:
+    """Non-secret deterministic id derived from a materialization key."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"hymn:{materialization_key}"))
+
+
+async def _upsert_artifact(
+    db, collection: str, user_id: str, key: str, document: dict,
+) -> Tuple[dict, bool]:
+    """Upsert an additive artifact keyed by (user_id, planning_materialization_key).
+    Returns (stored_document, was_inserted_this_attempt)."""
+    result = await db[collection].update_one(
+        {"user_id": user_id, "planning_materialization_key": key},
+        {"$setOnInsert": document},
+        upsert=True,
+    )
+    stored = await db[collection].find_one(
+        {"user_id": user_id, "planning_materialization_key": key}, {"_id": 0},
+    )
+    return stored or document, result.upserted_id is not None
 
 
 async def _materialize_proposal(
     db, user_id: str, target_type: str, target_id: str, proposal: dict,
+    conversation_id: str, message_id: str,
 ) -> Dict[str, Any]:
-    """Atomically apply a proposal. Compensates on failure."""
+    """Idempotently apply an additive proposal with best-effort compensation
+    for records inserted during the current attempt.
+
+    Not multi-collection atomic — every write is a per-key upsert.
+    Reapplying the same (conversation_id, message_id) yields the same records.
+    """
     if not isinstance(proposal, dict):
         raise HTTPException(status_code=400, detail="Invalid proposal.")
+
+    # Batch 2B6 — reject unsafe historical operations up front.
+    unsafe_review = HTTPException(
+        status_code=409,
+        detail="This proposal contains changes that require item-by-item review and cannot be applied yet.",
+    )
+    for legacy_field in ("existing_item_changes", "existing_item_updates", "consolidations"):
+        v = proposal.get(legacy_field)
+        if isinstance(v, list) and len(v) > 0:
+            raise unsafe_review
 
     now = _now()
     today = datetime.now(timezone.utc).date().isoformat()
@@ -730,12 +701,11 @@ async def _materialize_proposal(
     created_tasks: List[str] = []
     created_time_commitments: List[str] = []
     created_checkins: List[str] = []
-    applied_existing_changes: List[Dict[str, Any]] = []
-    applied_existing_updates: List[Dict[str, Any]] = []
-    applied_consolidations: List[Dict[str, Any]] = []
+    inserted_this_attempt: Dict[str, List[str]] = {
+        "expected_outcomes": [], "tasks": [], "time_commitments": [], "checkins": [],
+    }
     target_updates: Dict[str, Any] = {}
 
-    # 1. Pull existing outcomes for matching by title.
     if target_type == "goal":
         existing_outcomes = await db.expected_outcomes.find(
             {"user_id": user_id, "goal_id": target_id}, {"_id": 0},
@@ -747,21 +717,21 @@ async def _materialize_proposal(
     }
 
     try:
-        # 2. Create new expected outcomes (goals only).
-        new_outcomes = proposal.get("expected_outcomes") or []
+        # 2. Expected outcomes (goals only).
         if target_type == "goal":
-            for eo in new_outcomes:
+            for idx, eo in enumerate(proposal.get("expected_outcomes") or []):
                 if not isinstance(eo, dict):
                     continue
                 title = (eo.get("title") or "").strip()
                 if not title:
                     continue
-                key = title.lower()
-                if key in outcome_id_by_title:
-                    continue  # dedupe against existing
-                eo_id = _uuid()
-                await db.expected_outcomes.insert_one({
-                    "id": eo_id, "user_id": user_id, "goal_id": target_id,
+                key_lower = title.lower()
+                if key_lower in outcome_id_by_title:
+                    # Title-dedupe against existing.
+                    continue
+                key = _materialization_key(conversation_id, message_id, "expected_outcome", str(idx))
+                doc = {
+                    "id": _materialized_id(key), "user_id": user_id, "goal_id": target_id,
                     "title": title,
                     "target_value": (eo.get("target_value") or "").strip(),
                     "current_value": "",
@@ -769,13 +739,17 @@ async def _materialize_proposal(
                     "deadline": _iso_date(eo.get("deadline")) or "",
                     "status": "active", "notes": "",
                     "outcome_type": eo.get("outcome_type") or "generic",
+                    "planning_materialization_key": key,
                     "created_at": now, "updated_at": now,
-                })
-                outcome_id_by_title[key] = eo_id
-                created_outcomes.append(eo_id)
+                }
+                stored, was_new = await _upsert_artifact(db, "expected_outcomes", user_id, key, doc)
+                outcome_id_by_title[key_lower] = stored["id"]
+                created_outcomes.append(stored["id"])
+                if was_new:
+                    inserted_this_attempt["expected_outcomes"].append(stored["id"])
 
-        # 3. Create new tasks.
-        for tk in proposal.get("tasks") or []:
+        # 3. Tasks.
+        for idx, tk in enumerate(proposal.get("tasks") or []):
             if not isinstance(tk, dict):
                 continue
             title = (tk.get("title") or "").strip()
@@ -788,11 +762,9 @@ async def _materialize_proposal(
             if commitment_type not in VALID_COMMITMENT_TYPES:
                 commitment_type = "postponable"
             due = _iso_date(tk.get("due_date")) or ""
-
             expected_outcome_id: Optional[str] = None
             project_id: Optional[str] = None
             origin = "standalone"
-
             if target_type == "goal":
                 eo_title = (tk.get("expected_outcome_title") or "").strip().lower()
                 if eo_title and eo_title in outcome_id_by_title:
@@ -801,15 +773,13 @@ async def _materialize_proposal(
                 elif outcome_id_by_title:
                     expected_outcome_id = next(iter(outcome_id_by_title.values()))
                     origin = "expected_outcome"
-            else:  # project
+            else:
                 project_id = target_id
                 origin = "project"
-
-            task_id = _uuid()
-            await db.tasks.insert_one({
-                "id": task_id, "user_id": user_id,
-                "title": title,
-                "due_date": due,
+            key = _materialization_key(conversation_id, message_id, "task", str(idx))
+            doc = {
+                "id": _materialized_id(key), "user_id": user_id,
+                "title": title, "due_date": due,
                 "priority": priority, "status": "todo",
                 "notes": (tk.get("notes") or "").strip(),
                 "origin": origin,
@@ -818,12 +788,16 @@ async def _materialize_proposal(
                 "component_id": None,
                 "assigned_to_type": "self", "assigned_to_name": "", "assigned_to_phone": "",
                 "commitment_type": commitment_type,
+                "planning_materialization_key": key,
                 "created_at": now, "updated_at": now,
-            })
-            created_tasks.append(task_id)
+            }
+            stored, was_new = await _upsert_artifact(db, "tasks", user_id, key, doc)
+            created_tasks.append(stored["id"])
+            if was_new:
+                inserted_this_attempt["tasks"].append(stored["id"])
 
-        # 4. Create new time commitments (life patterns).
-        for tc in proposal.get("time_commitments") or []:
+        # 4. Time commitments.
+        for idx, tc in enumerate(proposal.get("time_commitments") or []):
             if not isinstance(tc, dict):
                 continue
             title = (tc.get("title") or "").strip()
@@ -843,28 +817,25 @@ async def _materialize_proposal(
             flex = (tc.get("flexibility") or "flexible").strip().lower()
             if flex not in VALID_TC_FLEX:
                 flex = "flexible"
-            tc_id = _uuid()
-            await db.time_commitments.insert_one({
-                "id": tc_id, "user_id": user_id,
-                "title": title,
-                "day_of_week": day,
-                "start_time": start,
-                "end_time": end,
-                "commitment_type": ctype,
-                "flexibility": flex,
-                "effective_from": today,
-                "effective_until": None,
-                "source_type": "system",
-                "source_id": None,
+            key = _materialization_key(conversation_id, message_id, "time_commitment", str(idx))
+            doc = {
+                "id": _materialized_id(key), "user_id": user_id,
+                "title": title, "day_of_week": day,
+                "start_time": start, "end_time": end,
+                "commitment_type": ctype, "flexibility": flex,
+                "effective_from": today, "effective_until": None,
+                "source_type": "system", "source_id": None,
                 "notes": (tc.get("notes") or "").strip(),
+                "planning_materialization_key": key,
                 "created_at": now, "updated_at": now,
-            })
-            created_time_commitments.append(tc_id)
+            }
+            stored, was_new = await _upsert_artifact(db, "time_commitments", user_id, key, doc)
+            created_time_commitments.append(stored["id"])
+            if was_new:
+                inserted_this_attempt["time_commitments"].append(stored["id"])
 
-        # 5. One-off check-ins.
+        # 5. Check-ins.
         async def _resolve_checkin_anchor(entry: dict) -> Optional[Dict[str, Any]]:
-            """Return a dict with the anchor fields set correctly for the given
-            check-in entry, or None if it should be skipped."""
             ci_type = (entry.get("type") or "").lower()
             if ci_type not in VALID_CHECKIN_TYPES:
                 return None
@@ -873,7 +844,6 @@ async def _materialize_proposal(
                     "project_id": None, "task_id": None,
                     "outcome_type": None}
             if ci_type == "goal":
-                # Resolve expected outcome (from newly-created or existing).
                 eo_title = (entry.get("expected_outcome_title") or "").strip().lower()
                 eo_id: Optional[str] = None
                 if eo_title and eo_title in outcome_id_by_title:
@@ -881,7 +851,7 @@ async def _materialize_proposal(
                 elif target_type == "goal" and outcome_id_by_title:
                     eo_id = next(iter(outcome_id_by_title.values()))
                 if not eo_id:
-                    return None  # no valid anchor
+                    return None
                 eo = await db.expected_outcomes.find_one(
                     {"id": eo_id, "user_id": user_id}, {"_id": 0},
                 )
@@ -898,10 +868,9 @@ async def _materialize_proposal(
                 if not p:
                     return None
                 base["project_id"] = p["id"]
-            # life type: no anchor required
             return base
 
-        for entry in proposal.get("checkins") or []:
+        for idx, entry in enumerate(proposal.get("checkins") or []):
             if not isinstance(entry, dict):
                 continue
             title = (entry.get("title") or "").strip()
@@ -912,32 +881,27 @@ async def _materialize_proposal(
             anchor = await _resolve_checkin_anchor(entry)
             if not anchor:
                 continue
-            ci_id = _uuid()
-            await db.checkins.insert_one({
-                "id": ci_id, "user_id": user_id,
-                "type": anchor["type"],
-                "title": title,
-                "date": date,
-                "time": time_hhmm,
-                "notes": (entry.get("notes") or "").strip(),
-                "attachment": "",
+            key = _materialization_key(conversation_id, message_id, "checkin", str(idx))
+            doc = {
+                "id": _materialized_id(key), "user_id": user_id,
+                "type": anchor["type"], "title": title,
+                "date": date, "time": time_hhmm,
+                "notes": (entry.get("notes") or "").strip(), "attachment": "",
                 "expected_outcome_id": anchor["expected_outcome_id"],
-                "goal_id": anchor["goal_id"],
-                "project_id": anchor["project_id"],
-                "task_id": None,
-                "component_id": None,
-                "follow_up_task_id": None,
-                "source": "system",
-                "outcome_type": anchor["outcome_type"],
-                "data": {},
-                "money_spent": None,
-                "money_currency": None,
+                "goal_id": anchor["goal_id"], "project_id": anchor["project_id"],
+                "task_id": None, "component_id": None, "follow_up_task_id": None,
+                "source": "system", "outcome_type": anchor["outcome_type"],
+                "data": {}, "money_spent": None, "money_currency": None,
+                "planning_materialization_key": key,
                 "created_at": now, "updated_at": now,
-            })
-            created_checkins.append(ci_id)
+            }
+            stored, was_new = await _upsert_artifact(db, "checkins", user_id, key, doc)
+            created_checkins.append(stored["id"])
+            if was_new:
+                inserted_this_attempt["checkins"].append(stored["id"])
 
-        # 6. Recurrence expansion → daily check-ins per rule.
-        for rule in proposal.get("checkin_recurrences") or []:
+        # 6. Recurring check-ins.
+        for rule_index, rule in enumerate(proposal.get("checkin_recurrences") or []):
             if not isinstance(rule, dict):
                 continue
             title = (rule.get("title") or "").strip()
@@ -951,197 +915,28 @@ async def _materialize_proposal(
                 continue
             dows = rule.get("days_of_week") or None
             if isinstance(dows, list) and not dows:
-                dows = None  # empty list means every day
+                dows = None
             for d in _iter_dates(start, end, dows):
-                ci_id = _uuid()
-                await db.checkins.insert_one({
-                    "id": ci_id, "user_id": user_id,
-                    "type": anchor["type"],
-                    "title": title,
-                    "date": d,
-                    "time": time_hhmm,
-                    "notes": (rule.get("notes") or "").strip(),
-                    "attachment": "",
+                key = _materialization_key(conversation_id, message_id, "recurring_checkin", f"{rule_index}:{d}")
+                doc = {
+                    "id": _materialized_id(key), "user_id": user_id,
+                    "type": anchor["type"], "title": title,
+                    "date": d, "time": time_hhmm,
+                    "notes": (rule.get("notes") or "").strip(), "attachment": "",
                     "expected_outcome_id": anchor["expected_outcome_id"],
-                    "goal_id": anchor["goal_id"],
-                    "project_id": anchor["project_id"],
-                    "task_id": None,
-                    "component_id": None,
-                    "follow_up_task_id": None,
-                    "source": "system",
-                    "outcome_type": anchor["outcome_type"],
-                    "data": {},
-                    "money_spent": None,
-                    "money_currency": None,
+                    "goal_id": anchor["goal_id"], "project_id": anchor["project_id"],
+                    "task_id": None, "component_id": None, "follow_up_task_id": None,
+                    "source": "system", "outcome_type": anchor["outcome_type"],
+                    "data": {}, "money_spent": None, "money_currency": None,
+                    "planning_materialization_key": key,
                     "created_at": now, "updated_at": now,
-                })
-                created_checkins.append(ci_id)
+                }
+                stored, was_new = await _upsert_artifact(db, "checkins", user_id, key, doc)
+                created_checkins.append(stored["id"])
+                if was_new:
+                    inserted_this_attempt["checkins"].append(stored["id"])
 
-        # 7. Apply postpone/cancel actions — NEVER on exclusive items,
-        #    NEVER on the current target.
-        for change in proposal.get("existing_item_changes") or []:
-            if not isinstance(change, dict):
-                continue
-            kind = (change.get("kind") or "").lower()
-            item_id = (change.get("id") or "").strip()
-            action = (change.get("action") or "").lower()
-            if kind not in ("goal", "project", "task") or not item_id or action not in ("postpone", "cancel"):
-                continue
-            if kind == target_type and item_id == target_id:
-                continue
-            coll = {"goal": "goals", "project": "projects", "task": "tasks"}[kind]
-            doc = await db[coll].find_one({"id": item_id, "user_id": user_id}, {"_id": 0})
-            if not doc:
-                continue
-            if _is_exclusive(doc):
-                continue
-            patch: Dict[str, Any] = {"updated_at": now}
-            if action == "postpone":
-                new_due = _iso_date(change.get("new_due_date"))
-                if not new_due:
-                    continue
-                if kind == "goal":
-                    patch["deadline"] = new_due; patch["status"] = "paused"
-                elif kind == "project":
-                    patch["target_end_date"] = new_due; patch["status"] = "paused"
-                else:
-                    patch["due_date"] = new_due
-            else:
-                patch["status"] = "cancelled" if kind == "task" else "abandoned"
-            await db[coll].update_one({"id": item_id, "user_id": user_id}, {"$set": patch})
-            applied_existing_changes.append({"kind": kind, "id": item_id, "action": action})
-
-        # 8. Free-form patches on existing items — NEVER exclusive, NEVER
-        #    the current target for destructive status flips.
-        for upd in proposal.get("existing_item_updates") or []:
-            if not isinstance(upd, dict):
-                continue
-            kind = (upd.get("kind") or "").lower()
-            item_id = (upd.get("id") or "").strip()
-            patch_in = upd.get("patch") or {}
-            if kind not in ("goal", "project", "task") or not item_id or not isinstance(patch_in, dict):
-                continue
-            coll = {"goal": "goals", "project": "projects", "task": "tasks"}[kind]
-            doc = await db[coll].find_one({"id": item_id, "user_id": user_id}, {"_id": 0})
-            if not doc:
-                continue
-            if _is_exclusive(doc):
-                continue
-            patch: Dict[str, Any] = {}
-            for k, v in patch_in.items():
-                if k not in VALID_UPDATE_FIELDS or not isinstance(v, (str, int, float)):
-                    continue
-                v = str(v).strip() if not isinstance(v, str) else v.strip()
-                if not v:
-                    continue
-                if k == "priority":
-                    if v.lower() in VALID_PRIORITIES:
-                        patch["priority"] = v.lower()
-                elif k == "status":
-                    if kind == "task" and v.lower() in VALID_TASK_STATUSES:
-                        patch["status"] = v.lower()
-                    elif kind == "goal" and v.lower() in VALID_GOAL_STATUSES:
-                        patch["status"] = v.lower()
-                    elif kind == "project" and v.lower() in VALID_PROJECT_STATUSES:
-                        patch["status"] = v.lower()
-                elif k == "due_date":
-                    if kind == "task":
-                        d = _iso_date(v)
-                        if d:
-                            patch["due_date"] = d
-                elif k == "deadline":
-                    if kind == "goal":
-                        d = _iso_date(v)
-                        if d:
-                            patch["deadline"] = d
-                    elif kind == "project":
-                        d = _iso_date(v)
-                        if d:
-                            patch["target_end_date"] = d
-                elif k == "title":
-                    patch["title"] = v[:200]
-                elif k == "notes":
-                    field = "description" if kind == "project" else "notes"
-                    patch[field] = v[:4000]
-            if patch:
-                patch["updated_at"] = now
-                await db[coll].update_one({"id": item_id, "user_id": user_id}, {"$set": patch})
-                applied_existing_updates.append({"kind": kind, "id": item_id, "keys": sorted(patch.keys())})
-
-        # 9. Consolidations — server picks survivor by richness.
-        for cons in proposal.get("consolidations") or []:
-            if not isinstance(cons, dict):
-                continue
-            kind = (cons.get("kind") or "").lower()
-            ids = cons.get("candidate_ids") or []
-            if kind not in ("goal", "project") or not isinstance(ids, list) or len(ids) < 2:
-                continue
-            coll = "goals" if kind == "goal" else "projects"
-            candidates = await db[coll].find(
-                {"id": {"$in": list({str(i) for i in ids if i})}, "user_id": user_id},
-                {"_id": 0},
-            ).to_list(length=20)
-            candidates = [c for c in candidates if not _is_exclusive(c)]
-            if len(candidates) < 2:
-                continue
-            # Score each; higher wins, tiebreak by older created_at.
-            scored: List[Tuple[int, str, dict]] = []
-            for c in candidates:
-                s = await _richness_score(db, user_id, kind, c)
-                scored.append((s, c.get("created_at", ""), c))
-            scored.sort(key=lambda x: (-x[0], x[1]))
-            survivor = scored[0][2]
-            losers = [c for _, _, c in scored[1:]]
-            merged_notes = (survivor.get("notes") or "").strip()
-            merged_desc = (survivor.get("description") or "").strip() if kind == "project" else None
-            for loser in losers:
-                # Reparent child docs.
-                if kind == "goal":
-                    await db.expected_outcomes.update_many(
-                        {"goal_id": loser["id"], "user_id": user_id},
-                        {"$set": {"goal_id": survivor["id"], "updated_at": now}},
-                    )
-                    await db.checkins.update_many(
-                        {"goal_id": loser["id"], "user_id": user_id},
-                        {"$set": {"goal_id": survivor["id"], "updated_at": now}},
-                    )
-                    # Tasks reference EOs which we've reparented above — no
-                    # direct change needed.
-                else:  # project
-                    await db.tasks.update_many(
-                        {"project_id": loser["id"], "user_id": user_id},
-                        {"$set": {"project_id": survivor["id"], "updated_at": now}},
-                    )
-                    await db.checkins.update_many(
-                        {"project_id": loser["id"], "user_id": user_id},
-                        {"$set": {"project_id": survivor["id"], "updated_at": now}},
-                    )
-                # Merge notes / description if survivor was empty and loser had content.
-                loser_notes = (loser.get("notes") or "").strip()
-                if loser_notes and loser_notes not in merged_notes:
-                    merged_notes = (merged_notes + "\n\n" + loser_notes).strip() if merged_notes else loser_notes
-                if kind == "project":
-                    ld = (loser.get("description") or "").strip()
-                    if ld and ld not in (merged_desc or ""):
-                        merged_desc = (merged_desc + "\n\n" + ld).strip() if merged_desc else ld
-                # Delete the loser doc.
-                await db[coll].delete_one({"id": loser["id"], "user_id": user_id})
-            # Persist merged notes/description onto survivor.
-            surv_patch = {"updated_at": now}
-            if merged_notes and merged_notes != (survivor.get("notes") or ""):
-                surv_patch["notes"] = merged_notes[:8000]
-            if kind == "project" and merged_desc and merged_desc != (survivor.get("description") or ""):
-                surv_patch["description"] = merged_desc[:8000]
-            await db[coll].update_one({"id": survivor["id"], "user_id": user_id}, {"$set": surv_patch})
-            applied_consolidations.append({
-                "kind": kind,
-                "survivor_id": survivor["id"],
-                "survivor_title": survivor.get("title"),
-                "merged_ids": [l["id"] for l in losers],
-                "score": scored[0][0],
-            })
-
-        # 10. Cadence + target update (+ commitment_type on target).
+        # 7. Cadence + target updates (deadline / notes / commitment_type only).
         cadence = proposal.get("checkin_cadence")
         if isinstance(cadence, str) and cadence.strip().lower() in VALID_CADENCES:
             target_updates["checkin_cadence"] = cadence.strip().lower()
@@ -1167,29 +962,23 @@ async def _materialize_proposal(
     except HTTPException:
         raise
     except Exception as exc:
-        # Compensating cleanup for the most easily-reversible artifacts.
-        # Notes: reparenting done inside consolidations is NOT rolled back
-        # since a partial failure there would leave the DB inconsistent
-        # anyway; this is best-effort MVP behaviour.
-        for tid in created_tasks:
+        # Best-effort compensation — only for records inserted THIS attempt.
+        for tid in inserted_this_attempt["tasks"]:
             await db.tasks.delete_one({"id": tid, "user_id": user_id})
-        for eid in created_outcomes:
+        for eid in inserted_this_attempt["expected_outcomes"]:
             await db.expected_outcomes.delete_one({"id": eid, "user_id": user_id})
-        for tcid in created_time_commitments:
+        for tcid in inserted_this_attempt["time_commitments"]:
             await db.time_commitments.delete_one({"id": tcid, "user_id": user_id})
-        for cid in created_checkins:
+        for cid in inserted_this_attempt["checkins"]:
             await db.checkins.delete_one({"id": cid, "user_id": user_id})
         raise HTTPException(status_code=500,
-                            detail=f"Failed to apply proposal: {type(exc).__name__}: {exc}")
+                            detail=f"Failed to apply proposal: {type(exc).__name__}")
 
     return {
         "created_outcomes": created_outcomes,
         "created_tasks": created_tasks,
         "created_time_commitments": created_time_commitments,
         "created_checkins": created_checkins,
-        "applied_existing_changes": applied_existing_changes,
-        "applied_existing_updates": applied_existing_updates,
-        "applied_consolidations": applied_consolidations,
         "target_updated": bool(target_updates),
     }
 
@@ -1237,26 +1026,32 @@ async def post_message(
         "content": body.content.strip(),
         "created_at": now,
     }
-    conv["messages"].append(user_msg)
-
-    # If this is the very first user turn and it's short, seed a warm opener
-    # via a brief invisible priming prompt embedded in the system context —
-    # already handled inside _SYSTEM_PROMPT.
-
-    raw = await _call_llm(conv["messages"], body.content.strip(), ctx)
+    # LLM call uses in-memory copy of history including this user_msg.
+    conv_messages_for_llm = list(conv.get("messages") or []) + [user_msg]
+    raw = await _call_llm(conv_messages_for_llm, body.content.strip(), ctx)
     prose, proposal = _split_message(raw)
     if not prose and proposal:
         prose = proposal.get("summary") or "Here are some proposed changes for your plan."
-
     asst_msg = {
         "id": _uuid(), "role": "assistant",
-        "content": raw,  # store the raw (with HYMN_PROPOSAL) so we can re-parse
+        "content": raw,
         "proposal": proposal,
         "created_at": _now(),
     }
-    conv["messages"].append(asst_msg)
-    await _save_conversation(db, conv)
-    return _public_conversation(conv)
+
+    # Batch 2B6 — atomic $push instead of a whole-document replace so a
+    # concurrent write can't erase materialization state.
+    r = await db.plan_conversations.update_one(
+        {"id": conv["id"], "user_id": current_user["id"]},
+        {"$push": {"messages": {"$each": [user_msg, asst_msg]}},
+         "$set": {"updated_at": _now()}},
+    )
+    if r.modified_count == 0:
+        raise HTTPException(status_code=409, detail="Conversation changed; reload and try again.")
+    fresh = await db.plan_conversations.find_one(
+        {"id": conv["id"], "user_id": current_user["id"]}, {"_id": 0},
+    )
+    return _public_conversation(fresh or conv)
 
 
 @planning_router.post("/{target_type}/{target_id}/reset")
@@ -1267,9 +1062,23 @@ async def reset_conversation(
     db = get_db()
     _require(target_type in TARGET_TYPES, f"target_type must be one of {list(TARGET_TYPES)}")
     await _read_target(db, current_user["id"], target_type, target_id)
-    await db.plan_conversations.delete_many(
-        {"user_id": current_user["id"], "target_type": target_type, "target_id": target_id},
-    )
+    # Batch 2B6 — refuse to delete while a materialization is in flight.
+    r = await db.plan_conversations.delete_one({
+        "user_id": current_user["id"],
+        "target_type": target_type,
+        "target_id": target_id,
+        "messages": {"$not": {"$elemMatch": {"materialization_state": "applying"}}},
+    })
+    if r.deleted_count == 0:
+        still = await db.plan_conversations.find_one(
+            {"user_id": current_user["id"], "target_type": target_type, "target_id": target_id},
+            {"_id": 0, "id": 1},
+        )
+        if still:
+            raise HTTPException(
+                status_code=409,
+                detail="A proposal is currently being applied. Try again after it finishes.",
+            )
     conv = await _get_or_create_conversation(db, current_user["id"], target_type, target_id)
     return _public_conversation(conv)
 
@@ -1286,57 +1095,136 @@ async def materialize(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
     target_msg: Optional[dict] = None
-    for m in conv["messages"]:
+    for m in conv.get("messages") or []:
         if m.get("id") == body.message_id:
             target_msg = m
             break
     if not target_msg:
         raise HTTPException(status_code=404, detail="Message not found")
     if target_msg.get("materialized_at"):
-        raise HTTPException(status_code=400, detail="This proposal is already applied.")
+        # Already applied — return stored result idempotently.
+        return {
+            "conversation": _public_conversation(conv),
+            "result": target_msg.get("materialization_result") or {},
+        }
     proposal = target_msg.get("proposal")
     if not proposal:
         raise HTTPException(status_code=400, detail="This message has no proposal to apply.")
 
-    result = await _materialize_proposal(
-        db, current_user["id"], conv["target_type"], conv["target_id"], proposal,
+    # Batch 2B6 — atomic claim on the embedded message.
+    claim_id = _uuid()
+    claim_started_at = _now()
+    claim = await db.plan_conversations.update_one(
+        {
+            "id": conversation_id,
+            "user_id": current_user["id"],
+            "messages": {"$elemMatch": {
+                "id": body.message_id,
+                "materialized_at": {"$exists": False},
+                "$or": [
+                    {"materialization_state": {"$exists": False}},
+                    {"materialization_state": "failed"},
+                ],
+            }},
+        },
+        {
+            "$set": {
+                "messages.$.materialization_state": "applying",
+                "messages.$.materialization_claim_id": claim_id,
+                "messages.$.materialization_started_at": claim_started_at,
+                "updated_at": _now(),
+            },
+        },
     )
-    target_msg["materialized_at"] = _now()
-    bits: List[str] = []
-    if result["created_outcomes"]:
-        n = len(result["created_outcomes"])
-        bits.append(f"{n} outcome{'s' if n != 1 else ''}")
-    if result["created_tasks"]:
-        n = len(result["created_tasks"])
-        bits.append(f"{n} task{'s' if n != 1 else ''}")
-    if result.get("created_checkins"):
-        n = len(result["created_checkins"])
-        bits.append(f"{n} check-in{'s' if n != 1 else ''}")
-    if result.get("created_time_commitments"):
-        n = len(result["created_time_commitments"])
-        bits.append(f"{n} time commitment{'s' if n != 1 else ''}")
-    if result.get("applied_existing_updates"):
-        n = len(result["applied_existing_updates"])
-        bits.append(f"updated {n} item{'s' if n != 1 else ''}")
-    if result.get("applied_existing_changes"):
-        n_post = sum(1 for c in result["applied_existing_changes"] if c["action"] == "postpone")
-        n_cxl = sum(1 for c in result["applied_existing_changes"] if c["action"] == "cancel")
-        if n_post:
-            bits.append(f"postponed {n_post}")
-        if n_cxl:
-            bits.append(f"cancelled {n_cxl}")
-    if result.get("applied_consolidations"):
-        n = len(result["applied_consolidations"])
-        merged = sum(len(c["merged_ids"]) for c in result["applied_consolidations"])
-        bits.append(f"consolidated {merged} duplicate{'s' if merged != 1 else ''} in {n} group{'s' if n != 1 else ''}")
-    target_msg["materialized_summary"] = (
-        "Added " + ", ".join(bits) + "." if bits else "Applied."
-    )
-    await _save_conversation(db, conv)
-    return {
-        "conversation": _public_conversation(conv),
-        "result": result,
-    }
+    if claim.modified_count == 0:
+        fresh = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        if fresh:
+            for m in fresh.get("messages") or []:
+                if m.get("id") == body.message_id:
+                    if m.get("materialization_state") == "applied" and m.get("materialized_at"):
+                        return {
+                            "conversation": _public_conversation(fresh),
+                            "result": m.get("materialization_result") or {},
+                        }
+                    if m.get("materialization_state") == "applying":
+                        raise HTTPException(status_code=409, detail="This proposal is already being applied.")
+                    break
+        raise HTTPException(status_code=409, detail="This proposal could not be claimed for application.")
+
+    try:
+        result = await _materialize_proposal(
+            db, current_user["id"], conv["target_type"], conv["target_id"], proposal,
+            conversation_id=conversation_id, message_id=body.message_id,
+        )
+        bits: List[str] = []
+        if result.get("created_outcomes"):
+            n = len(result["created_outcomes"]); bits.append(f"{n} outcome{'s' if n != 1 else ''}")
+        if result.get("created_tasks"):
+            n = len(result["created_tasks"]); bits.append(f"{n} task{'s' if n != 1 else ''}")
+        if result.get("created_checkins"):
+            n = len(result["created_checkins"]); bits.append(f"{n} check-in{'s' if n != 1 else ''}")
+        if result.get("created_time_commitments"):
+            n = len(result["created_time_commitments"]); bits.append(f"{n} time commitment{'s' if n != 1 else ''}")
+        summary = "Added " + ", ".join(bits) + "." if bits else "Applied."
+
+        finalise = await db.plan_conversations.update_one(
+            {
+                "id": conversation_id,
+                "user_id": current_user["id"],
+                "messages": {"$elemMatch": {
+                    "id": body.message_id,
+                    "materialization_claim_id": claim_id,
+                }},
+            },
+            {
+                "$set": {
+                    "messages.$.materialization_state": "applied",
+                    "messages.$.materialized_at": _now(),
+                    "messages.$.materialized_summary": summary,
+                    "messages.$.materialization_result": result,
+                    "updated_at": _now(),
+                },
+                "$unset": {
+                    "messages.$.materialization_claim_id": "",
+                    "messages.$.materialization_started_at": "",
+                    "messages.$.materialization_error": "",
+                },
+            },
+        )
+        if finalise.modified_count == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Proposal application completed but its conversation state could not be finalized.",
+            )
+        fresh = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        return {"conversation": _public_conversation(fresh or conv), "result": result}
+    except Exception as exc:
+        await db.plan_conversations.update_one(
+            {
+                "id": conversation_id,
+                "user_id": current_user["id"],
+                "messages": {"$elemMatch": {
+                    "id": body.message_id,
+                    "materialization_claim_id": claim_id,
+                }},
+            },
+            {
+                "$set": {
+                    "messages.$.materialization_state": "failed",
+                    "messages.$.materialization_error": type(exc).__name__,
+                    "updated_at": _now(),
+                },
+                "$unset": {
+                    "messages.$.materialization_claim_id": "",
+                    "messages.$.materialization_started_at": "",
+                },
+            },
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -1350,3 +1238,30 @@ async def ensure_planning_indexes(database) -> None:
         [("user_id", 1), ("target_type", 1), ("target_id", 1)], unique=True,
     )
     await database.plan_conversations.create_index([("user_id", 1), ("updated_at", -1)])
+    # Batch 2B6 — per-collection partial unique indexes on the
+    # materialization key so retries cannot create duplicates even if
+    # the app-level upsert loses the race with a concurrent writer.
+    await database.expected_outcomes.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="expected_outcomes_planning_mat_key_uniq",
+    )
+    await database.tasks.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="tasks_planning_mat_key_uniq",
+    )
+    await database.time_commitments.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="time_commitments_planning_mat_key_uniq",
+    )
+    await database.checkins.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="checkins_planning_mat_key_uniq",
+    )
