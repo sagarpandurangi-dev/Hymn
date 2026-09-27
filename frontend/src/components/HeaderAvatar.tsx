@@ -8,7 +8,7 @@ type Props = { testID?: string };
 export default function HeaderAvatar({ testID = "header-avatar" }: Props) {
   const router = useRouter();
   const { user } = useAuth();
-  const initial = (user?.email || "?").trim().charAt(0).toUpperCase();
+  const initial = ((user?.name?.trim() || user?.email || "?").charAt(0) || "?").toUpperCase();
 
   return (
     <Pressable

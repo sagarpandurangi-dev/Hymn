@@ -10,6 +10,7 @@ export type PostCreationDecompositionPreference =
 export type User = {
   id: string;
   email: string;
+  name?: string | null;
   portfolio_setup_completed_at?: string | null;
   portfolio_reporting_currency?: string | null;
   post_creation_decomposition_preference?: PostCreationDecompositionPreference;
@@ -19,9 +20,10 @@ type AuthState = {
   user: User | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string, securityQuestion: string, securityAnswer: string) => Promise<void>;
+  signUp: (name: string, email: string, password: string, securityQuestion: string, securityAnswer: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  updateName: (name: string) => Promise<User>;
   setPostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) => Promise<User>;
 };
 
@@ -60,8 +62,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const signUp = useCallback(
-    async (email: string, password: string, securityQuestion: string, securityAnswer: string) => {
+    async (name: string, email: string, password: string, securityQuestion: string, securityAnswer: string) => {
       const res = await api.signup({
+        name,
         email,
         password,
         security_question: securityQuestion,
@@ -92,6 +95,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
+  const updateName = useCallback(async (name: string): Promise<User> => {
+    const updated = await api.updateProfile(name);
+    setUser(updated);
+    return updated;
+  }, []);
+
   const setPostCreationDecompositionPreference = useCallback(
     async (preference: PostCreationDecompositionPreference): Promise<User> => {
       const updated = await api.updatePostCreationDecompositionPreference(preference);
@@ -102,7 +111,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   return (
-    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut, refreshUser, setPostCreationDecompositionPreference }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut, refreshUser, updateName, setPostCreationDecompositionPreference }}>{children}</AuthContext.Provider>
   );
 };
 

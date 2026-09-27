@@ -17,6 +17,7 @@ import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
 export default function SignUpScreen() {
   const { signUp } = useAuth();
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [question, setQuestion] = useState("");
@@ -26,7 +27,7 @@ export default function SignUpScreen() {
 
   const onSubmit = async () => {
     setError(null);
-    if (!email || !password || !question || !answer) {
+    if (!name || !email || !password || !question || !answer) {
       setError("All fields are required.");
       return;
     }
@@ -36,7 +37,7 @@ export default function SignUpScreen() {
     }
     setBusy(true);
     try {
-      await signUp(email.trim().toLowerCase(), password, question.trim(), answer.trim());
+      await signUp(name.trim(), email.trim().toLowerCase(), password, question.trim(), answer.trim());
     } catch (e: any) {
       setError(e?.message || "Sign up failed");
     } finally {
@@ -52,6 +53,18 @@ export default function SignUpScreen() {
             <Text style={styles.brand}>Hymn.</Text>
             <Text style={styles.tagline}>Begin your record.</Text>
           </View>
+
+          <Text style={styles.label}>Name</Text>
+          <TextInput
+            style={styles.input}
+            value={name}
+            onChangeText={setName}
+            placeholder="Your name"
+            placeholderTextColor={colors.onSurfaceTertiary}
+            autoCapitalize="words"
+            autoCorrect={false}
+            testID="sign-up-name-input"
+          />
 
           <Text style={styles.label}>Email</Text>
           <TextInput

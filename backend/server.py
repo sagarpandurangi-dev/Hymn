@@ -42,10 +42,15 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 # ---------- Models ----------
 class SignUpRequest(BaseModel):
+    name: str
     email: EmailStr
     password: str = Field(min_length=6)
     security_question: str = Field(min_length=1)
     security_answer: str = Field(min_length=1)
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: str
 
 
 class LoginRequest(BaseModel):
@@ -69,6 +74,7 @@ POST_CREATION_DECOMPOSITION_PREFERENCES = ("always_ask", "always_decompose", "al
 class UserResponse(BaseModel):
     id: str
     email: EmailStr
+    name: Optional[str] = None
     portfolio_setup_completed_at: Optional[str] = None
     portfolio_reporting_currency: Optional[str] = None
     post_creation_decomposition_preference: str = "always_ask"
@@ -529,8 +535,41 @@ def hash_password(p: str) -> str:
     return pwd_context.hash(p)
 
 
-def verify_password(p: str, h: str) -> bool:
-    return pwd_context.verify(p, h)
+def verify_password(password: str, stored_hash) -> bool:
+    """Batch 2B5 — fail-closed hash verification.
+
+    A malformed / missing / non-string stored hash used to reach
+    Passlib and raise ``ValueError`` / ``TypeError`` at request time.
+    We now short-circuit those cases and return ``False`` (same
+    result as an incorrect password) so the caller can surface the
+    normal generic credentials error.
+    """
+    if not isinstance(stored_hash, str) or not stored_hash:
+        return False
+    try:
+        return pwd_context.verify(password, stored_hash)
+    except (ValueError, TypeError):
+        return False
+
+
+def _normalise_account_name(value: str) -> str:
+    """Canonical name normaliser used by signup and profile update.
+
+    * Collapse every whitespace run into a single space.
+    * Strip leading and trailing whitespace.
+    * Reject empty / >100 chars with the exact 400 the spec requires.
+    * Case and Unicode characters are preserved as-is.
+    """
+    if not isinstance(value, str):
+        raise HTTPException(
+            status_code=400, detail="Name must be between 1 and 100 characters",
+        )
+    cleaned = " ".join(value.split())
+    if not (1 <= len(cleaned) <= 100):
+        raise HTTPException(
+            status_code=400, detail="Name must be between 1 and 100 characters",
+        )
+    return cleaned
 
 
 def create_access_token(subject: str) -> str:
@@ -553,12 +592,20 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     # until its recorded ``expires_at`` elapses.
     session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if session:
+        # Batch 2B5 — fail closed: only sessions with a valid future
+        # ``expires_at`` and a non-empty ``user_id`` may authenticate.
+        # Missing / malformed values behave as 401 without any
+        # expiry extension or session write.
         expires_at = session.get("expires_at")
-        if isinstance(expires_at, datetime):
-            exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
-            if exp < datetime.now(timezone.utc):
-                raise credentials_exc
-        user = await db.users.find_one({"id": session["user_id"]})
+        if not isinstance(expires_at, datetime):
+            raise credentials_exc
+        exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+        if exp <= datetime.now(timezone.utc):
+            raise credentials_exc
+        session_user_id = session.get("user_id")
+        if not isinstance(session_user_id, str) or not session_user_id:
+            raise credentials_exc
+        user = await db.users.find_one({"id": session_user_id})
         if not user:
             raise credentials_exc
         return user
@@ -577,9 +624,19 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 
 
 def user_to_response(u: dict) -> UserResponse:
+    # Batch 2B5 — return the canonical stored name. Never derive a
+    # name from the email; never fall back to a provider-specific
+    # display name.
+    stored_name = u.get("name")
+    resolved_name: Optional[str]
+    if isinstance(stored_name, str) and stored_name.strip():
+        resolved_name = stored_name.strip()
+    else:
+        resolved_name = None
     return UserResponse(
         id=u["id"],
         email=u["email"],
+        name=resolved_name,
         portfolio_setup_completed_at=u.get("portfolio_setup_completed_at"),
         portfolio_reporting_currency=u.get("portfolio_reporting_currency"),
         post_creation_decomposition_preference=u.get(
@@ -778,11 +835,14 @@ async def signup(body: SignUpRequest):
     existing = await db.users.find_one({"email": email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
+    # Batch 2B5 — canonical display name.
+    name = _normalise_account_name(body.name)
     user_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     user_doc = {
         "id": user_id,
         "email": email,
+        "name": name,
         "hashed_password": hash_password(body.password),
         "security_question": body.security_question.strip(),
         "hashed_security_answer": hash_password(body.security_answer.strip().lower()),
@@ -793,7 +853,7 @@ async def signup(body: SignUpRequest):
     token = create_access_token(user_id)
     return TokenResponse(
         access_token=token,
-        user=UserResponse(id=user_id, email=email),
+        user=user_to_response(user_doc),
     )
 
 
@@ -833,10 +893,14 @@ async def get_security_question(payload: dict):
 async def forgot_password(body: ForgotPasswordRequest):
     email = body.email.lower().strip()
     user = await db.users.find_one({"email": email})
+    invalid = HTTPException(status_code=400, detail="Invalid email or security answer")
     if not user:
-        raise HTTPException(status_code=400, detail="Invalid email or security answer")
-    if not verify_password(body.security_answer.strip().lower(), user["hashed_security_answer"]):
-        raise HTTPException(status_code=400, detail="Invalid email or security answer")
+        raise invalid
+    # Batch 2B5 — missing / empty / non-string / malformed hashes now
+    # behave exactly like an incorrect answer via the hardened
+    # verify_password helper.
+    if not verify_password(body.security_answer.strip().lower(), user.get("hashed_security_answer")):
+        raise invalid
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {
@@ -850,6 +914,24 @@ async def forgot_password(body: ForgotPasswordRequest):
 @api_router.get("/auth/me", response_model=UserResponse)
 async def me(current_user: dict = Depends(get_current_user)):
     return user_to_response(current_user)
+
+
+@api_router.patch("/auth/profile", response_model=UserResponse)
+async def update_profile(
+    body: ProfileUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Batch 2B5 — update the canonical display name."""
+    name = _normalise_account_name(body.name)
+    now = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$set": {"name": name, "updated_at": now}},
+    )
+    updated = await db.users.find_one({"id": current_user["id"]})
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user_to_response(updated)
 
 
 @api_router.patch("/auth/preferences/post-creation-decomposition", response_model=UserResponse)
@@ -878,7 +960,9 @@ async def update_post_creation_decomposition_preference(
 
 @api_router.post("/auth/logout")
 async def logout(current_user: dict = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
-    # Stateless JWT for email/password users. For Google users, delete their session row.
+    # Batch 2B5: stateless JWT for email/password users. This delete
+    # also revokes any legacy stored session whose token matches, so
+    # previously issued stored sessions can be signed out.
     await db.user_sessions.delete_one({"session_token": token})
     return {"detail": "Logged out"}
 

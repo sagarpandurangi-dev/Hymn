@@ -126,6 +126,7 @@ export type PostCreationDecompositionPreference =
 export type UserResponse = {
   id: string;
   email: string;
+  name?: string | null;
   portfolio_setup_completed_at?: string | null;
   portfolio_reporting_currency?: string | null;
   post_creation_decomposition_preference?: PostCreationDecompositionPreference;
@@ -133,6 +134,7 @@ export type UserResponse = {
 
 export const api = {
   signup: (payload: {
+    name: string;
     email: string;
     password: string;
     security_question: string;
@@ -145,6 +147,13 @@ export const api = {
   me: () => request<UserResponse>("/auth/me", { auth: true }),
 
   logout: () => request<{ detail: string }>("/auth/logout", { method: "POST", auth: true }),
+
+  updateProfile: (name: string) =>
+    request<UserResponse>("/auth/profile", {
+      method: "PATCH",
+      body: { name },
+      auth: true,
+    }),
 
   updatePostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) =>
     request<UserResponse>("/auth/preferences/post-creation-decomposition", {
