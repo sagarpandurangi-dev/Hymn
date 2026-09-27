@@ -35,12 +35,104 @@ from deps import get_current_user, get_db
 
 # Reuse helpers + router from the conversational engine.
 from planning_engine import (
-    _iso_date, _now, _uuid,
-    _richness_score, _is_exclusive,
+    _iso_date,
+    _now,
+    _uuid,
     VALID_COMMITMENT_TYPES,
-    VALID_GOAL_STATUSES, VALID_PROJECT_STATUSES, VALID_TASK_STATUSES,
     planning_router,
 )
+
+
+# ---------------------------------------------------------------------------
+# Local helpers + status constants owned by the explicit merge workflow.
+# (Previously imported from planning_engine; 2B6 removed them from there.)
+# ---------------------------------------------------------------------------
+
+VALID_TASK_STATUSES = {"todo", "in_progress", "done", "cancelled"}
+VALID_GOAL_STATUSES = {"active", "paused", "completed", "abandoned"}
+VALID_PROJECT_STATUSES = {"active", "paused", "completed", "abandoned"}
+
+
+def _is_exclusive(item: dict) -> bool:
+    return (item.get("commitment_type") or "postponable") == "exclusive"
+
+
+async def _richness_score(db, user_id: str, kind: str, item: dict) -> int:
+    score = 0
+
+    if kind == "goal":
+        for field in (
+            "target_outcome",
+            "deadline",
+            "notes",
+            "checkin_cadence",
+            "journey_type",
+        ):
+            if item.get(field):
+                score += 1
+
+        outcome_count = await db.expected_outcomes.count_documents(
+            {
+                "user_id": user_id,
+                "goal_id": item["id"],
+            }
+        )
+
+        outcome_ids = [
+            outcome["id"]
+            async for outcome in db.expected_outcomes.find(
+                {
+                    "user_id": user_id,
+                    "goal_id": item["id"],
+                },
+                {"id": 1},
+            )
+        ]
+
+        task_query = {
+            "user_id": user_id,
+            "$or": [
+                {"goal_id": item["id"]},
+                {"expected_outcome_id": {"$in": outcome_ids}},
+            ],
+        }
+
+        task_count = await db.tasks.count_documents(task_query)
+        checkin_count = await db.checkins.count_documents(
+            {
+                "user_id": user_id,
+                "goal_id": item["id"],
+            }
+        )
+
+        score += (outcome_count * 3) + task_count + checkin_count
+        return score
+
+    for field in (
+        "description",
+        "start_date",
+        "target_end_date",
+        "notes",
+    ):
+        if item.get(field):
+            score += 1
+
+    task_count = await db.tasks.count_documents(
+        {
+            "user_id": user_id,
+            "project_id": item["id"],
+        }
+    )
+
+    checkin_count = await db.checkins.count_documents(
+        {
+            "user_id": user_id,
+            "project_id": item["id"],
+        }
+    )
+
+    score += task_count + checkin_count
+    return score
 
 
 # ---------------------------------------------------------------------------
