@@ -25,6 +25,7 @@ import {
   createPlanningOperationId,
   type PlanningHierarchyEntityType,
   type PlanningHierarchyOperationRequest,
+  type PlanningMaterializeResponse,
   type PlanningMilestoneDraft,
   type PlanningPhaseDraft,
   type PlanningPlanDraft,
@@ -193,6 +194,23 @@ export default function PlanDraftEditor({
     void reloadHierarchy();
   }, [readOnly, reloadHierarchy]);
 
+  // Batch 2B9.1 — synchronise appliedSummary when the parent later supplies
+  // an applied message. Prevents a stale ‘Plan added to Hymn.’ from lingering
+  // if the backend delivered a richer summary asynchronously.
+  useEffect(() => {
+    if (alreadyApplied) {
+      setAppliedSummary(materializedSummary || "Plan added to Hymn.");
+    }
+  }, [alreadyApplied, materializedSummary]);
+
+  /* ---- Batch 2B9.1 — helpers -------------------------------------- */
+  const closeTransientEditors = useCallback(() => {
+    setEditForm(null);
+    setAddForm(null);
+    setMoveState(null);
+    setRemoveState(null);
+  }, []);
+
   /* ---- operation dispatcher ---------------------------------------- */
   const runOperation = useCallback(
     async (
@@ -212,7 +230,9 @@ export default function PlanDraftEditor({
         return { ok: true };
       } catch (e: any) {
         if (e?.status === 409) {
-          // Revision / state conflict — refresh, discard the failed op.
+          // Revision / state conflict — close any open overlay first so
+          // the user can see what happened, then refresh.
+          closeTransientEditors();
           try {
             const res = await api.planningGetDraftHierarchy(conversationId, messageId);
             setPlan(res.plan);
@@ -222,10 +242,16 @@ export default function PlanDraftEditor({
               "This plan changed elsewhere. I refreshed it—please review and try again.",
             );
           } catch (loadErr: any) {
+            // Do NOT claim the refresh succeeded. Surface the failure via
+            // loadError; the visible loaded-state banner + Refresh button
+            // will drive recovery. Also keep the editor locked meanwhile.
             setLoadError(loadErr?.message || "Could not refresh this plan.");
           }
           return { ok: false };
         }
+        // Non-409 failure: close overlays so the retry banner is visible,
+        // then retain the EXACT original request (unchanged) for retry.
+        closeTransientEditors();
         setPending({
           request,
           error: e?.message || "Something went wrong applying that change.",
@@ -235,7 +261,7 @@ export default function PlanDraftEditor({
         setBusy(false);
       }
     },
-    [conversationId, messageId],
+    [conversationId, messageId, closeTransientEditors],
   );
 
   const retryPending = useCallback(async () => {
@@ -522,13 +548,18 @@ export default function PlanDraftEditor({
     setApplying(true);
     setApplyError(null);
     try {
-      const res = await api.planningMaterialize(conversationId, messageId, revision);
+      const res: PlanningMaterializeResponse = await api.planningMaterialize(
+        conversationId, messageId, revision,
+      );
+      // Batch 2B9.1 — the real materialized summary lives on the matching
+      // message inside the returned conversation, NOT on res.result.
+      const matched = res.conversation?.messages?.find((m) => m.id === messageId);
       setAppliedSummary(
-        (res && (res as any).result && (res as any).result.summary) ||
+        (matched && matched.materialized_summary) ||
           materializedSummary ||
           "Plan added to Hymn.",
       );
-      onConversationUpdated((res as any).conversation);
+      onConversationUpdated(res.conversation);
     } catch (e: any) {
       if (e?.status === 409) {
         try {
@@ -560,6 +591,11 @@ export default function PlanDraftEditor({
 
   /* ---- Render ------------------------------------------------------- */
 
+  // Batch 2B9.1 — single lock covering: op in flight, apply in flight,
+  // failed op waiting for Retry, or stale plan after a failed refresh.
+  const interactionLocked =
+    busy || applying || pending !== null || (loaded && loadError !== null);
+
   if (currentlyApplying) {
     return (
       <View style={styles.card} testID={`planning-draft-${messageId}`}>
@@ -571,6 +607,7 @@ export default function PlanDraftEditor({
           <ActivityIndicator size="small" color={colors.brandPrimary} />
           <Text style={styles.mutedText}>Adding this plan to Hymn…</Text>
         </View>
+        <RenderPlanReadOnly plan={plan} />
       </View>
     );
   }
@@ -620,15 +657,24 @@ export default function PlanDraftEditor({
         </View>
         <Pressable
           onPress={() => openEditForm("plan", { id: plan.id, title: plan.title })}
-          disabled={busy || applying}
+          disabled={interactionLocked}
           hitSlop={8}
+          style={[styles.editPlanBtn, interactionLocked && styles.disabled]}
           testID={`planning-node-edit-${plan.id}`}
         >
           <Ionicons
             name="pencil"
-            size={16}
-            color={busy || applying ? colors.onSurfaceTertiary : colors.onSurfaceSecondary}
+            size={13}
+            color={interactionLocked ? colors.onSurfaceTertiary : colors.brandPrimary}
           />
+          <Text
+            style={[
+              styles.editPlanBtnText,
+              interactionLocked && { color: colors.onSurfaceTertiary },
+            ]}
+          >
+            Edit plan
+          </Text>
         </Pressable>
       </View>
 
@@ -638,6 +684,21 @@ export default function PlanDraftEditor({
         </Text>
       ) : null}
       {notice ? <Text style={styles.inlineNotice}>{notice}</Text> : null}
+      {loaded && loadError ? (
+        <View style={styles.pendingBanner}>
+          <Ionicons name="alert-circle" size={14} color={colors.error} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.errorText}>{loadError}</Text>
+          </View>
+          <Pressable
+            onPress={reloadHierarchy}
+            disabled={loading}
+            style={styles.retryBtn}
+          >
+            <Text style={styles.retryBtnText}>Refresh plan</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       {plan.phases.map((phase, phaseIndex) => (
         <PhaseCard
@@ -650,7 +711,7 @@ export default function PlanDraftEditor({
           onToggle={() =>
             setCollapsedPhaseIds((prev) => ({ ...prev, [phase.id]: !prev[phase.id] }))
           }
-          disabled={busy || applying}
+          disabled={interactionLocked}
           onEdit={(entity_type, ctx) => openEditForm(entity_type, ctx)}
           onCopy={duplicateNode}
           onRemove={(entity_type, entity_id, title) =>
@@ -676,8 +737,8 @@ export default function PlanDraftEditor({
         onPress={() =>
           setAddForm(makeInitialAddForm("phase", plan.id, plan.phases.length))
         }
-        disabled={busy || applying}
-        style={[styles.addRow, (busy || applying) && styles.disabled]}
+        disabled={interactionLocked}
+        style={[styles.addRow, interactionLocked && styles.disabled]}
         testID={`planning-add-phase-${messageId}`}
       >
         <Ionicons name="add-circle-outline" size={16} color={colors.brandPrimary} />
@@ -708,8 +769,8 @@ export default function PlanDraftEditor({
 
       <Pressable
         onPress={applyPlan}
-        disabled={applying || busy || !loaded}
-        style={[styles.applyBtn, (applying || busy) && styles.disabled]}
+        disabled={interactionLocked || !loaded}
+        style={[styles.applyBtn, (interactionLocked || !loaded) && styles.disabled]}
         testID={`planning-draft-apply-${messageId}`}
       >
         {applying ? (
@@ -1183,77 +1244,133 @@ type NodeActionsProps = {
 
 function NodeActions(props: NodeActionsProps) {
   const { disabled, nodeId, isFirst, isLast, canMove, onEdit, onCopy, onRemove, onUp, onDown, onMove } = props;
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  // Every option must close the action menu BEFORE invoking its callback so
+  // that a subsequently-opened modal (Edit / Remove / Move to…) is never
+  // stacked behind the action menu overlay.
+  const run = useCallback((fn: () => void) => {
+    setOpen(false);
+    fn();
+  }, []);
   return (
-    <View style={styles.actionsRow}>
+    <>
       <Pressable
-        onPress={onUp}
-        disabled={disabled || isFirst}
+        onPress={() => setOpen(true)}
+        disabled={disabled}
         hitSlop={6}
-        style={[styles.iconBtn, (disabled || isFirst) && styles.iconBtnDisabled]}
-        testID={`planning-node-up-${nodeId}`}
+        style={[styles.actionsTrigger, disabled && styles.disabled]}
+        testID={`planning-node-actions-${nodeId}`}
       >
         <Ionicons
-          name="chevron-up"
+          name="ellipsis-horizontal"
           size={14}
-          color={disabled || isFirst ? colors.onSurfaceTertiary : colors.onSurfaceSecondary}
+          color={disabled ? colors.onSurfaceTertiary : colors.onSurfaceSecondary}
         />
-      </Pressable>
-      <Pressable
-        onPress={onDown}
-        disabled={disabled || isLast}
-        hitSlop={6}
-        style={[styles.iconBtn, (disabled || isLast) && styles.iconBtnDisabled]}
-        testID={`planning-node-down-${nodeId}`}
-      >
-        <Ionicons
-          name="chevron-down"
-          size={14}
-          color={disabled || isLast ? colors.onSurfaceTertiary : colors.onSurfaceSecondary}
-        />
-      </Pressable>
-      {canMove && onMove ? (
-        <Pressable
-          onPress={onMove}
-          disabled={disabled}
-          hitSlop={6}
-          style={[styles.iconBtn, disabled && styles.iconBtnDisabled]}
-          testID={`planning-node-move-${nodeId}`}
+        <Text
+          style={[
+            styles.actionsTriggerText,
+            disabled && { color: colors.onSurfaceTertiary },
+          ]}
         >
-          <Ionicons
-            name="git-branch-outline"
-            size={14}
-            color={disabled ? colors.onSurfaceTertiary : colors.onSurfaceSecondary}
-          />
+          Actions
+        </Text>
+      </Pressable>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={close}>
+        <Pressable style={styles.backdrop} onPress={close}>
+          <Pressable style={styles.menuCard} onPress={(e) => e.stopPropagation && e.stopPropagation()}>
+            <MenuOption
+              testID={`planning-node-up-${nodeId}`}
+              disabled={isFirst}
+              onPress={() => run(onUp)}
+              label="Move up"
+              iconName="chevron-up"
+            />
+            <MenuOption
+              testID={`planning-node-down-${nodeId}`}
+              disabled={isLast}
+              onPress={() => run(onDown)}
+              label="Move down"
+              iconName="chevron-down"
+            />
+            {canMove && onMove ? (
+              <MenuOption
+                testID={`planning-node-move-${nodeId}`}
+                onPress={() => run(onMove)}
+                label="Move to…"
+                iconName="git-branch-outline"
+              />
+            ) : null}
+            <MenuOption
+              testID={`planning-node-edit-${nodeId}`}
+              onPress={() => run(onEdit)}
+              label="Edit"
+              iconName="pencil"
+            />
+            <MenuOption
+              testID={`planning-node-copy-${nodeId}`}
+              onPress={() => run(onCopy)}
+              label="Copy"
+              iconName="copy-outline"
+            />
+            <MenuOption
+              testID={`planning-node-remove-${nodeId}`}
+              onPress={() => run(onRemove)}
+              label="Remove"
+              iconName="trash-outline"
+              danger
+            />
+            <Pressable
+              onPress={close}
+              style={styles.menuCancelRow}
+            >
+              <Text style={styles.menuCancelText}>Cancel</Text>
+            </Pressable>
+          </Pressable>
         </Pressable>
-      ) : null}
-      <Pressable
-        onPress={onEdit}
-        disabled={disabled}
-        hitSlop={6}
-        style={[styles.iconBtn, disabled && styles.iconBtnDisabled]}
-        testID={`planning-node-edit-${nodeId}`}
+      </Modal>
+    </>
+  );
+}
+
+function MenuOption({
+  testID, disabled, onPress, label, iconName, danger,
+}: {
+  testID: string;
+  disabled?: boolean;
+  onPress: () => void;
+  label: string;
+  iconName: React.ComponentProps<typeof Ionicons>["name"];
+  danger?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      style={[styles.menuOptionRow, disabled && styles.disabled]}
+      testID={testID}
+    >
+      <Ionicons
+        name={iconName}
+        size={16}
+        color={
+          disabled
+            ? colors.onSurfaceTertiary
+            : danger
+            ? colors.error
+            : colors.onSurfaceSecondary
+        }
+      />
+      <Text
+        style={[
+          styles.menuOptionText,
+          disabled && { color: colors.onSurfaceTertiary },
+          danger && !disabled && { color: colors.error, fontWeight: "600" },
+        ]}
       >
-        <Ionicons name="pencil" size={14} color={disabled ? colors.onSurfaceTertiary : colors.onSurfaceSecondary} />
-      </Pressable>
-      <Pressable
-        onPress={onCopy}
-        disabled={disabled}
-        hitSlop={6}
-        style={[styles.iconBtn, disabled && styles.iconBtnDisabled]}
-        testID={`planning-node-copy-${nodeId}`}
-      >
-        <Ionicons name="copy-outline" size={14} color={disabled ? colors.onSurfaceTertiary : colors.onSurfaceSecondary} />
-      </Pressable>
-      <Pressable
-        onPress={onRemove}
-        disabled={disabled}
-        hitSlop={6}
-        style={[styles.iconBtn, disabled && styles.iconBtnDisabled]}
-        testID={`planning-node-remove-${nodeId}`}
-      >
-        <Ionicons name="trash-outline" size={14} color={disabled ? colors.onSurfaceTertiary : colors.error} />
-      </Pressable>
-    </View>
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 
@@ -1746,6 +1863,41 @@ const styles = StyleSheet.create({
     padding: 4, borderRadius: radius.sm,
   },
   iconBtnDisabled: { opacity: 0.4 },
+  // Batch 2B9.1 — visible-label Actions trigger and menu.
+  actionsTrigger: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1, borderColor: colors.borderStrong,
+  },
+  actionsTriggerText: {
+    fontSize: 12, color: colors.onSurfaceSecondary, fontWeight: "600",
+  },
+  editPlanBtn: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: radius.pill,
+    backgroundColor: colors.brandTertiary,
+  },
+  editPlanBtnText: {
+    fontSize: 12, color: colors.brandPrimary, fontWeight: "600",
+  },
+  menuCard: {
+    width: "100%", maxWidth: 360, backgroundColor: colors.surface,
+    borderRadius: radius.lg, padding: spacing.sm, gap: 2,
+  },
+  menuOptionRow: {
+    flexDirection: "row", alignItems: "center", gap: spacing.sm,
+    paddingHorizontal: spacing.md, paddingVertical: 12,
+    borderRadius: radius.sm,
+  },
+  menuOptionText: { fontSize: 15, color: colors.onSurface, fontWeight: "500" },
+  menuCancelRow: {
+    marginTop: spacing.xs, paddingVertical: 12,
+    alignItems: "center", borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  menuCancelText: { fontSize: 14, color: colors.onSurfaceSecondary, fontWeight: "500" },
 
   applyBtn: {
     flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6,

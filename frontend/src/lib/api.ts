@@ -199,6 +199,27 @@ export type PlanningHierarchyOperationRequest = {
 };
 
 /**
+ * Batch 2B9.1 — shape of the message rows exposed on the conversation
+ * returned by ``POST /planning/conversations/{cid}/materialize``. Extra
+ * message fields are ignored here; the editor only needs to look up the
+ * materialized message by id and read its summary.
+ */
+export type PlanningMaterializedMessage = {
+  id: string;
+  materialized_at?: string | null;
+  materialized_summary?: string | null;
+  materialization_state?: string | null;
+};
+
+export type PlanningMaterializeResponse = {
+  conversation: {
+    messages: PlanningMaterializedMessage[];
+    [key: string]: unknown;
+  };
+  result: Record<string, unknown>;
+};
+
+/**
  * RFC 4122 version-4 UUID generator. Dependency-free — combines Math.random
  * with the standard v4 bit patterns. This id is used solely for backend
  * idempotency of draft hierarchy operations; it is not a security token.
@@ -609,7 +630,7 @@ export const api = {
     if (typeof expected_proposal_revision === "number") {
       body.expected_proposal_revision = expected_proposal_revision;
     }
-    return request<any>(`/planning/conversations/${conversation_id}/materialize`, {
+    return request<PlanningMaterializeResponse>(`/planning/conversations/${conversation_id}/materialize`, {
       method: "POST", body, auth: true,
     });
   },
