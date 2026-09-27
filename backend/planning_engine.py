@@ -824,11 +824,18 @@ def _normalise_draft_hierarchy(plan: dict, message_id: str) -> dict:
     seen: Dict[str, str] = {}
 
     def _assign(node: dict, node_type: str, structural_path: str, location: str) -> None:
-        current = node.get("id")
-        if isinstance(current, str) and current.strip():
-            nid = current.strip()
-        else:
+        # Batch 2B8.1 — reject malformed present ids. Only a truly missing
+        # key or an explicit null may be filled in with a deterministic id.
+        if "id" not in node or node.get("id") is None:
             nid = _draft_node_id(message_id, node_type, structural_path)
+        else:
+            current = node.get("id")
+            if not isinstance(current, str) or not current.strip():
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{location}.id must be a non-empty string",
+                )
+            nid = current.strip()
         if not isinstance(nid, str) or not nid:
             raise HTTPException(status_code=422, detail=f"{location}.id must be a non-empty string")
         if nid in seen:
@@ -1044,7 +1051,22 @@ def _validate_editable_values(
     allowed = _DRAFT_EDITABLE_FIELDS[entity_type]
     if not isinstance(values, dict):
         raise HTTPException(status_code=400, detail="values must be an object")
-    child_keys = {"milestones", "tasks", "required_checkins"} if allow_nested_children else set()
+    # Batch 2B8.1 — entity-specific nested child keys, strictly enforced.
+    # A phase can only carry a nested `milestones` list, a milestone a
+    # nested `tasks` list, a task a nested `required_checkins` list. All
+    # other nested keys go through the unknown-field rejection below.
+    nested_child_key_by_entity = {
+        "phase": "milestones",
+        "milestone": "tasks",
+        "task": "required_checkins",
+        "plan": None,
+        "required_checkin": None,
+    }
+    if allow_nested_children:
+        expected_child = nested_child_key_by_entity.get(entity_type)
+        child_keys = {expected_child} if expected_child else set()
+    else:
+        child_keys = set()
     unknown = [k for k in values.keys() if k not in allowed and k not in child_keys]
     if unknown:
         raise HTTPException(
@@ -2160,26 +2182,27 @@ async def materialize(
                     break
         raise HTTPException(status_code=409, detail="This proposal could not be claimed for application.")
 
-    # Batch 2B8 — after a successful claim, re-read the conversation so we
-    # use the version of the proposal that was just locked in by the claim
-    # (guaranteed by ``materialization_claim_id`` equality). Any earlier
-    # in-memory ``proposal`` may be stale.
-    claimed_conv = await db.plan_conversations.find_one(
-        {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
-    ) or conv
-    claimed_msg: Optional[dict] = None
-    for m in claimed_conv.get("messages") or []:
-        if m.get("id") == body.message_id and m.get("materialization_claim_id") == claim_id:
-            claimed_msg = m
-            break
-    if claimed_msg is None or not isinstance(claimed_msg.get("proposal"), dict):
-        raise HTTPException(
-            status_code=409,
-            detail="This proposal could not be claimed for application.",
-        )
-    proposal = claimed_msg["proposal"]
-
     try:
+        # Batch 2B8.1 — reread + claim verification are now INSIDE the try
+        # block so that any failure here runs the existing except-cleanup
+        # and clears the "applying" state. This matches the guarantee that
+        # a claim once set is always released (either to "applied" or to
+        # "failed") no matter which downstream step raises.
+        claimed_conv = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        ) or conv
+        claimed_msg: Optional[dict] = None
+        for m in claimed_conv.get("messages") or []:
+            if m.get("id") == body.message_id and m.get("materialization_claim_id") == claim_id:
+                claimed_msg = m
+                break
+        if claimed_msg is None or not isinstance(claimed_msg.get("proposal"), dict):
+            raise HTTPException(
+                status_code=409,
+                detail="This proposal could not be claimed for application.",
+            )
+        proposal = claimed_msg["proposal"]
+
         result = await _materialize_proposal(
             db, current_user["id"], conv["target_type"], conv["target_id"], proposal,
             conversation_id=conversation_id, message_id=body.message_id,
@@ -2322,40 +2345,82 @@ async def read_draft_hierarchy(
 
     if needs_backfill or not ids_ok:
         normalised = _normalise_draft_hierarchy(plan, message_id)
-        # Conditional positional update: message must not be materialized or
-        # currently applying.
+
+        # Batch 2B8.1 — compare-and-set predicate:
+        # the update must only apply if the message still holds the exact
+        # proposal.plan, proposal_revision, and proposal_operation_ids
+        # values that we just read. A concurrent edit that changes any of
+        # them must cause this update to be a no-op.
+        snapshot_plan = plan
+        snapshot_rev = msg.get("proposal_revision")
+        has_stored_rev = isinstance(snapshot_rev, int) and snapshot_rev >= 1
+        snapshot_ops_raw = msg.get("proposal_operation_ids")
+        has_stored_ops = isinstance(snapshot_ops_raw, list)
+        snapshot_ops: List[Any] = list(snapshot_ops_raw) if has_stored_ops else []
+
+        # Never reset a higher revision to 1; preserve/initialise operation
+        # id list without truncating existing entries.
+        new_revision = snapshot_rev if has_stored_rev else 1
+        new_ops = list(snapshot_ops) if has_stored_ops else []
+
+        elem_match: Dict[str, Any] = {
+            "id": message_id,
+            "materialized_at": {"$exists": False},
+            "materialization_state": {"$nin": ["applying", "applied"]},
+            "proposal.plan": snapshot_plan,
+        }
+        if has_stored_rev:
+            elem_match["proposal_revision"] = snapshot_rev
+        else:
+            elem_match["proposal_revision"] = {"$exists": False}
+        if has_stored_ops:
+            elem_match["proposal_operation_ids"] = snapshot_ops
+        else:
+            elem_match["proposal_operation_ids"] = {"$exists": False}
+
         r = await db.plan_conversations.update_one(
             {
                 "id": conversation_id,
                 "user_id": current_user["id"],
-                "messages": {"$elemMatch": {
-                    "id": message_id,
-                    "materialized_at": {"$exists": False},
-                    "materialization_state": {"$nin": ["applying", "applied"]},
-                }},
+                "messages": {"$elemMatch": elem_match},
             },
             {
                 "$set": {
                     "messages.$.proposal.plan": normalised,
-                    "messages.$.proposal_revision": 1,
-                    "messages.$.proposal_operation_ids":
-                        list(msg.get("proposal_operation_ids") or []),
+                    "messages.$.proposal_revision": new_revision,
+                    "messages.$.proposal_operation_ids": new_ops,
                     "updated_at": _now(),
                 },
             },
         )
-        if r.modified_count == 0:
-            # Someone applied/started applying in between; report the state.
-            conv = await db.plan_conversations.find_one(
-                {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
-            )
-            if conv:
-                _get_assistant_hierarchy_message(conv, message_id)
-            raise HTTPException(status_code=409, detail="The draft changed; refresh it and try again")
+        # Whether the CAS write hit or not, always re-read and re-check the
+        # message. modified_count == 0 might just mean another request
+        # (concurrent normalise, edit, apply) already put the message into
+        # a healthier state — in which case we should serve THAT hierarchy,
+        # not our stale one.
         conv = await db.plan_conversations.find_one(
             {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
         )
-        msg = _get_assistant_hierarchy_message(conv or {"messages": []}, message_id)
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        # _get_assistant_hierarchy_message raises the state-specific 409s
+        # (applied / applying) — those responses must be preserved.
+        msg = _get_assistant_hierarchy_message(conv, message_id)
+
+        fresh_plan = (msg.get("proposal") or {}).get("plan")
+        fresh_rev = msg.get("proposal_revision")
+        fresh_ops = msg.get("proposal_operation_ids")
+        fresh_is_valid = False
+        if isinstance(fresh_plan, dict) and isinstance(fresh_rev, int) and fresh_rev >= 1 and isinstance(fresh_ops, list):
+            try:
+                _validate_plan_hierarchy(fresh_plan)
+                _collect_draft_ids(fresh_plan)
+                fresh_is_valid = True
+            except HTTPException:
+                fresh_is_valid = False
+        if not fresh_is_valid:
+            # Do NOT persist or return the stale in-memory hierarchy.
+            raise HTTPException(status_code=409, detail="The draft changed; refresh it and try again")
 
     return {
         "conversation_id": conversation_id,
