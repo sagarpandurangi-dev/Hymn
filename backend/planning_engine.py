@@ -37,7 +37,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
@@ -597,6 +597,10 @@ def _shape_message(msg: dict) -> dict:
         "proposal": proposal,  # may be None
         "materialized_at": msg.get("materialized_at"),
         "materialized_summary": msg.get("materialized_summary"),
+        # Batch 2B8 — expose draft revision + materialization state so the
+        # UI can decide whether the plan is editable.
+        "proposal_revision": msg.get("proposal_revision"),
+        "materialization_state": msg.get("materialization_state"),
     }
 
 
@@ -765,6 +769,703 @@ def _validate_plan_hierarchy(plan: Any) -> None:
                             f"{rloc}.cadence",
                             "must be one of once, daily, weekly, monthly, quarterly",
                         )
+
+
+# ---------------------------------------------------------------------------
+# Batch 2B8 — draft (in-conversation) hierarchy editing helpers.
+# These operate on the proposal.plan JSON embedded in the assistant message
+# in `plan_conversations`. They MUST NEVER touch permanent hierarchy records
+# in plans / plan_phases / plan_milestones / tasks / required_checkins.
+# ---------------------------------------------------------------------------
+
+
+import copy as _copy  # local alias to avoid shadowing any existing name
+
+
+_DRAFT_EDITABLE_FIELDS: Dict[str, set] = {
+    "plan": {"title"},
+    "phase": {"title", "description"},
+    "milestone": {"title", "description", "target_date"},
+    "task": {"title", "description", "due_date", "priority"},
+    "required_checkin": {"title", "prompt", "cadence"},
+}
+
+_DRAFT_ENTITY_TYPES = ("plan", "phase", "milestone", "task", "required_checkin")
+
+
+def _draft_node_id(
+    message_id: str,
+    node_type: str,
+    structural_path: str,
+) -> str:
+    """Deterministic UUIDv5 for a draft hierarchy node.
+
+    Draft IDs are namespaced separately from Batch 2B7 permanent
+    materialization IDs so they can never collide.
+    """
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"hymn:draft:{message_id}:{node_type}:{structural_path}",
+    ))
+
+
+def _normalise_draft_hierarchy(plan: dict, message_id: str) -> dict:
+    """Return a deep-copied plan with stable draft node IDs assigned.
+
+    - Preserves any existing valid string id.
+    - Assigns a deterministic id (via ``_draft_node_id``) where missing.
+    - Validates all ids are non-empty strings and globally unique.
+    - Never mutates the caller's dictionary.
+    """
+    if not isinstance(plan, dict):
+        raise HTTPException(status_code=422, detail="plan must be an object")
+    new_plan = _copy.deepcopy(plan)
+
+    seen: Dict[str, str] = {}
+
+    def _assign(node: dict, node_type: str, structural_path: str, location: str) -> None:
+        current = node.get("id")
+        if isinstance(current, str) and current.strip():
+            nid = current.strip()
+        else:
+            nid = _draft_node_id(message_id, node_type, structural_path)
+        if not isinstance(nid, str) or not nid:
+            raise HTTPException(status_code=422, detail=f"{location}.id must be a non-empty string")
+        if nid in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{location}.id duplicates {seen[nid]}",
+            )
+        seen[nid] = location
+        node["id"] = nid
+
+    _assign(new_plan, "plan", "0", "plan")
+
+    phases = new_plan.get("phases")
+    if not isinstance(phases, list):
+        raise HTTPException(status_code=422, detail="plan.phases must be a non-empty array")
+    for pi, phase in enumerate(phases):
+        if not isinstance(phase, dict):
+            raise HTTPException(status_code=422, detail=f"plan.phases[{pi}] must be an object")
+        _assign(phase, "phase", f"{pi}", f"plan.phases[{pi}]")
+        milestones = phase.get("milestones")
+        if not isinstance(milestones, list):
+            raise HTTPException(
+                status_code=422,
+                detail=f"plan.phases[{pi}].milestones must be a non-empty array",
+            )
+        for mi, milestone in enumerate(milestones):
+            if not isinstance(milestone, dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"plan.phases[{pi}].milestones[{mi}] must be an object",
+                )
+            _assign(
+                milestone, "milestone", f"{pi}:{mi}",
+                f"plan.phases[{pi}].milestones[{mi}]",
+            )
+            tasks = milestone.get("tasks")
+            if not isinstance(tasks, list):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"plan.phases[{pi}].milestones[{mi}].tasks must be a non-empty array",
+                )
+            for ti, task in enumerate(tasks):
+                if not isinstance(task, dict):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}] must be an object",
+                    )
+                _assign(
+                    task, "task", f"{pi}:{mi}:{ti}",
+                    f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]",
+                )
+                rcs = task.get("required_checkins")
+                if not isinstance(rcs, list):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]"
+                            f".required_checkins must be a non-empty array"
+                        ),
+                    )
+                for ri, rc in enumerate(rcs):
+                    if not isinstance(rc, dict):
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]"
+                                f".required_checkins[{ri}] must be an object"
+                            ),
+                        )
+                    _assign(
+                        rc, "required_checkin", f"{pi}:{mi}:{ti}:{ri}",
+                        (
+                            f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]"
+                            f".required_checkins[{ri}]"
+                        ),
+                    )
+
+    return new_plan
+
+
+def _collect_draft_ids(plan: dict) -> Dict[str, str]:
+    """Return {node_id: location_string} for every node in the draft plan."""
+    ids: Dict[str, str] = {}
+
+    def _record(node: dict, location: str) -> None:
+        nid = node.get("id") if isinstance(node, dict) else None
+        if not (isinstance(nid, str) and nid):
+            raise HTTPException(status_code=422, detail=f"{location}.id must be a non-empty string")
+        if nid in ids:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{location}.id duplicates {ids[nid]}",
+            )
+        ids[nid] = location
+
+    _record(plan, "plan")
+    for pi, phase in enumerate(plan.get("phases") or []):
+        _record(phase, f"plan.phases[{pi}]")
+        for mi, m in enumerate(phase.get("milestones") or []):
+            _record(m, f"plan.phases[{pi}].milestones[{mi}]")
+            for ti, t in enumerate(m.get("tasks") or []):
+                _record(t, f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]")
+                for ri, rc in enumerate(t.get("required_checkins") or []):
+                    _record(
+                        rc,
+                        (
+                            f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]"
+                            f".required_checkins[{ri}]"
+                        ),
+                    )
+    return ids
+
+
+def _locate_draft_node(plan: dict, entity_type: str, entity_id: str) -> Dict[str, Any]:
+    """Find a node by stable draft id.
+
+    Returns a dict with keys:
+      node, parent, container_list, index,
+      phase, milestone, task (ancestors where relevant),
+      located_type.
+    Raises 404 if not found. Raises 400 if entity_type does not match the
+    located node's type. NEVER locates by title or by client-supplied index.
+    """
+    if not isinstance(entity_id, str) or not entity_id:
+        raise HTTPException(status_code=404, detail=f"Draft {entity_type} not found")
+
+    # Plan itself.
+    if plan.get("id") == entity_id:
+        located_type = "plan"
+        if entity_type != located_type:
+            raise HTTPException(
+                status_code=400,
+                detail="entity_id does not identify the requested entity_type",
+            )
+        return {
+            "node": plan, "parent": None, "container_list": None,
+            "index": None, "phase": None, "milestone": None, "task": None,
+            "located_type": "plan",
+        }
+
+    phases = plan.get("phases") or []
+    for pi, phase in enumerate(phases):
+        if isinstance(phase, dict) and phase.get("id") == entity_id:
+            located_type = "phase"
+            if entity_type != located_type:
+                raise HTTPException(
+                    status_code=400,
+                    detail="entity_id does not identify the requested entity_type",
+                )
+            return {
+                "node": phase, "parent": plan, "container_list": phases,
+                "index": pi, "phase": phase, "milestone": None, "task": None,
+                "located_type": "phase",
+            }
+        milestones = (phase or {}).get("milestones") or []
+        for mi, m in enumerate(milestones):
+            if isinstance(m, dict) and m.get("id") == entity_id:
+                located_type = "milestone"
+                if entity_type != located_type:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="entity_id does not identify the requested entity_type",
+                    )
+                return {
+                    "node": m, "parent": phase, "container_list": milestones,
+                    "index": mi, "phase": phase, "milestone": m, "task": None,
+                    "located_type": "milestone",
+                }
+            tasks = (m or {}).get("tasks") or []
+            for ti, t in enumerate(tasks):
+                if isinstance(t, dict) and t.get("id") == entity_id:
+                    located_type = "task"
+                    if entity_type != located_type:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="entity_id does not identify the requested entity_type",
+                        )
+                    return {
+                        "node": t, "parent": m, "container_list": tasks,
+                        "index": ti, "phase": phase, "milestone": m, "task": t,
+                        "located_type": "task",
+                    }
+                rcs = (t or {}).get("required_checkins") or []
+                for ri, rc in enumerate(rcs):
+                    if isinstance(rc, dict) and rc.get("id") == entity_id:
+                        located_type = "required_checkin"
+                        if entity_type != located_type:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="entity_id does not identify the requested entity_type",
+                            )
+                        return {
+                            "node": rc, "parent": t, "container_list": rcs,
+                            "index": ri, "phase": phase, "milestone": m, "task": t,
+                            "located_type": "required_checkin",
+                        }
+
+    raise HTTPException(status_code=404, detail=f"Draft {entity_type} not found")
+
+
+def _validate_editable_values(
+    entity_type: str, values: Any, *, require_all: bool,
+    allow_nested_children: bool = False,
+) -> Dict[str, Any]:
+    """Return a dict of validated field->value for a draft edit.
+
+    - Rejects unknown fields (does not silently discard).
+    - Validates each supplied field per the batch 2B7 rules.
+    - When ``allow_nested_children`` is True (used by ``add``) the reserved
+      keys ``milestones``, ``tasks``, and ``required_checkins`` are also
+      accepted here — the caller is responsible for consuming them.
+    """
+    allowed = _DRAFT_EDITABLE_FIELDS[entity_type]
+    if not isinstance(values, dict):
+        raise HTTPException(status_code=400, detail="values must be an object")
+    child_keys = {"milestones", "tasks", "required_checkins"} if allow_nested_children else set()
+    unknown = [k for k in values.keys() if k not in allowed and k not in child_keys]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown field(s) for {entity_type}: {', '.join(sorted(unknown))}",
+        )
+    if require_all:
+        # For ``add``, required_checkin needs title/prompt/cadence explicitly.
+        # For phase/milestone/task the create defaults fill in what values omits.
+        pass
+    out: Dict[str, Any] = {}
+    if "title" in values or (require_all and entity_type in {"required_checkin"}):
+        t = values.get("title")
+        if not (isinstance(t, str) and t.strip()):
+            raise HTTPException(status_code=400, detail="title must be a non-empty string")
+        out["title"] = t.strip()
+    if "description" in values:
+        d = values.get("description")
+        if d is None:
+            out["description"] = None
+        elif isinstance(d, str):
+            out["description"] = d.strip() if d.strip() else None
+        else:
+            raise HTTPException(status_code=400, detail="description must be a string or null")
+    if "target_date" in values:
+        td = values.get("target_date")
+        if td is None:
+            out["target_date"] = None
+        elif isinstance(td, str) and _iso_date(td):
+            out["target_date"] = td
+        else:
+            raise HTTPException(status_code=400, detail="target_date must be null or YYYY-MM-DD")
+    if "due_date" in values:
+        dd = values.get("due_date")
+        if dd is None:
+            out["due_date"] = None
+        elif isinstance(dd, str) and _iso_date(dd):
+            out["due_date"] = dd
+        else:
+            raise HTTPException(status_code=400, detail="due_date must be null or YYYY-MM-DD")
+    if "priority" in values:
+        pr = values.get("priority")
+        if pr not in VALID_PRIORITIES:
+            raise HTTPException(status_code=400, detail="priority must be one of low, medium, high")
+        out["priority"] = pr
+    if "prompt" in values or (require_all and entity_type == "required_checkin"):
+        p = values.get("prompt")
+        if not (isinstance(p, str) and p.strip()):
+            raise HTTPException(status_code=400, detail="prompt must be a non-empty string")
+        out["prompt"] = p.strip()
+    if "cadence" in values or (require_all and entity_type == "required_checkin"):
+        c = values.get("cadence")
+        if c not in VALID_REQUIRED_CHECKIN_CADENCES:
+            raise HTTPException(
+                status_code=400,
+                detail="cadence must be one of once, daily, weekly, monthly, quarterly",
+            )
+        out["cadence"] = c
+    return out
+
+
+def _op_child_id(message_id: str, operation_id: str, node_type: str, relative_path: str) -> str:
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"hymn:draft-operation:{message_id}:{operation_id}:{node_type}:{relative_path}",
+    ))
+
+
+def _build_added_required_checkin(
+    values: Dict[str, Any],
+    message_id: str, operation_id: str, relative_path: str,
+) -> dict:
+    v = _validate_editable_values("required_checkin", values, require_all=True, allow_nested_children=False)
+    return {
+        "id": _op_child_id(message_id, operation_id, "required_checkin", relative_path),
+        "title": v["title"], "prompt": v["prompt"], "cadence": v["cadence"],
+    }
+
+
+def _build_added_task(
+    values: Dict[str, Any],
+    message_id: str, operation_id: str, relative_path: str,
+) -> dict:
+    edit = _validate_editable_values("task", values, require_all=False, allow_nested_children=True)
+    title = edit.get("title")
+    if not title:
+        raise HTTPException(status_code=400, detail="title must be a non-empty string")
+    rcs_in = values.get("required_checkins")
+    if not isinstance(rcs_in, list) or not rcs_in:
+        raise HTTPException(
+            status_code=400,
+            detail="An added task requires values.required_checkins with at least one entry",
+        )
+    task = {
+        "id": _op_child_id(message_id, operation_id, "task", relative_path),
+        "title": title,
+        "description": edit.get("description", None),
+        "due_date": edit.get("due_date", None),
+        "priority": edit.get("priority", "medium"),
+        "required_checkins": [],
+    }
+    for ri, rc_values in enumerate(rcs_in):
+        if not isinstance(rc_values, dict):
+            raise HTTPException(status_code=400, detail=f"required_checkins[{ri}] must be an object")
+        task["required_checkins"].append(_build_added_required_checkin(
+            rc_values, message_id, operation_id, f"{relative_path}:rc{ri}",
+        ))
+    return task
+
+
+def _build_added_milestone(
+    values: Dict[str, Any],
+    message_id: str, operation_id: str, relative_path: str,
+) -> dict:
+    edit = _validate_editable_values("milestone", values, require_all=False, allow_nested_children=True)
+    title = edit.get("title")
+    if not title:
+        raise HTTPException(status_code=400, detail="title must be a non-empty string")
+    tasks_in = values.get("tasks")
+    if not isinstance(tasks_in, list) or not tasks_in:
+        raise HTTPException(
+            status_code=400,
+            detail="An added milestone requires values.tasks with at least one entry",
+        )
+    milestone = {
+        "id": _op_child_id(message_id, operation_id, "milestone", relative_path),
+        "title": title,
+        "description": edit.get("description", None),
+        "target_date": edit.get("target_date", None),
+        "tasks": [],
+    }
+    for ti, t_values in enumerate(tasks_in):
+        if not isinstance(t_values, dict):
+            raise HTTPException(status_code=400, detail=f"tasks[{ti}] must be an object")
+        milestone["tasks"].append(_build_added_task(
+            t_values, message_id, operation_id, f"{relative_path}:t{ti}",
+        ))
+    return milestone
+
+
+def _build_added_phase(
+    values: Dict[str, Any],
+    message_id: str, operation_id: str, relative_path: str,
+) -> dict:
+    edit = _validate_editable_values("phase", values, require_all=False, allow_nested_children=True)
+    title = edit.get("title")
+    if not title:
+        raise HTTPException(status_code=400, detail="title must be a non-empty string")
+    milestones_in = values.get("milestones")
+    if not isinstance(milestones_in, list) or not milestones_in:
+        raise HTTPException(
+            status_code=400,
+            detail="An added phase requires values.milestones with at least one entry",
+        )
+    phase = {
+        "id": _op_child_id(message_id, operation_id, "phase", relative_path),
+        "title": title,
+        "description": edit.get("description", None),
+        "milestones": [],
+    }
+    for mi, m_values in enumerate(milestones_in):
+        if not isinstance(m_values, dict):
+            raise HTTPException(status_code=400, detail=f"milestones[{mi}] must be an object")
+        phase["milestones"].append(_build_added_milestone(
+            m_values, message_id, operation_id, f"{relative_path}:m{mi}",
+        ))
+    return phase
+
+
+def _reassign_duplicate_ids(node: dict, entity_type: str, message_id: str, operation_id: str) -> None:
+    """Rewrite every id inside a duplicated subtree to a new deterministic id
+    derived from (message_id, operation_id, node_type, original_id).
+    """
+    original_id = node.get("id")
+    node["id"] = _op_child_id(
+        message_id, operation_id, entity_type, original_id or "root",
+    )
+    if entity_type == "phase":
+        for m in node.get("milestones") or []:
+            _reassign_duplicate_ids(m, "milestone", message_id, operation_id)
+    elif entity_type == "milestone":
+        for t in node.get("tasks") or []:
+            _reassign_duplicate_ids(t, "task", message_id, operation_id)
+    elif entity_type == "task":
+        for rc in node.get("required_checkins") or []:
+            _reassign_duplicate_ids(rc, "required_checkin", message_id, operation_id)
+
+
+def _apply_draft_hierarchy_operation(
+    plan: dict, message_id: str, body: "HierarchyOperationRequest",
+) -> dict:
+    """Apply exactly one draft edit to a deep copy of the plan and return it.
+    Validates the complete resulting hierarchy before returning.
+    """
+    new_plan = _copy.deepcopy(plan)
+    action = body.action
+    etype = body.entity_type
+
+    # ------ Action: update -----------------------------------------------
+    if action == "update":
+        if not body.entity_id:
+            raise HTTPException(status_code=400, detail="entity_id is required for update")
+        if body.parent_id is not None:
+            raise HTTPException(status_code=400, detail="parent_id must be null for update")
+        if body.position is not None:
+            raise HTTPException(status_code=400, detail="position must be null for update")
+        if not isinstance(body.values, dict) or not body.values:
+            raise HTTPException(status_code=400, detail="values is required and must not be empty for update")
+        loc = _locate_draft_node(new_plan, etype, body.entity_id)
+        validated = _validate_editable_values(etype, body.values, require_all=False)
+        loc["node"].update(validated)
+
+    # ------ Action: add --------------------------------------------------
+    elif action == "add":
+        if etype == "plan":
+            raise HTTPException(status_code=400, detail="A draft already has one plan")
+        if body.entity_id is not None:
+            raise HTTPException(status_code=400, detail="entity_id must be null for add")
+        if not body.parent_id:
+            raise HTTPException(status_code=400, detail="parent_id is required for add")
+        if body.position is None:
+            raise HTTPException(status_code=400, detail="position is required for add")
+        if not isinstance(body.values, dict):
+            raise HTTPException(status_code=400, detail="values is required for add")
+
+        # Determine required parent type.
+        required_parent_type = {
+            "phase": "plan", "milestone": "phase",
+            "task": "milestone", "required_checkin": "task",
+        }[etype]
+        if required_parent_type == "plan":
+            if body.parent_id != new_plan.get("id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="parent_id must reference the draft plan",
+                )
+            container = new_plan.setdefault("phases", [])
+        else:
+            parent_loc = _locate_draft_node(new_plan, required_parent_type, body.parent_id)
+            child_key = {
+                "phase": "milestones", "milestone": "tasks",
+                "task": "required_checkins",
+            }[required_parent_type]
+            container = parent_loc["node"].setdefault(child_key, [])
+
+        max_pos = len(container) + 1
+        if body.position < 1 or body.position > max_pos:
+            raise HTTPException(
+                status_code=400,
+                detail=f"position must be between 1 and {max_pos}",
+            )
+
+        if etype == "phase":
+            new_node = _build_added_phase(body.values, message_id, body.operation_id, "new")
+        elif etype == "milestone":
+            new_node = _build_added_milestone(body.values, message_id, body.operation_id, "new")
+        elif etype == "task":
+            new_node = _build_added_task(body.values, message_id, body.operation_id, "new")
+        else:  # required_checkin
+            new_node = _build_added_required_checkin(body.values, message_id, body.operation_id, "new")
+
+        container.insert(body.position - 1, new_node)
+
+    # ------ Action: delete ----------------------------------------------
+    elif action == "delete":
+        if not body.entity_id:
+            raise HTTPException(status_code=400, detail="entity_id is required for delete")
+        if body.values is not None or body.parent_id is not None or body.position is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="values, parent_id, and position must be null for delete",
+            )
+        if etype == "plan":
+            raise HTTPException(status_code=400, detail="The draft plan itself cannot be deleted")
+        loc = _locate_draft_node(new_plan, etype, body.entity_id)
+        container: List[dict] = loc["container_list"]
+        idx: int = loc["index"]
+        # Invariants: keep at least one at every level after removal.
+        if etype == "phase" and len(container) <= 1:
+            raise HTTPException(
+                status_code=409, detail="A plan must contain at least one phase",
+            )
+        if etype == "milestone" and len(container) <= 1:
+            raise HTTPException(
+                status_code=409, detail="A phase must contain at least one milestone",
+            )
+        if etype == "task" and len(container) <= 1:
+            raise HTTPException(
+                status_code=409, detail="A milestone must contain at least one task",
+            )
+        if etype == "required_checkin" and len(container) <= 1:
+            raise HTTPException(
+                status_code=409, detail="A task must contain at least one required check-in",
+            )
+        container.pop(idx)
+
+    # ------ Action: move -------------------------------------------------
+    elif action == "move":
+        if not body.entity_id:
+            raise HTTPException(status_code=400, detail="entity_id is required for move")
+        if body.parent_id is None:
+            raise HTTPException(status_code=400, detail="parent_id is required for move")
+        if body.position is None:
+            raise HTTPException(status_code=400, detail="position is required for move")
+        if body.values is not None:
+            raise HTTPException(status_code=400, detail="values must be null for move")
+        if etype == "plan":
+            raise HTTPException(status_code=400, detail="The draft plan itself cannot be moved")
+
+        loc = _locate_draft_node(new_plan, etype, body.entity_id)
+        source_list: List[dict] = loc["container_list"]
+        source_index: int = loc["index"]
+
+        required_parent_type = {
+            "phase": "plan", "milestone": "phase",
+            "task": "milestone", "required_checkin": "task",
+        }[etype]
+
+        if required_parent_type == "plan":
+            if body.parent_id != new_plan.get("id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="parent_id must reference the draft plan",
+                )
+            dest_list = new_plan.setdefault("phases", [])
+        else:
+            parent_loc = _locate_draft_node(new_plan, required_parent_type, body.parent_id)
+            child_key = {
+                "phase": "milestones", "milestone": "tasks",
+                "task": "required_checkins",
+            }[required_parent_type]
+            dest_list = parent_loc["node"].setdefault(child_key, [])
+
+        same_parent = dest_list is source_list
+        if same_parent:
+            if body.position < 1 or body.position > len(dest_list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"position must be between 1 and {len(dest_list)}",
+                )
+        else:
+            # Cross-parent move must not leave source empty.
+            if etype == "milestone" and len(source_list) <= 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Moving the last milestone out of a phase is forbidden",
+                )
+            if etype == "task" and len(source_list) <= 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Moving the last task out of a milestone is forbidden",
+                )
+            if etype == "required_checkin" and len(source_list) <= 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Moving the last required check-in out of a task is forbidden",
+                )
+            if body.position < 1 or body.position > len(dest_list) + 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"position must be between 1 and {len(dest_list) + 1}",
+                )
+
+        node = source_list.pop(source_index)
+        # If same_parent and the removal shifted indices, use raw insert.
+        dest_list.insert(body.position - 1, node)
+
+    # ------ Action: duplicate -------------------------------------------
+    elif action == "duplicate":
+        if not body.entity_id:
+            raise HTTPException(status_code=400, detail="entity_id is required for duplicate")
+        if body.parent_id is None:
+            raise HTTPException(status_code=400, detail="parent_id is required for duplicate")
+        if body.position is None:
+            raise HTTPException(status_code=400, detail="position is required for duplicate")
+        if body.values is not None:
+            raise HTTPException(status_code=400, detail="values must be null for duplicate")
+        if etype == "plan":
+            raise HTTPException(status_code=400, detail="The draft plan itself cannot be duplicated")
+
+        loc = _locate_draft_node(new_plan, etype, body.entity_id)
+
+        required_parent_type = {
+            "phase": "plan", "milestone": "phase",
+            "task": "milestone", "required_checkin": "task",
+        }[etype]
+
+        if required_parent_type == "plan":
+            if body.parent_id != new_plan.get("id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="parent_id must reference the draft plan",
+                )
+            dest_list = new_plan.setdefault("phases", [])
+        else:
+            parent_loc = _locate_draft_node(new_plan, required_parent_type, body.parent_id)
+            child_key = {
+                "phase": "milestones", "milestone": "tasks",
+                "task": "required_checkins",
+            }[required_parent_type]
+            dest_list = parent_loc["node"].setdefault(child_key, [])
+
+        if body.position < 1 or body.position > len(dest_list) + 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"position must be between 1 and {len(dest_list) + 1}",
+            )
+
+        duplicate = _copy.deepcopy(loc["node"])
+        _reassign_duplicate_ids(duplicate, etype, message_id, body.operation_id)
+        dest_list.insert(body.position - 1, duplicate)
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+
+    # Validate the full resulting hierarchy.
+    _validate_plan_hierarchy(new_plan)
+    _collect_draft_ids(new_plan)  # ensures every id is present and unique
+    return new_plan
+
+
 
 
 async def _materialize_proposal(
@@ -977,52 +1678,52 @@ async def _materialize_proposal(
 
         # 3. Tasks (legacy flat proposal path — only when no plan hierarchy).
         if not has_plan_hierarchy:
-         for idx, tk in enumerate(proposal.get("tasks") or []):
-            if not isinstance(tk, dict):
-                continue
-            title = (tk.get("title") or "").strip()
-            if not title:
-                continue
-            priority = (tk.get("priority") or "medium").lower()
-            if priority not in VALID_PRIORITIES:
-                priority = "medium"
-            commitment_type = (tk.get("commitment_type") or "postponable").lower()
-            if commitment_type not in VALID_COMMITMENT_TYPES:
-                commitment_type = "postponable"
-            due = _iso_date(tk.get("due_date")) or ""
-            expected_outcome_id: Optional[str] = None
-            project_id: Optional[str] = None
-            origin = "standalone"
-            if target_type == "goal":
-                eo_title = (tk.get("expected_outcome_title") or "").strip().lower()
-                if eo_title and eo_title in outcome_id_by_title:
-                    expected_outcome_id = outcome_id_by_title[eo_title]
-                    origin = "expected_outcome"
-                elif outcome_id_by_title:
-                    expected_outcome_id = next(iter(outcome_id_by_title.values()))
-                    origin = "expected_outcome"
-            else:
-                project_id = target_id
-                origin = "project"
-            key = _materialization_key(conversation_id, message_id, "task", str(idx))
-            doc = {
-                "id": _materialized_id(key), "user_id": user_id,
-                "title": title, "due_date": due,
-                "priority": priority, "status": "todo",
-                "notes": (tk.get("notes") or "").strip(),
-                "origin": origin,
-                "expected_outcome_id": expected_outcome_id,
-                "project_id": project_id,
-                "component_id": None,
-                "assigned_to_type": "self", "assigned_to_name": "", "assigned_to_phone": "",
-                "commitment_type": commitment_type,
-                "planning_materialization_key": key,
-                "created_at": now, "updated_at": now,
-            }
-            stored, was_new = await _upsert_artifact(db, "tasks", user_id, key, doc)
-            created_tasks.append(stored["id"])
-            if was_new:
-                inserted_this_attempt["tasks"].append(stored["id"])
+            for idx, tk in enumerate(proposal.get("tasks") or []):
+                if not isinstance(tk, dict):
+                    continue
+                title = (tk.get("title") or "").strip()
+                if not title:
+                    continue
+                priority = (tk.get("priority") or "medium").lower()
+                if priority not in VALID_PRIORITIES:
+                    priority = "medium"
+                commitment_type = (tk.get("commitment_type") or "postponable").lower()
+                if commitment_type not in VALID_COMMITMENT_TYPES:
+                    commitment_type = "postponable"
+                due = _iso_date(tk.get("due_date")) or ""
+                expected_outcome_id: Optional[str] = None
+                project_id: Optional[str] = None
+                origin = "standalone"
+                if target_type == "goal":
+                    eo_title = (tk.get("expected_outcome_title") or "").strip().lower()
+                    if eo_title and eo_title in outcome_id_by_title:
+                        expected_outcome_id = outcome_id_by_title[eo_title]
+                        origin = "expected_outcome"
+                    elif outcome_id_by_title:
+                        expected_outcome_id = next(iter(outcome_id_by_title.values()))
+                        origin = "expected_outcome"
+                else:
+                    project_id = target_id
+                    origin = "project"
+                key = _materialization_key(conversation_id, message_id, "task", str(idx))
+                doc = {
+                    "id": _materialized_id(key), "user_id": user_id,
+                    "title": title, "due_date": due,
+                    "priority": priority, "status": "todo",
+                    "notes": (tk.get("notes") or "").strip(),
+                    "origin": origin,
+                    "expected_outcome_id": expected_outcome_id,
+                    "project_id": project_id,
+                    "component_id": None,
+                    "assigned_to_type": "self", "assigned_to_name": "", "assigned_to_phone": "",
+                    "commitment_type": commitment_type,
+                    "planning_materialization_key": key,
+                    "created_at": now, "updated_at": now,
+                }
+                stored, was_new = await _upsert_artifact(db, "tasks", user_id, key, doc)
+                created_tasks.append(stored["id"])
+                if was_new:
+                    inserted_this_attempt["tasks"].append(stored["id"])
 
         # 4. Time commitments.
         for idx, tc in enumerate(proposal.get("time_commitments") or []):
@@ -1237,6 +1938,27 @@ class MessageRequest(BaseModel):
 
 class MaterializeRequest(BaseModel):
     message_id: str
+    # Batch 2B8 — required for editable plan proposals so that a concurrent
+    # edit cannot slip in between reading and materializing the draft. Legacy
+    # proposals (no plan hierarchy) may still omit this.
+    expected_proposal_revision: Optional[int] = Field(default=None, ge=1)
+
+
+class HierarchyOperationRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=64)
+    expected_revision: int = Field(ge=1)
+    action: Literal["add", "update", "delete", "move", "duplicate"]
+    entity_type: Literal[
+        "plan",
+        "phase",
+        "milestone",
+        "task",
+        "required_checkin",
+    ]
+    entity_id: Optional[str] = None
+    parent_id: Optional[str] = None
+    position: Optional[int] = Field(default=None, ge=1)
+    values: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1275,12 +1997,29 @@ async def post_message(
     prose, proposal = _split_message(raw)
     if not prose and proposal:
         prose = proposal.get("summary") or "Here are some proposed changes for your plan."
-    asst_msg = {
-        "id": _uuid(), "role": "assistant",
-        "content": raw,
-        "proposal": proposal,
-        "created_at": _now(),
-    }
+
+    # Batch 2B8 — generate the assistant message id up front so that when
+    # the proposal carries a durable Plan hierarchy we can normalise it with
+    # stable draft node ids anchored to this message id before storing.
+    assistant_message_id = _uuid()
+    if isinstance(proposal, dict) and isinstance(proposal.get("plan"), dict):
+        _validate_plan_hierarchy(proposal["plan"])
+        proposal["plan"] = _normalise_draft_hierarchy(proposal["plan"], assistant_message_id)
+        asst_msg = {
+            "id": assistant_message_id, "role": "assistant",
+            "content": raw,
+            "proposal": proposal,
+            "proposal_revision": 1,
+            "proposal_operation_ids": [],
+            "created_at": _now(),
+        }
+    else:
+        asst_msg = {
+            "id": assistant_message_id, "role": "assistant",
+            "content": raw,
+            "proposal": proposal,
+            "created_at": _now(),
+        }
 
     # Batch 2B6 — atomic $push instead of a whole-document replace so a
     # concurrent write can't erase materialization state.
@@ -1354,21 +2093,41 @@ async def materialize(
     if not proposal:
         raise HTTPException(status_code=400, detail="This message has no proposal to apply.")
 
-    # Batch 2B6 — atomic claim on the embedded message.
+    # Batch 2B8 — revision guard for editable plan proposals.
+    has_plan = isinstance(proposal, dict) and isinstance(proposal.get("plan"), dict)
+    if has_plan:
+        if body.expected_proposal_revision is None:
+            raise HTTPException(
+                status_code=400,
+                detail="expected_proposal_revision is required for an editable plan",
+            )
+        stored_rev = target_msg.get("proposal_revision")
+        if not isinstance(stored_rev, int) or stored_rev != body.expected_proposal_revision:
+            raise HTTPException(
+                status_code=409,
+                detail="The draft changed; refresh it before applying",
+            )
+
+    # Batch 2B6 — atomic claim on the embedded message. Batch 2B8 adds a
+    # proposal_revision predicate so that any edit racing this claim is
+    # forced to fail with a revision-mismatch 409.
     claim_id = _uuid()
     claim_started_at = _now()
+    claim_elem_match: Dict[str, Any] = {
+        "id": body.message_id,
+        "materialized_at": {"$exists": False},
+        "$or": [
+            {"materialization_state": {"$exists": False}},
+            {"materialization_state": "failed"},
+        ],
+    }
+    if has_plan:
+        claim_elem_match["proposal_revision"] = body.expected_proposal_revision
     claim = await db.plan_conversations.update_one(
         {
             "id": conversation_id,
             "user_id": current_user["id"],
-            "messages": {"$elemMatch": {
-                "id": body.message_id,
-                "materialized_at": {"$exists": False},
-                "$or": [
-                    {"materialization_state": {"$exists": False}},
-                    {"materialization_state": "failed"},
-                ],
-            }},
+            "messages": {"$elemMatch": claim_elem_match},
         },
         {
             "$set": {
@@ -1393,8 +2152,32 @@ async def materialize(
                         }
                     if m.get("materialization_state") == "applying":
                         raise HTTPException(status_code=409, detail="This proposal is already being applied.")
+                    if has_plan and m.get("proposal_revision") != body.expected_proposal_revision:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="The draft changed; refresh it before applying",
+                        )
                     break
         raise HTTPException(status_code=409, detail="This proposal could not be claimed for application.")
+
+    # Batch 2B8 — after a successful claim, re-read the conversation so we
+    # use the version of the proposal that was just locked in by the claim
+    # (guaranteed by ``materialization_claim_id`` equality). Any earlier
+    # in-memory ``proposal`` may be stale.
+    claimed_conv = await db.plan_conversations.find_one(
+        {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+    ) or conv
+    claimed_msg: Optional[dict] = None
+    for m in claimed_conv.get("messages") or []:
+        if m.get("id") == body.message_id and m.get("materialization_claim_id") == claim_id:
+            claimed_msg = m
+            break
+    if claimed_msg is None or not isinstance(claimed_msg.get("proposal"), dict):
+        raise HTTPException(
+            status_code=409,
+            detail="This proposal could not be claimed for application.",
+        )
+    proposal = claimed_msg["proposal"]
 
     try:
         result = await _materialize_proposal(
@@ -1471,13 +2254,213 @@ async def materialize(
 
 
 # ---------------------------------------------------------------------------
-# Durable Plan hierarchy — read-only endpoints (Batch 2B7)
+# Batch 2B8 — draft (in-conversation) hierarchy editing endpoints.
+# These operate ONLY on the proposal.plan embedded in the assistant message
+# in plan_conversations. They MUST NEVER edit permanent hierarchy records.
+# No LLM call happens here.
 # ---------------------------------------------------------------------------
 
 
-def _strip_mongo_id(doc: dict) -> dict:
-    doc.pop("_id", None)
-    return doc
+def _get_assistant_hierarchy_message(conv: dict, message_id: str) -> dict:
+    """Return the assistant message with an editable plan hierarchy, or
+    raise the appropriate error (404 / 400 / 409)."""
+    target_msg: Optional[dict] = None
+    for m in conv.get("messages") or []:
+        if m.get("id") == message_id:
+            target_msg = m
+            break
+    if not target_msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if target_msg.get("role") != "assistant":
+        raise HTTPException(status_code=400, detail="This message has no editable plan hierarchy")
+    proposal = target_msg.get("proposal")
+    if not isinstance(proposal, dict) or not isinstance(proposal.get("plan"), dict):
+        raise HTTPException(status_code=400, detail="This message has no editable plan hierarchy")
+    if target_msg.get("materialized_at"):
+        raise HTTPException(status_code=409, detail="This proposal has already been applied")
+    if target_msg.get("materialization_state") == "applied":
+        raise HTTPException(status_code=409, detail="This proposal has already been applied")
+    if target_msg.get("materialization_state") == "applying":
+        raise HTTPException(status_code=409, detail="This proposal is currently being applied")
+    return target_msg
+
+
+def _valid_uuid(v: Any) -> bool:
+    if not isinstance(v, str) or not v:
+        return False
+    try:
+        uuid.UUID(v)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+@planning_router.get("/conversations/{conversation_id}/proposals/{message_id}/hierarchy")
+async def read_draft_hierarchy(
+    conversation_id: str, message_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    conv = await db.plan_conversations.find_one(
+        {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    msg = _get_assistant_hierarchy_message(conv, message_id)
+
+    needs_backfill = (
+        not isinstance(msg.get("proposal_revision"), int)
+        or msg.get("proposal_operation_ids") is None
+    )
+    plan = msg["proposal"].get("plan") or {}
+    # Also backfill if any node is missing an id.
+    try:
+        _collect_draft_ids(plan)
+        ids_ok = True
+    except HTTPException:
+        ids_ok = False
+
+    if needs_backfill or not ids_ok:
+        normalised = _normalise_draft_hierarchy(plan, message_id)
+        # Conditional positional update: message must not be materialized or
+        # currently applying.
+        r = await db.plan_conversations.update_one(
+            {
+                "id": conversation_id,
+                "user_id": current_user["id"],
+                "messages": {"$elemMatch": {
+                    "id": message_id,
+                    "materialized_at": {"$exists": False},
+                    "materialization_state": {"$nin": ["applying", "applied"]},
+                }},
+            },
+            {
+                "$set": {
+                    "messages.$.proposal.plan": normalised,
+                    "messages.$.proposal_revision": 1,
+                    "messages.$.proposal_operation_ids":
+                        list(msg.get("proposal_operation_ids") or []),
+                    "updated_at": _now(),
+                },
+            },
+        )
+        if r.modified_count == 0:
+            # Someone applied/started applying in between; report the state.
+            conv = await db.plan_conversations.find_one(
+                {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+            )
+            if conv:
+                _get_assistant_hierarchy_message(conv, message_id)
+            raise HTTPException(status_code=409, detail="The draft changed; refresh it and try again")
+        conv = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        msg = _get_assistant_hierarchy_message(conv or {"messages": []}, message_id)
+
+    return {
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "proposal_revision": msg.get("proposal_revision") or 1,
+        "plan": (msg.get("proposal") or {}).get("plan") or {},
+    }
+
+
+@planning_router.post(
+    "/conversations/{conversation_id}/proposals/{message_id}/hierarchy/operations"
+)
+async def apply_hierarchy_operation(
+    conversation_id: str, message_id: str, body: HierarchyOperationRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if not _valid_uuid(body.operation_id):
+        raise HTTPException(status_code=400, detail="operation_id must be a valid UUID")
+
+    db = get_db()
+    conv = await db.plan_conversations.find_one(
+        {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    msg = _get_assistant_hierarchy_message(conv, message_id)
+
+    # Idempotency — the same operation id must not be applied twice.
+    existing_ops = list(msg.get("proposal_operation_ids") or [])
+    if body.operation_id in existing_ops:
+        return {
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "operation_id": body.operation_id,
+            "proposal_revision": msg.get("proposal_revision") or 1,
+            "plan": (msg.get("proposal") or {}).get("plan") or {},
+        }
+
+    stored_rev = msg.get("proposal_revision")
+    if not isinstance(stored_rev, int) or stored_rev != body.expected_revision:
+        raise HTTPException(status_code=409, detail="The draft changed; refresh it and try again")
+
+    current_plan = (msg.get("proposal") or {}).get("plan") or {}
+    updated_plan = _apply_draft_hierarchy_operation(current_plan, message_id, body)
+
+    r = await db.plan_conversations.update_one(
+        {
+            "id": conversation_id,
+            "user_id": current_user["id"],
+            "messages": {"$elemMatch": {
+                "id": message_id,
+                "proposal_revision": body.expected_revision,
+                "materialized_at": {"$exists": False},
+                "materialization_state": {"$nin": ["applying", "applied"]},
+                "proposal_operation_ids": {"$ne": body.operation_id},
+            }},
+        },
+        {
+            "$set": {
+                "messages.$.proposal.plan": updated_plan,
+                "messages.$.proposal_revision": body.expected_revision + 1,
+                "updated_at": _now(),
+            },
+            "$push": {"messages.$.proposal_operation_ids": body.operation_id},
+            "$unset": {
+                "messages.$.materialization_state": "",
+                "messages.$.materialization_error": "",
+            },
+        },
+    )
+
+    if r.modified_count == 0:
+        fresh = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        if fresh:
+            for m in fresh.get("messages") or []:
+                if m.get("id") == message_id:
+                    if body.operation_id in (m.get("proposal_operation_ids") or []):
+                        return {
+                            "conversation_id": conversation_id,
+                            "message_id": message_id,
+                            "operation_id": body.operation_id,
+                            "proposal_revision": m.get("proposal_revision") or 1,
+                            "plan": (m.get("proposal") or {}).get("plan") or {},
+                        }
+                    if m.get("materialized_at") or m.get("materialization_state") == "applied":
+                        raise HTTPException(status_code=409, detail="This proposal has already been applied")
+                    if m.get("materialization_state") == "applying":
+                        raise HTTPException(status_code=409, detail="This proposal is currently being applied")
+                    break
+        raise HTTPException(status_code=409, detail="The draft changed; refresh it and try again")
+
+    return {
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "operation_id": body.operation_id,
+        "proposal_revision": body.expected_revision + 1,
+        "plan": updated_plan,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Durable Plan hierarchy — read-only endpoints (Batch 2B7)
+# ---------------------------------------------------------------------------
 
 
 @planning_router.get("/hierarchy/targets/{target_type}/{target_id}")
