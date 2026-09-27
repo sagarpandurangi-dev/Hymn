@@ -283,6 +283,19 @@ Every response has TWO parts:
 <<<HYMN_PROPOSAL>>>
 {"summary": "one-line human summary",
  "feasibility_note": "one short line if capacity is tight, otherwise omit",
+ "plan": {"title": "human-readable name for this plan",
+          "phases": [{"title": "phase name",
+                      "description": "optional short description or null",
+                      "milestones": [{"title": "milestone name",
+                                       "description": "optional short description or null",
+                                       "target_date": "YYYY-MM-DD or null",
+                                       "tasks": [{"title": "task name",
+                                                   "description": "optional short description or null",
+                                                   "due_date": "YYYY-MM-DD or null",
+                                                   "priority": "low|medium|high",
+                                                   "required_checkins": [{"title": "one-line label",
+                                                                            "prompt": "what the user should verify or report",
+                                                                            "cadence": "once|daily|weekly|monthly|quarterly"}]}]}]}]},
  "expected_outcomes": [{"title": "...", "target_value": "", "unit": "",
                          "deadline": "YYYY-MM-DD or empty",
                          "outcome_type": "generic"}],
@@ -322,6 +335,15 @@ Every response has TWO parts:
 <<<END>>>
 
 Rules for the proposal block:
+- Every actionable proposal MUST include a `plan` object with a
+  non-empty `phases` list. Every phase MUST have a non-empty
+  `milestones` list; every milestone MUST have a non-empty `tasks`
+  list; every task MUST have a non-empty `required_checkins` list.
+  This is the durable Plan → Phase → Milestone → Task → Required
+  Check-in hierarchy Hymn stores server-side.
+- `required_checkins` describe future obligations the user will
+  verify — they are NOT completed check-ins. Never invent progress,
+  qualifications, current balances, or historical activity for them.
 - Only propose additions/refinements to the current target — never delete
   its existing items.
 - Do not propose deleting, merging, postponing, cancelling, completing, renaming, or otherwise modifying existing Goals, Projects, Expected Outcomes, Tasks, or Check-ins. Explain any suggested trade-off conversationally. Hymn requires item-by-item user review before existing records may be changed.
@@ -672,6 +694,79 @@ async def _upsert_artifact(
     return stored or document, result.upserted_id is not None
 
 
+VALID_REQUIRED_CHECKIN_CADENCES = {"once", "daily", "weekly", "monthly", "quarterly"}
+
+
+def _validate_plan_hierarchy(plan: Any) -> None:
+    """Strictly validate a durable Plan → Phase → Milestone → Task →
+    Required Check-in hierarchy. On any structural or field error raises
+    HTTPException(status_code=422, ...) whose detail identifies the
+    exact hierarchy location using zero-based indexes.
+    """
+    def fail(location: str, msg: str) -> None:
+        raise HTTPException(status_code=422, detail=f"{location} {msg}")
+
+    def _nonblank_str(v: Any) -> bool:
+        return isinstance(v, str) and v.strip() != ""
+
+    if not isinstance(plan, dict):
+        fail("plan", "must be an object")
+    if not _nonblank_str(plan.get("title")):
+        fail("plan.title", "must be a non-empty string")
+    phases = plan.get("phases")
+    if not isinstance(phases, list) or len(phases) == 0:
+        fail("plan.phases", "must be a non-empty array")
+    for pi, phase in enumerate(phases):
+        ploc = f"plan.phases[{pi}]"
+        if not isinstance(phase, dict):
+            fail(ploc, "must be an object")
+        if not _nonblank_str(phase.get("title")):
+            fail(f"{ploc}.title", "must be a non-empty string")
+        milestones = phase.get("milestones")
+        if not isinstance(milestones, list) or len(milestones) == 0:
+            fail(f"{ploc}.milestones", "must be a non-empty array")
+        for mi, milestone in enumerate(milestones):
+            mloc = f"{ploc}.milestones[{mi}]"
+            if not isinstance(milestone, dict):
+                fail(mloc, "must be an object")
+            if not _nonblank_str(milestone.get("title")):
+                fail(f"{mloc}.title", "must be a non-empty string")
+            td = milestone.get("target_date")
+            if td is not None and _iso_date(td) is None:
+                fail(f"{mloc}.target_date", "must be null or YYYY-MM-DD")
+            tasks = milestone.get("tasks")
+            if not isinstance(tasks, list) or len(tasks) == 0:
+                fail(f"{mloc}.tasks", "must be a non-empty array")
+            for ti, task in enumerate(tasks):
+                tloc = f"{mloc}.tasks[{ti}]"
+                if not isinstance(task, dict):
+                    fail(tloc, "must be an object")
+                if not _nonblank_str(task.get("title")):
+                    fail(f"{tloc}.title", "must be a non-empty string")
+                dd = task.get("due_date")
+                if dd is not None and _iso_date(dd) is None:
+                    fail(f"{tloc}.due_date", "must be null or YYYY-MM-DD")
+                pr = task.get("priority")
+                if pr not in VALID_PRIORITIES:
+                    fail(f"{tloc}.priority", "must be one of low, medium, high")
+                rcs = task.get("required_checkins")
+                if not isinstance(rcs, list) or len(rcs) == 0:
+                    fail(f"{tloc}.required_checkins", "must be a non-empty array")
+                for ri, rc in enumerate(rcs):
+                    rloc = f"{tloc}.required_checkins[{ri}]"
+                    if not isinstance(rc, dict):
+                        fail(rloc, "must be an object")
+                    if not _nonblank_str(rc.get("title")):
+                        fail(f"{rloc}.title", "must be a non-empty string")
+                    if not _nonblank_str(rc.get("prompt")):
+                        fail(f"{rloc}.prompt", "must be a non-empty string")
+                    if rc.get("cadence") not in VALID_REQUIRED_CHECKIN_CADENCES:
+                        fail(
+                            f"{rloc}.cadence",
+                            "must be one of once, daily, weekly, monthly, quarterly",
+                        )
+
+
 async def _materialize_proposal(
     db, user_id: str, target_type: str, target_id: str, proposal: dict,
     conversation_id: str, message_id: str,
@@ -701,10 +796,21 @@ async def _materialize_proposal(
     created_tasks: List[str] = []
     created_time_commitments: List[str] = []
     created_checkins: List[str] = []
+    # Batch 2B7 — durable Plan hierarchy result buckets.
+    plan_document: Optional[dict] = None
+    phase_documents: List[dict] = []
+    milestone_documents: List[dict] = []
+    hierarchical_task_documents: List[dict] = []
+    required_checkin_documents: List[dict] = []
     inserted_this_attempt: Dict[str, List[str]] = {
         "expected_outcomes": [], "tasks": [], "time_commitments": [], "checkins": [],
+        "plans": [], "plan_phases": [], "plan_milestones": [], "required_checkins": [],
     }
     target_updates: Dict[str, Any] = {}
+    plan_input = proposal.get("plan")
+    has_plan_hierarchy = plan_input is not None
+    if has_plan_hierarchy:
+        _validate_plan_hierarchy(plan_input)
 
     if target_type == "goal":
         existing_outcomes = await db.expected_outcomes.find(
@@ -748,8 +854,130 @@ async def _materialize_proposal(
                 if was_new:
                     inserted_this_attempt["expected_outcomes"].append(stored["id"])
 
-        # 3. Tasks.
-        for idx, tk in enumerate(proposal.get("tasks") or []):
+        # 2b. Batch 2B7 — Durable Plan → Phase → Milestone → Task →
+        # Required Check-in hierarchy. When the proposal carries a
+        # `plan` object we materialize this permanent hierarchy and
+        # skip the legacy flat tasks/checkins/checkin_recurrences
+        # so the same proposal cannot produce two competing views.
+        if has_plan_hierarchy:
+            plan_title = (plan_input.get("title") or "").strip()
+            plan_key = _materialization_key(conversation_id, message_id, "plan", "0")
+            plan_doc = {
+                "id": _materialized_id(plan_key), "user_id": user_id,
+                "target_type": target_type, "target_id": target_id,
+                "title": plan_title, "status": "active",
+                "source_conversation_id": conversation_id,
+                "planning_materialization_key": plan_key,
+                "created_at": now, "updated_at": now,
+            }
+            stored_plan, was_new = await _upsert_artifact(db, "plans", user_id, plan_key, plan_doc)
+            plan_document = stored_plan
+            plan_id_val = stored_plan["id"]
+            if was_new:
+                inserted_this_attempt["plans"].append(stored_plan["id"])
+            for pi, phase in enumerate(plan_input.get("phases") or []):
+                phase_title = (phase.get("title") or "").strip()
+                phase_desc_raw = phase.get("description")
+                phase_desc = phase_desc_raw.strip() if isinstance(phase_desc_raw, str) and phase_desc_raw.strip() else None
+                phase_key = _materialization_key(conversation_id, message_id, "phase", str(pi))
+                phase_doc = {
+                    "id": _materialized_id(phase_key), "user_id": user_id,
+                    "plan_id": plan_id_val,
+                    "title": phase_title, "description": phase_desc,
+                    "position": pi + 1, "status": "active",
+                    "source_conversation_id": conversation_id,
+                    "planning_materialization_key": phase_key,
+                    "created_at": now, "updated_at": now,
+                }
+                stored_phase, was_new = await _upsert_artifact(db, "plan_phases", user_id, phase_key, phase_doc)
+                phase_documents.append(stored_phase)
+                phase_id_val = stored_phase["id"]
+                if was_new:
+                    inserted_this_attempt["plan_phases"].append(stored_phase["id"])
+                for mi, milestone in enumerate(phase.get("milestones") or []):
+                    m_title = (milestone.get("title") or "").strip()
+                    m_desc_raw = milestone.get("description")
+                    m_desc = m_desc_raw.strip() if isinstance(m_desc_raw, str) and m_desc_raw.strip() else None
+                    m_target_date = _iso_date(milestone.get("target_date")) or None
+                    m_key = _materialization_key(conversation_id, message_id, "milestone", f"{pi}:{mi}")
+                    m_doc = {
+                        "id": _materialized_id(m_key), "user_id": user_id,
+                        "plan_id": plan_id_val, "phase_id": phase_id_val,
+                        "title": m_title, "description": m_desc,
+                        "target_date": m_target_date,
+                        "position": mi + 1, "status": "active",
+                        "source_conversation_id": conversation_id,
+                        "planning_materialization_key": m_key,
+                        "created_at": now, "updated_at": now,
+                    }
+                    stored_m, was_new = await _upsert_artifact(db, "plan_milestones", user_id, m_key, m_doc)
+                    milestone_documents.append(stored_m)
+                    milestone_id_val = stored_m["id"]
+                    if was_new:
+                        inserted_this_attempt["plan_milestones"].append(stored_m["id"])
+                    for ti, task in enumerate(milestone.get("tasks") or []):
+                        t_title = (task.get("title") or "").strip()
+                        t_desc_raw = task.get("description")
+                        t_desc = t_desc_raw.strip() if isinstance(t_desc_raw, str) and t_desc_raw.strip() else ""
+                        t_due = _iso_date(task.get("due_date")) or ""
+                        t_priority = (task.get("priority") or "medium").lower()
+                        if t_priority not in VALID_PRIORITIES:
+                            t_priority = "medium"
+                        t_key = _materialization_key(conversation_id, message_id, "task", f"{pi}:{mi}:{ti}")
+                        t_doc = {
+                            "id": _materialized_id(t_key), "user_id": user_id,
+                            "title": t_title, "description": t_desc,
+                            "due_date": t_due, "priority": t_priority,
+                            "status": "todo",
+                            "notes": "",
+                            "origin": "plan",
+                            "plan_id": plan_id_val,
+                            "phase_id": phase_id_val,
+                            "milestone_id": milestone_id_val,
+                            "goal_id": target_id if target_type == "goal" else None,
+                            "project_id": target_id if target_type == "project" else None,
+                            "expected_outcome_id": None,
+                            "plan_position": ti + 1,
+                            "assigned_to_type": "self", "assigned_to_name": "", "assigned_to_phone": "",
+                            "commitment_type": "postponable",
+                            "planning_materialization_key": t_key,
+                            "created_at": now, "updated_at": now,
+                        }
+                        stored_t, was_new = await _upsert_artifact(db, "tasks", user_id, t_key, t_doc)
+                        hierarchical_task_documents.append(stored_t)
+                        task_id_val = stored_t["id"]
+                        created_tasks.append(stored_t["id"])
+                        if was_new:
+                            inserted_this_attempt["tasks"].append(stored_t["id"])
+                        for ri, rc in enumerate(task.get("required_checkins") or []):
+                            rc_title = (rc.get("title") or "").strip()
+                            rc_prompt = (rc.get("prompt") or "").strip()
+                            rc_cadence = rc.get("cadence")
+                            rc_key = _materialization_key(
+                                conversation_id, message_id, "required_checkin",
+                                f"{pi}:{mi}:{ti}:{ri}",
+                            )
+                            rc_doc = {
+                                "id": _materialized_id(rc_key), "user_id": user_id,
+                                "plan_id": plan_id_val, "phase_id": phase_id_val,
+                                "milestone_id": milestone_id_val, "task_id": task_id_val,
+                                "title": rc_title, "prompt": rc_prompt,
+                                "cadence": rc_cadence,
+                                "position": ri + 1, "status": "active",
+                                "source_conversation_id": conversation_id,
+                                "planning_materialization_key": rc_key,
+                                "created_at": now, "updated_at": now,
+                            }
+                            stored_rc, was_new = await _upsert_artifact(
+                                db, "required_checkins", user_id, rc_key, rc_doc,
+                            )
+                            required_checkin_documents.append(stored_rc)
+                            if was_new:
+                                inserted_this_attempt["required_checkins"].append(stored_rc["id"])
+
+        # 3. Tasks (legacy flat proposal path — only when no plan hierarchy).
+        if not has_plan_hierarchy:
+         for idx, tk in enumerate(proposal.get("tasks") or []):
             if not isinstance(tk, dict):
                 continue
             title = (tk.get("title") or "").strip()
@@ -870,7 +1098,7 @@ async def _materialize_proposal(
                 base["project_id"] = p["id"]
             return base
 
-        for idx, entry in enumerate(proposal.get("checkins") or []):
+        for idx, entry in enumerate((proposal.get("checkins") or []) if not has_plan_hierarchy else []):
             if not isinstance(entry, dict):
                 continue
             title = (entry.get("title") or "").strip()
@@ -900,8 +1128,8 @@ async def _materialize_proposal(
             if was_new:
                 inserted_this_attempt["checkins"].append(stored["id"])
 
-        # 6. Recurring check-ins.
-        for rule_index, rule in enumerate(proposal.get("checkin_recurrences") or []):
+        # 6. Recurring check-ins (legacy — skipped when plan hierarchy present).
+        for rule_index, rule in enumerate((proposal.get("checkin_recurrences") or []) if not has_plan_hierarchy else []):
             if not isinstance(rule, dict):
                 continue
             title = (rule.get("title") or "").strip()
@@ -971,6 +1199,15 @@ async def _materialize_proposal(
             await db.time_commitments.delete_one({"id": tcid, "user_id": user_id})
         for cid in inserted_this_attempt["checkins"]:
             await db.checkins.delete_one({"id": cid, "user_id": user_id})
+        # Batch 2B7 — compensation for plan hierarchy inserts.
+        for rcid in inserted_this_attempt["required_checkins"]:
+            await db.required_checkins.delete_one({"id": rcid, "user_id": user_id})
+        for mid in inserted_this_attempt["plan_milestones"]:
+            await db.plan_milestones.delete_one({"id": mid, "user_id": user_id})
+        for phid in inserted_this_attempt["plan_phases"]:
+            await db.plan_phases.delete_one({"id": phid, "user_id": user_id})
+        for pid in inserted_this_attempt["plans"]:
+            await db.plans.delete_one({"id": pid, "user_id": user_id})
         raise HTTPException(status_code=500,
                             detail=f"Failed to apply proposal: {type(exc).__name__}")
 
@@ -980,6 +1217,12 @@ async def _materialize_proposal(
         "created_time_commitments": created_time_commitments,
         "created_checkins": created_checkins,
         "target_updated": bool(target_updates),
+        # Batch 2B7 — durable Plan hierarchy artifacts (empty for legacy proposals).
+        "plan": plan_document,
+        "phases": phase_documents,
+        "milestones": milestone_documents,
+        "tasks": hierarchical_task_documents,
+        "required_checkins": required_checkin_documents,
     }
 
 
@@ -1228,6 +1471,101 @@ async def materialize(
 
 
 # ---------------------------------------------------------------------------
+# Durable Plan hierarchy — read-only endpoints (Batch 2B7)
+# ---------------------------------------------------------------------------
+
+
+def _strip_mongo_id(doc: dict) -> dict:
+    doc.pop("_id", None)
+    return doc
+
+
+@planning_router.get("/hierarchy/targets/{target_type}/{target_id}")
+async def list_target_plans(
+    target_type: str, target_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    _require(target_type in TARGET_TYPES, f"target_type must be one of {list(TARGET_TYPES)}")
+    db = get_db()
+    plans = await db.plans.find(
+        {
+            "user_id": current_user["id"],
+            "target_type": target_type,
+            "target_id": target_id,
+        },
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(length=500)
+    return {"plans": plans}
+
+
+@planning_router.get("/hierarchy/plans/{plan_id}")
+async def read_plan_hierarchy(
+    plan_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    plan = await db.plans.find_one(
+        {"id": plan_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
+    phases = await db.plan_phases.find(
+        {"user_id": current_user["id"], "plan_id": plan_id}, {"_id": 0},
+    ).sort("position", 1).to_list(length=1000)
+    milestones = await db.plan_milestones.find(
+        {"user_id": current_user["id"], "plan_id": plan_id}, {"_id": 0},
+    ).sort("position", 1).to_list(length=5000)
+    tasks = await db.tasks.find(
+        {"user_id": current_user["id"], "plan_id": plan_id}, {"_id": 0},
+    ).sort("plan_position", 1).to_list(length=20000)
+    required_checkins = await db.required_checkins.find(
+        {"user_id": current_user["id"], "plan_id": plan_id}, {"_id": 0},
+    ).sort("position", 1).to_list(length=50000)
+
+    tasks_by_milestone: Dict[str, List[dict]] = {}
+    for t in tasks:
+        tasks_by_milestone.setdefault(t.get("milestone_id") or "", []).append(t)
+    for lst in tasks_by_milestone.values():
+        lst.sort(key=lambda x: int(x.get("plan_position") or 0))
+
+    rcs_by_task: Dict[str, List[dict]] = {}
+    for rc in required_checkins:
+        rcs_by_task.setdefault(rc.get("task_id") or "", []).append(rc)
+    for lst in rcs_by_task.values():
+        lst.sort(key=lambda x: int(x.get("position") or 0))
+
+    milestones_by_phase: Dict[str, List[dict]] = {}
+    for m in milestones:
+        milestones_by_phase.setdefault(m.get("phase_id") or "", []).append(m)
+    for lst in milestones_by_phase.values():
+        lst.sort(key=lambda x: int(x.get("position") or 0))
+
+    phases.sort(key=lambda x: int(x.get("position") or 0))
+    nested_phases: List[dict] = []
+    for phase in phases:
+        phase_out = dict(phase)
+        phase_milestones = milestones_by_phase.get(phase["id"], [])
+        nested_milestones: List[dict] = []
+        for m in phase_milestones:
+            m_out = dict(m)
+            m_tasks = tasks_by_milestone.get(m["id"], [])
+            nested_tasks: List[dict] = []
+            for t in m_tasks:
+                t_out = dict(t)
+                t_out["required_checkins"] = rcs_by_task.get(t["id"], [])
+                nested_tasks.append(t_out)
+            m_out["tasks"] = nested_tasks
+            nested_milestones.append(m_out)
+        phase_out["milestones"] = nested_milestones
+        nested_phases.append(phase_out)
+
+    plan_out = dict(plan)
+    plan_out["phases"] = nested_phases
+    return {"plan": plan_out}
+
+
+# ---------------------------------------------------------------------------
 # Index bootstrap
 # ---------------------------------------------------------------------------
 
@@ -1264,4 +1602,52 @@ async def ensure_planning_indexes(database) -> None:
         unique=True,
         partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
         name="checkins_planning_mat_key_uniq",
+    )
+    # Batch 2B7 — durable Plan hierarchy: partial unique indexes on
+    # planning_materialization_key so retries cannot duplicate plan,
+    # phase, milestone, or required-check-in records.
+    await database.plans.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="plans_planning_mat_key_uniq",
+    )
+    await database.plan_phases.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="plan_phases_planning_mat_key_uniq",
+    )
+    await database.plan_milestones.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="plan_milestones_planning_mat_key_uniq",
+    )
+    await database.required_checkins.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="required_checkins_planning_mat_key_uniq",
+    )
+    # Batch 2B7 — non-unique lookup indexes for hierarchy reads.
+    await database.plans.create_index(
+        [("user_id", 1), ("target_type", 1), ("target_id", 1)],
+        name="plans_user_target_lookup",
+    )
+    await database.plan_phases.create_index(
+        [("user_id", 1), ("plan_id", 1), ("position", 1)],
+        name="plan_phases_user_plan_position",
+    )
+    await database.plan_milestones.create_index(
+        [("user_id", 1), ("plan_id", 1), ("phase_id", 1), ("position", 1)],
+        name="plan_milestones_user_plan_phase_position",
+    )
+    await database.tasks.create_index(
+        [("user_id", 1), ("plan_id", 1), ("phase_id", 1), ("milestone_id", 1), ("plan_position", 1)],
+        name="tasks_user_plan_phase_milestone_position",
+    )
+    await database.required_checkins.create_index(
+        [("user_id", 1), ("plan_id", 1), ("task_id", 1), ("position", 1)],
+        name="required_checkins_user_plan_task_position",
     )

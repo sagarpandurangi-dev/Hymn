@@ -419,6 +419,15 @@ class TaskResponse(BaseModel):
     expected_outcome_id: Optional[str] = None
     project_id: Optional[str] = None
     component_id: Optional[str] = None
+    # Batch 2B7 — durable Plan hierarchy back-references. These are
+    # read-only on the task response and cannot be supplied via the
+    # ordinary task-create endpoint; only the conversational planning
+    # materializer sets them.
+    goal_id: Optional[str] = None
+    plan_id: Optional[str] = None
+    phase_id: Optional[str] = None
+    milestone_id: Optional[str] = None
+    plan_position: Optional[int] = None
     assigned_to_type: str
     assigned_to_name: str
     assigned_to_phone: str
@@ -744,6 +753,11 @@ def task_to_response(t: dict) -> TaskResponse:
         expected_outcome_id=t.get("expected_outcome_id"),
         project_id=t.get("project_id"),
         component_id=t.get("component_id"),
+        goal_id=t.get("goal_id"),
+        plan_id=t.get("plan_id"),
+        phase_id=t.get("phase_id"),
+        milestone_id=t.get("milestone_id"),
+        plan_position=(int(t["plan_position"]) if t.get("plan_position") is not None else None),
         assigned_to_type=t.get("assigned_to_type", "self"),
         assigned_to_name=t.get("assigned_to_name", "") or "",
         assigned_to_phone=t.get("assigned_to_phone", "") or "",
