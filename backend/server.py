@@ -13,7 +13,6 @@ from typing import Any, List, Optional
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-import httpx
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -58,10 +57,6 @@ class ForgotPasswordRequest(BaseModel):
     email: EmailStr
     security_answer: str
     new_password: str = Field(min_length=6)
-
-
-class GoogleSessionRequest(BaseModel):
-    session_token: str
 
 
 class SecurityQuestionResponse(BaseModel):
@@ -550,7 +545,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         detail="Invalid or expired token",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    # Try session_token (Google) first — cheap DB lookup.
+    # Batch 2B4: temporary compatibility for previously issued stored
+    # sessions. No new sessions are created through any auth endpoint
+    # (the Google/Emergent path was removed). This branch performs a
+    # local DB lookup only — no HTTP request, no external provider —
+    # and never extends the recorded expiry. The row is honoured
+    # until its recorded ``expires_at`` elapses.
     session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if session:
         expires_at = session.get("expires_at")
@@ -801,8 +801,18 @@ async def signup(body: SignUpRequest):
 async def login(body: LoginRequest):
     email = body.email.lower().strip()
     user = await db.users.find_one({"email": email})
-    if not user or not verify_password(body.password, user["hashed_password"]):
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
+    # Batch 2B4: safely reject legacy provider-only users whose
+    # ``hashed_password`` is missing / null / non-string. Every
+    # invalid-credential branch returns the same 400 so we never
+    # reveal whether the email belongs to such an account.
+    invalid_credentials = HTTPException(status_code=400, detail="Incorrect email or password")
+    if not user:
+        raise invalid_credentials
+    hashed = user.get("hashed_password")
+    if not isinstance(hashed, str) or not hashed:
+        raise invalid_credentials
+    if not verify_password(body.password, hashed):
+        raise invalid_credentials
     token = create_access_token(user["id"])
     return TokenResponse(access_token=token, user=user_to_response(user))
 
@@ -871,64 +881,6 @@ async def logout(current_user: dict = Depends(get_current_user), token: str = De
     # Stateless JWT for email/password users. For Google users, delete their session row.
     await db.user_sessions.delete_one({"session_token": token})
     return {"detail": "Logged out"}
-
-
-@api_router.post("/auth/google-session", response_model=TokenResponse)
-async def google_session(body: GoogleSessionRequest):
-    """Verify session_token with Emergent auth service, upsert user, persist session."""
-    session_token = body.session_token.strip()
-    if not session_token:
-        raise HTTPException(status_code=400, detail="Missing session token")
-    async with httpx.AsyncClient(timeout=10.0) as http_client:
-        try:
-            resp = await http_client.get(
-                "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
-                headers={"X-Session-ID": session_token},
-            )
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=502, detail=f"Auth service unreachable: {e}")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=401, detail="Invalid Google session")
-    data = resp.json()
-    email = (data.get("email") or "").lower().strip()
-    if not email:
-        raise HTTPException(status_code=401, detail="Google session missing email")
-    verified_token = data.get("session_token") or session_token
-
-    now = datetime.now(timezone.utc)
-    existing = await db.users.find_one({"email": email})
-    if existing:
-        user_id = existing["id"]
-        await db.users.update_one(
-            {"id": user_id},
-            {"$set": {"updated_at": now.isoformat(), "google_name": data.get("name"), "google_picture": data.get("picture")}},
-        )
-    else:
-        user_id = str(uuid.uuid4())
-        await db.users.insert_one({
-            "id": user_id,
-            "email": email,
-            "hashed_password": None,
-            "security_question": None,
-            "hashed_security_answer": None,
-            "auth_provider": "google",
-            "google_name": data.get("name"),
-            "google_picture": data.get("picture"),
-            "created_at": now.isoformat(),
-            "updated_at": now.isoformat(),
-        })
-
-    await db.user_sessions.update_one(
-        {"session_token": verified_token},
-        {"$set": {
-            "session_token": verified_token,
-            "user_id": user_id,
-            "expires_at": now + timedelta(days=7),
-            "created_at": now,
-        }},
-        upsert=True,
-    )
-    return TokenResponse(access_token=verified_token, user=UserResponse(id=user_id, email=email))
 
 
 # ---------- Domain Routes ----------

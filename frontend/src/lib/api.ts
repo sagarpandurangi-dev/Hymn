@@ -146,12 +146,6 @@ export const api = {
 
   logout: () => request<{ detail: string }>("/auth/logout", { method: "POST", auth: true }),
 
-  googleSession: (session_token: string) =>
-    request<{ access_token: string; user: UserResponse }>("/auth/google-session", {
-      method: "POST",
-      body: { session_token },
-    }),
-
   updatePostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) =>
     request<UserResponse>("/auth/preferences/post-creation-decomposition", {
       method: "PATCH",
