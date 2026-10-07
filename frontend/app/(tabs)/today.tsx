@@ -182,6 +182,17 @@ export default function TodayScreen() {
 
         <View style={styles.stack}>
           <Card
+            testID="card-planning-space"
+            title="Planning"
+            icon="map-outline"
+            empty=""
+            onPress={() => router.push("/(tabs)/planning-space")}
+          >
+            <Text style={styles.cardEmpty}>
+              See your goals, projects, workload, time and money capacity together.
+            </Text>
+          </Card>
+          <Card
             testID="card-check-ins"
             title="Required Check-ins"
             icon="checkmark-circle-outline"

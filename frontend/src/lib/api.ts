@@ -245,6 +245,80 @@ export function createPlanningOperationId(): string {
   );
 }
 
+export type PlanningSpaceMoneyRow = {
+  liquid_effective: string;
+  reserved: string;
+  available_unreserved: string;
+};
+
+export type PlanningSpaceTimeCapacity = {
+  week_start_date: string;
+  total_minutes: number;
+  committed_minutes: number;
+  available_minutes: number;
+  overlapping_minutes: number;
+  baseline_committed_minutes: number;
+  reserved_minutes: number;
+  capacity_basis: "recorded_commitments_and_active_reservations";
+  is_estimate: boolean;
+};
+
+export type PlanningSpaceMoneyCapacity = {
+  by_currency: Record<string, PlanningSpaceMoneyRow>;
+  pending_events: unknown[];
+};
+
+export type PlanningSpacePlanSummary = {
+  id: string;
+  title: string;
+  status: string;
+  created_at: string;
+};
+
+export type PlanningSpaceTarget = {
+  target_type: "goal" | "project";
+  target_id: string;
+  title: string;
+  status: string;
+  deadline: string;
+  commitment_type: "postponable" | "exclusive";
+  plans: PlanningSpacePlanSummary[];
+  open_task_count: number;
+  overdue_task_count: number;
+  due_this_week_task_count: number;
+  active_plan_required_checkin_count: number;
+};
+
+export type PlanningSpaceWorkload = {
+  open_task_count: number;
+  overdue_task_count: number;
+  due_this_week_task_count: number;
+};
+
+export type PlanningSpacePortfolioTotals = {
+  active_goal_count: number;
+  paused_goal_count: number;
+  active_project_count: number;
+  paused_project_count: number;
+  plan_count: number;
+  open_task_count: number;
+  overdue_task_count: number;
+  due_this_week_task_count: number;
+  active_plan_required_checkin_count: number;
+};
+
+export type PlanningSpaceResponse = {
+  as_of: string;
+  week_start_date: string;
+  capacity: {
+    time: PlanningSpaceTimeCapacity;
+    money: PlanningSpaceMoneyCapacity;
+  };
+  targets: PlanningSpaceTarget[];
+  unscoped_workload: PlanningSpaceWorkload;
+  portfolio_totals: PlanningSpacePortfolioTotals;
+};
+
 export const api = {
   signup: (payload: {
     name: string;
@@ -611,6 +685,16 @@ export const api = {
     request<{ detail: string }>(`/finance/scenarios/detail/${id}`, { method: "DELETE", auth: true }),
   evaluateScenario: (id: string) =>
     request<any>(`/finance/scenarios/detail/${id}/evaluate`, { method: "POST", auth: true }),
+
+  getPlanningSpace: (weekStartDate?: string) => {
+    const query = weekStartDate
+      ? `?week_start_date=${encodeURIComponent(weekStartDate)}`
+      : "";
+    return request<PlanningSpaceResponse>(
+      `/planning-space/current${query}`,
+      { auth: true },
+    );
+  },
 
   // -- Planning Engine (Conversational) --
   planningGetConversation: (target_type: "goal" | "project", target_id: string) =>

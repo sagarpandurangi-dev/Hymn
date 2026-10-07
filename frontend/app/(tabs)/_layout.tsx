@@ -90,6 +90,10 @@ export default function TabsLayout() {
           }}
         />
         <Tabs.Screen
+          name="planning-space"
+          options={{ href: null }}
+        />
+        <Tabs.Screen
           name="timeline"
           options={{
             tabBarButton: (props) => (
