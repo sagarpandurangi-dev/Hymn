@@ -37,6 +37,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -78,6 +79,17 @@ def _iso_date(v: Any) -> Optional[str]:
         return v
     except ValueError:
         return None
+
+
+def _money_context_value(value: Any, field: str) -> str:
+    if not isinstance(value, Decimal):
+        raise RuntimeError(
+            f"Canonical money field {field} must be Decimal; "
+            f"received {type(value).__name__}"
+        )
+    if not value.is_finite():
+        raise RuntimeError(f"Canonical money field {field} must be finite")
+    return format(value, ".2f")
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +148,59 @@ async def _read_context(db, user_id: str, target_type: str, target_id: str) -> D
     monday = today - timedelta(days=today.weekday())
     from time_service import load_week_time_capacity  # noqa: WPS433
     capacity = await load_week_time_capacity(db, user_id, monday.isoformat())
+
+    from money_service import load_availability  # noqa: WPS433
+
+    money_snapshot = await load_availability(db, user_id)
+    raw_by_currency = money_snapshot.get("by_currency")
+    pending_events = money_snapshot.get("pending_events")
+
+    if not isinstance(raw_by_currency, dict):
+        raise RuntimeError(
+            "Canonical money availability must contain a by_currency mapping"
+        )
+    if not isinstance(pending_events, list):
+        raise RuntimeError(
+            "Canonical money availability must contain a pending_events list"
+        )
+
+    for currency in raw_by_currency:
+        if not isinstance(currency, str) or not currency.strip():
+            raise RuntimeError(
+                "Canonical money availability contains an invalid currency"
+            )
+
+    money_by_currency: List[Dict[str, str]] = []
+    for currency in sorted(raw_by_currency):
+        row = raw_by_currency[currency]
+        if not isinstance(row, dict):
+            raise RuntimeError(
+                f"Canonical money availability row for {currency} must be a mapping"
+            )
+        money_by_currency.append({
+            "currency": currency,
+            "liquid_effective": _money_context_value(
+                row.get("liquid_effective"),
+                f"{currency}.liquid_effective",
+            ),
+            "reserved": _money_context_value(
+                row.get("reserved"),
+                f"{currency}.reserved",
+            ),
+            "available_unreserved": _money_context_value(
+                row.get("available_unreserved"),
+                f"{currency}.available_unreserved",
+            ),
+        })
+
+    money_capacity = {
+        "by_currency": money_by_currency,
+        "pending_event_count": len(pending_events),
+        "has_pending_events": len(pending_events) > 0,
+        "capacity_basis": (
+            "effective_liquid_balances_minus_active_reservations"
+        ),
+    }
 
     # Time commitments (recurring weekly). Only include currently-effective
     # ones (effective_from <= today AND (effective_until is null or >= today)).
@@ -220,6 +285,7 @@ async def _read_context(db, user_id: str, target_type: str, target_id: str) -> D
             for tc in time_commitments
         ],
         "weekly_capacity": weekly_capacity,
+        "money_capacity": money_capacity,
         "upcoming_task_count": upcoming_task_count,
     }
 
@@ -255,6 +321,34 @@ consider whether the user has the time / mental bandwidth for it.
   commitment_type is "exclusive" (a booked movie ticket, a scheduled
   surgery, a fixed exam date) — those are non-negotiable; find room
   elsewhere or advise scaling this new plan down.
+
+MONEY CAPACITY (CRITICAL):
+You may receive canonical money-capacity rows, one per currency. For every
+currency:
+- `liquid_effective` is the user's effective liquid money before active
+  reservations are deducted.
+- `reserved` is already committed and is not available for a new plan.
+- `available_unreserved` is the only amount you may treat as currently
+  available for a new purchase or money-dependent proposal.
+- Never add, net, compare, or convert amounts across different currencies.
+- Never invent an exchange rate, account balance, income, liability, asset,
+  reservation, purchase price, financing offer, interest rate, or repayment
+  capacity.
+- A web-search price is an external estimate. It is not evidence that the
+  user can afford the purchase and must never replace `available_unreserved`.
+- When a stated or externally estimated cost exceeds
+  `available_unreserved` in the same currency, say plainly that the purchase
+  does not currently fit the recorded available money. Offer only explicit
+  alternatives such as changing timing, reducing scope, building savings,
+  or exploring financing assumptions with the user.
+- When the purchase currency is missing, ask for it. Do not select one.
+- When no canonical position exists for the relevant currency, say that
+  affordability cannot yet be assessed and ask the user for the missing
+  information.
+- When MONEY POSITION WARNING is present, describe the affordability view
+  as provisional because unresolved financial events may change it.
+- Never expose account-level or transaction-level data because it is not
+  provided to you.
 
 LIFE PATTERNS (VERY IMPORTANT):
 Watch for the user casually mentioning recurring life patterns —
@@ -462,6 +556,36 @@ def _context_prelude(ctx: Dict[str, Any]) -> str:
             "\nCAPACITY BASIS: This is recorded uncommitted time, not guaranteed free or usable time."
             " Sleep, breaks, travel, caregiving and other obligations may be included in the remainder if the user hasn't recorded them."
             " If a proposal's feasibility depends on time you don't know, ask the user rather than invent availability."
+        )
+    mc = ctx["money_capacity"]
+    money_rows = mc["by_currency"]
+    if money_rows:
+        lines.append(
+            "\nMONEY CAPACITY "
+            "(canonical effective liquid money minus active reservations):"
+        )
+        for row in money_rows:
+            lines.append(
+                f"- {row['currency']}: "
+                f"liquid_effective={row['liquid_effective']}; "
+                f"reserved={row['reserved']}; "
+                f"available_unreserved={row['available_unreserved']}"
+            )
+    else:
+        lines.append(
+            "\nMONEY CAPACITY: No canonical currency position is available."
+        )
+
+    lines.append(
+        "MONEY CAPACITY BASIS: "
+        "effective liquid account balances minus active money reservations."
+    )
+
+    if mc["has_pending_events"]:
+        lines.append(
+            f"MONEY POSITION WARNING: "
+            f"{mc['pending_event_count']} financial event(s) still require review. "
+            "Treat every displayed money position as provisional."
         )
     tc_up = ctx.get("upcoming_task_count", 0)
     if tc_up:
