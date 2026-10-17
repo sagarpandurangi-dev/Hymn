@@ -25,6 +25,87 @@ import AccountEditor, { AccountDraft } from "./AccountEditor";
 import MoneyCommitmentEditor, { MoneyCommitmentDraft } from "./MoneyCommitmentEditor";
 
 // ============================================================================
+// Delete confirmation modal — file-local, reused by every Portfolio delete
+// action. Rendered as a bottom-sheet modal that sits on top of the existing
+// Portfolio chrome and is dismissed only through its own buttons. The modal
+// surfaces API failures inline so a failed delete never produces a silent
+// dead control the way the previous Alert.alert() + empty-catch pattern did.
+// ============================================================================
+
+type DeleteConfirmationModalProps = {
+  visible: boolean;
+  title: string;
+  message: string;
+  busy: boolean;
+  error: string | null;
+  testIDPrefix: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+};
+
+function DeleteConfirmationModal(props: DeleteConfirmationModalProps) {
+  const {
+    visible,
+    title,
+    message,
+    busy,
+    error,
+    testIDPrefix,
+    onCancel,
+    onConfirm,
+  } = props;
+
+  if (!visible) {
+    return null;
+  }
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      onRequestClose={() => {
+        if (!busy) {
+          onCancel();
+        }
+      }}
+    >
+      <View style={styles.copyModalWrap}>
+        <View style={styles.copyModalCard} testID={`${testIDPrefix}-modal`}>
+          <Text style={styles.copyModalTitle}>{title}</Text>
+          <Text style={styles.copyModalBody}>{message}</Text>
+          {error ? (
+            <Text style={styles.deleteModalError} testID={`${testIDPrefix}-error`}>
+              {error}
+            </Text>
+          ) : null}
+          <View style={styles.deleteModalActions}>
+            <Pressable
+              onPress={onCancel}
+              disabled={busy}
+              style={[styles.deleteModalCancel, busy && { opacity: 0.5 }]}
+              testID={`${testIDPrefix}-cancel`}
+            >
+              <Text style={styles.deleteModalCancelText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              onPress={onConfirm}
+              disabled={busy}
+              style={[styles.deleteModalConfirm, busy && { opacity: 0.6 }]}
+              testID={`${testIDPrefix}-confirm`}
+            >
+              <Text style={styles.deleteModalConfirmText}>
+                {busy ? "Deleting…" : "Delete"}
+              </Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+// ============================================================================
 // Weekly Time Portfolio
 // ============================================================================
 
@@ -40,6 +121,11 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
   const [copySource, setCopySource] = useState<DayOfWeek | null>(null);
   const [copyTargets, setCopyTargets] = useState<DayOfWeek[]>([]);
   const [copyBusy, setCopyBusy] = useState(false);
+  // Delete-confirmation modal state. The target carries the id + a label so
+  // the modal copy can quote the block being removed.
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -138,17 +224,36 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
     onChanged?.();
   };
 
-  const deleteBlock = (id: string) => {
-    Alert.alert("Delete block", "Remove this weekly time block?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          try { await api.deleteTimeCommitment(id); await reload(); onChanged?.(); } catch { /* ignore */ }
-        },
-      },
-    ]);
+  const deleteBlock = (id: string, title: string) => {
+    setDeleteError(null);
+    setDeleteTarget({ id, title });
+  };
+
+  const cancelDeleteBlock = () => {
+    if (deleteBusy) return;
+    setDeleteTarget(null);
+    setDeleteError(null);
+  };
+
+  const confirmDeleteBlock = async () => {
+    if (!deleteTarget || deleteBusy) return;
+    const target = deleteTarget;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await api.deleteTimeCommitment(target.id);
+      // Optimistically remove so the user sees the row disappear immediately,
+      // then reconcile with the backend list to pick up any derived changes
+      // (totals, capacity rows, etc.).
+      setItems((prev) => prev.filter((b) => b.id !== target.id));
+      setDeleteTarget(null);
+      onChanged?.();
+      await reload();
+    } catch (err: any) {
+      setDeleteError(err?.message || "Could not delete this time block.");
+    } finally {
+      setDeleteBusy(false);
+    }
   };
 
   const openCopy = (source: DayOfWeek) => {
@@ -289,7 +394,7 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
                       </Text>
                     </Pressable>
                     <Pressable
-                      onPress={() => deleteBlock(b.id)}
+                      onPress={() => deleteBlock(b.id, b.title)}
                       hitSlop={12}
                       style={styles.rowIconBtn}
                       testID={`block-delete-${b.id}`}
@@ -311,6 +416,17 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
         existingByDay={draftsByDay}
         onSubmit={saveBlock}
         onClose={() => setEditorOpen(false)}
+      />
+
+      <DeleteConfirmationModal
+        visible={deleteTarget !== null}
+        title="Delete time block?"
+        message={`Remove “${deleteTarget?.title ?? ""}” from your weekly time portfolio?`}
+        busy={deleteBusy}
+        error={deleteError}
+        testIDPrefix="time-block-delete"
+        onCancel={cancelDeleteBlock}
+        onConfirm={confirmDeleteBlock}
       />
 
       <Modal visible={copyOpen} animationType="slide" transparent onRequestClose={() => setCopyOpen(false)}>
@@ -370,6 +486,11 @@ export function FinancialPositionPanel({ defaultCurrency, onChanged }: { default
   const [loading, setLoading] = useState(true);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorInitial, setEditorInitial] = useState<AccountDraft | undefined>(undefined);
+  // Delete-confirmation state. The target carries the account name so the
+  // modal copy quotes exactly which account the user is about to remove.
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try { setItems(await api.listFinancialAccounts()); } catch { /* ignore */ }
@@ -392,13 +513,38 @@ export function FinancialPositionPanel({ defaultCurrency, onChanged }: { default
     onChanged?.();
   };
 
-  const remove = (id: string) => {
-    Alert.alert("Delete account", "Remove this financial account?", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: async () => {
-        try { await api.deleteFinancialAccount(id); await reload(); onChanged?.(); } catch { /* ignore */ }
-      }},
-    ]);
+  const remove = (id: string, name: string) => {
+    setDeleteError(null);
+    setDeleteTarget({ id, name });
+  };
+
+  const cancelDelete = () => {
+    if (deleteBusy) return;
+    setDeleteTarget(null);
+    setDeleteError(null);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleteBusy) return;
+    const target = deleteTarget;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await api.deleteFinancialAccount(target.id);
+      // Optimistically drop the row then reconcile with the backend to pick
+      // up derived totals and any downstream list updates.
+      setItems((prev) => prev.filter((a) => a.id !== target.id));
+      setDeleteTarget(null);
+      onChanged?.();
+      await reload();
+    } catch (err: any) {
+      // A backend HTTP 409 (account has linked financial history) surfaces
+      // here as err.message and is displayed verbatim so the user sees why
+      // the account cannot be deleted.
+      setDeleteError(err?.message || "Could not delete this financial account.");
+    } finally {
+      setDeleteBusy(false);
+    }
   };
 
   const grouped = useMemo(() => {
@@ -464,7 +610,7 @@ export function FinancialPositionPanel({ defaultCurrency, onChanged }: { default
                   </Pressable>
                   <Text style={styles.acctValue}>{formatMoney(a.current_value)}</Text>
                   <Pressable
-                    onPress={() => remove(a.id)}
+                    onPress={() => remove(a.id, a.name)}
                     hitSlop={12}
                     style={styles.rowIconBtn}
                     testID={`account-delete-${a.id}`}
@@ -485,6 +631,17 @@ export function FinancialPositionPanel({ defaultCurrency, onChanged }: { default
         onSubmit={save}
         onClose={() => setEditorOpen(false)}
       />
+
+      <DeleteConfirmationModal
+        visible={deleteTarget !== null}
+        title="Delete financial account?"
+        message={`Remove “${deleteTarget?.name ?? ""}” from your portfolio? Accounts with financial history cannot be deleted.`}
+        busy={deleteBusy}
+        error={deleteError}
+        testIDPrefix="account-delete"
+        onCancel={cancelDelete}
+        onConfirm={confirmDelete}
+      />
     </View>
   );
 }
@@ -499,6 +656,11 @@ export function MonthlyMoneyPanel({ defaultCurrency, onChanged }: { defaultCurre
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorInitial, setEditorInitial] = useState<MoneyCommitmentDraft | undefined>(undefined);
   const [positions, setPositions] = useState<Record<string, any>>({});
+  // Delete-confirmation state. The target carries the commitment title so the
+  // modal copy quotes exactly which commitment the user is about to remove.
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -535,13 +697,35 @@ export function MonthlyMoneyPanel({ defaultCurrency, onChanged }: { defaultCurre
     onChanged?.();
   };
 
-  const remove = (id: string) => {
-    Alert.alert("Delete commitment", "Remove this monthly commitment?", [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: async () => {
-        try { await api.deleteMonthlyMoneyCommitment(id); await reload(); onChanged?.(); } catch { /* ignore */ }
-      }},
-    ]);
+  const remove = (id: string, title: string) => {
+    setDeleteError(null);
+    setDeleteTarget({ id, title });
+  };
+
+  const cancelDelete = () => {
+    if (deleteBusy) return;
+    setDeleteTarget(null);
+    setDeleteError(null);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleteBusy) return;
+    const target = deleteTarget;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await api.deleteMonthlyMoneyCommitment(target.id);
+      // Optimistically drop the row then reconcile with the backend to
+      // refresh positions and any derived monthly totals.
+      setItems((prev) => prev.filter((c) => c.id !== target.id));
+      setDeleteTarget(null);
+      onChanged?.();
+      await reload();
+    } catch (err: any) {
+      setDeleteError(err?.message || "Could not delete this monthly commitment.");
+    } finally {
+      setDeleteBusy(false);
+    }
   };
 
   const grouped = useMemo(() => {
@@ -610,7 +794,7 @@ export function MonthlyMoneyPanel({ defaultCurrency, onChanged }: { defaultCurre
                   </Pressable>
                   <Text style={styles.acctValue}>{formatMoney(c.amount)}</Text>
                   <Pressable
-                    onPress={() => remove(c.id)}
+                    onPress={() => remove(c.id, c.title)}
                     hitSlop={12}
                     style={styles.rowIconBtn}
                     testID={`money-delete-${c.id}`}
@@ -630,6 +814,17 @@ export function MonthlyMoneyPanel({ defaultCurrency, onChanged }: { defaultCurre
         defaultCurrency={defaultCurrency}
         onSubmit={save}
         onClose={() => setEditorOpen(false)}
+      />
+
+      <DeleteConfirmationModal
+        visible={deleteTarget !== null}
+        title="Delete monthly commitment?"
+        message={`Remove “${deleteTarget?.title ?? ""}” from your monthly portfolio?`}
+        busy={deleteBusy}
+        error={deleteError}
+        testIDPrefix="monthly-commitment-delete"
+        onCancel={cancelDelete}
+        onConfirm={confirmDelete}
       />
     </View>
   );
@@ -790,4 +985,37 @@ const styles = StyleSheet.create({
   posLabel: { fontSize: 11, color: colors.onSurfaceSecondary },
   posValue: { fontSize: 14, color: colors.onSurface, fontWeight: "600", marginTop: 2 },
   posValueStrong: { fontSize: 16, color: colors.brandPrimary, fontWeight: "700", marginTop: 2 },
+  deleteModalError: {
+    fontSize: 13,
+    color: colors.error,
+    lineHeight: 18,
+  },
+  deleteModalActions: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  deleteModalCancel: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.pill,
+    backgroundColor: colors.brandTertiary,
+  },
+  deleteModalCancelText: {
+    color: colors.onBrandTertiary,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+  deleteModalConfirm: {
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.pill,
+    backgroundColor: colors.error,
+  },
+  deleteModalConfirmText: {
+    color: colors.onError,
+    fontSize: 14,
+    fontWeight: "700",
+  },
 });

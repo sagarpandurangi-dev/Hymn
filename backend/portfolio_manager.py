@@ -1108,6 +1108,38 @@ async def update_financial_account(account_id: str, body: FinancialAccountUpdate
 
 @portfolio_router.delete("/financial-accounts/{account_id}", status_code=200)
 async def delete_financial_account(account_id: str, current_user: dict = Depends(get_current_user)):
+    # Guard against orphaning financial history. A financial account that is
+    # referenced by any user-scoped financial_event or checkin cannot be
+    # hard-deleted because doing so would make past balances and transaction
+    # history inaccurate. Users must keep the account to preserve those links.
+    existing_event = await db.financial_events.find_one(
+        {
+            "user_id": current_user["id"],
+            "account_id": account_id,
+        },
+        {
+            "_id": 0,
+            "id": 1,
+        },
+    )
+    existing_checkin = await db.checkins.find_one(
+        {
+            "user_id": current_user["id"],
+            "account_id": account_id,
+        },
+        {
+            "_id": 0,
+            "id": 1,
+        },
+    )
+    if existing_event or existing_checkin:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This account has financial history and cannot be deleted. "
+                "Keep the account so its transactions and balances remain accurate."
+            ),
+        )
     r = await db.financial_accounts.delete_one({"id": account_id, "user_id": current_user["id"]})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Financial account not found")
