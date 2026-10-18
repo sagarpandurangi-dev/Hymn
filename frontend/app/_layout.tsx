@@ -19,11 +19,13 @@ function AuthGate() {
   useEffect(() => {
     if (loading) return;
     const seg0 = segments[0] as string | undefined;
-    const seg1 = segments[1] as string | undefined;
     const inAuthGroup = seg0 === "(auth)";
     // /portfolio/setup is allowed while portfolio setup is incomplete — we
     // must not redirect the user away from the very screen they need to use.
-    const onPortfolioSetup = seg0 === "portfolio" && seg1 === "setup";
+    // Expo Router currently types `segments` as a one-element tuple, so we
+    // join the full path instead of reading a non-existent index.
+    const onPortfolioSetup =
+      segments.join("/") === "portfolio/setup";
 
     if (!user && !inAuthGroup) {
       router.replace("/(auth)/sign-in");
@@ -57,10 +59,12 @@ function AuthenticatedAppShell() {
   const segments = useSegments();
 
   const seg0 = segments[0] as string | undefined;
-  const seg1 = segments[1] as string | undefined;
 
+  // Expo Router currently types `segments` as a one-element tuple, so we
+  // can't safely read `segments[1]`. Joining the full path keeps the check
+  // type-safe while preserving the same exact match on `/portfolio/setup`.
   const onPortfolioSetup =
-    seg0 === "portfolio" && seg1 === "setup";
+    segments.join("/") === "portfolio/setup";
 
   // Root-copy visibility:
   //   - Suppressed while auth is still loading or there is no user, so we
