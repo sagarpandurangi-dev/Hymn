@@ -3240,11 +3240,18 @@ async def _recent_events(db, user_id: str, limit: int = 20) -> list:
     docs = await db.financial_events.find(
         {"user_id": user_id, "confirmation_status": "confirmed"}, {"_id": 0},
     ).sort([("event_date", -1), ("created_at", -1)]).to_list(length=limit)
-    for d in docs:
-        d["amount"] = _money_from_stored(d.get("amount"))
-        d.setdefault("account_id", None)
-        d.setdefault("lifecycle_status", LIFECYCLE_STATUS_AWAITING_RECON if d.get("account_id") else LIFECYCLE_STATUS_PENDING_ACCOUNT)
-    return docs
+
+    projected = []
+    for document in docs:
+        document.setdefault(
+            "lifecycle_status",
+            LIFECYCLE_STATUS_AWAITING_RECON
+            if document.get("account_id")
+            else LIFECYCLE_STATUS_PENDING_ACCOUNT,
+        )
+        projected.append(_project_event(document))
+
+    return projected
 
 
 # ============================================================================

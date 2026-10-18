@@ -72,6 +72,12 @@ export default function FinanceScreen() {
 
   useEffect(() => { (async () => { setLoading(true); await load(); setLoading(false); })(); }, [load]);
 
+  const retryInitialLoad = useCallback(async () => {
+    setLoading(true);
+    await load();
+    setLoading(false);
+  }, [load]);
+
   const onRefresh = async () => { setRefreshing(true); await load(); setRefreshing(false); };
 
   if (loading) {
@@ -79,6 +85,41 @@ export default function FinanceScreen() {
       <SafeAreaView style={foldPageStyle} edges={["top"]} testID="finance-screen">
         <ScreenHeader />
         <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} />
+      </SafeAreaView>
+    );
+  }
+
+  if (!dash && error) {
+    return (
+      <SafeAreaView style={foldPageStyle} edges={["top"]} testID="finance-screen">
+        <ScreenHeader />
+        <View style={styles.loadFailureWrap} testID="finance-load-error">
+          <FoldCard style={styles.loadFailureCard}>
+            <Ionicons
+              name="cloud-offline-outline"
+              size={32}
+              color={financeColors.inkFaint}
+            />
+            <Text style={styles.loadFailureTitle}>
+              Finance couldn’t load
+            </Text>
+            <Text style={styles.loadFailureBody}>
+              Your financial data was not changed. Try loading Finance again.
+            </Text>
+            <Text style={styles.loadFailureDetail}>
+              {error}
+            </Text>
+            <Pressable
+              style={styles.loadFailureButton}
+              onPress={retryInitialLoad}
+              testID="finance-retry"
+            >
+              <Text style={styles.loadFailureButtonText}>
+                Try again
+              </Text>
+            </Pressable>
+          </FoldCard>
+        </View>
       </SafeAreaView>
     );
   }
@@ -101,7 +142,9 @@ export default function FinanceScreen() {
       >
         {error ? <Text style={styles.error}>{error}</Text> : null}
 
-        {position.length === 0 && <EmptyState onOpenPortfolio={() => router.push("/portfolio")} />}
+        {dash && position.length === 0 ? (
+          <EmptyState onOpenPortfolio={() => router.push("/portfolio")} />
+        ) : null}
 
         {multiCurrency ? (
           <Text style={styles.fxNotice} testID="finance-fx-notice">{dash?.position?.notice}</Text>
@@ -546,4 +589,43 @@ const styles = StyleSheet.create({
     marginTop: 4,
   },
   emptyCtaText: { color: "#FBFBF6", fontSize: 13, fontWeight: "700", letterSpacing: 0.4 },
+  loadFailureWrap: {
+    paddingHorizontal: financeSpace.xl,
+    paddingTop: financeSpace.xl,
+  },
+  loadFailureCard: {
+    padding: financeSpace.xl,
+    alignItems: "center",
+    gap: financeSpace.md,
+  },
+  loadFailureTitle: {
+    ...financeType.screenTitle,
+    fontSize: 20,
+    textAlign: "center",
+  },
+  loadFailureBody: {
+    color: financeColors.inkMuted,
+    fontSize: 13,
+    lineHeight: 19,
+    textAlign: "center",
+  },
+  loadFailureDetail: {
+    color: financeColors.danger,
+    fontSize: 11,
+    lineHeight: 16,
+    textAlign: "center",
+  },
+  loadFailureButton: {
+    backgroundColor: financeColors.ink,
+    paddingHorizontal: financeSpace.xl,
+    paddingVertical: financeSpace.md,
+    borderRadius: 999,
+    marginTop: 4,
+  },
+  loadFailureButtonText: {
+    color: financeColors.card,
+    fontSize: 13,
+    fontWeight: "700",
+    letterSpacing: 0.4,
+  },
 });

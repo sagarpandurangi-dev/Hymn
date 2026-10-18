@@ -12,12 +12,12 @@ LogBox.ignoreAllLogs(true);
 SplashScreen.preventAutoHideAsync();
 
 function AuthGate() {
-  const { user, loading } = useAuth();
+  const { user, loading, startupError } = useAuth();
   const segments = useSegments();
   const router = useRouter();
 
   useEffect(() => {
-    if (loading) return;
+    if (loading || startupError) return;
     const seg0 = segments[0] as string | undefined;
     const inAuthGroup = seg0 === "(auth)";
     // /portfolio/setup is allowed while portfolio setup is incomplete — we
@@ -41,7 +41,7 @@ function AuthGate() {
       // (see /api/portfolio/setup-status PUT) this block stops firing.
       router.replace("/portfolio/setup");
     }
-  }, [user, loading, segments, router]);
+  }, [user, loading, startupError, segments, router]);
 
   return null;
 }
