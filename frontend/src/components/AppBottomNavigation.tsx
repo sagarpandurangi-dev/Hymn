@@ -19,9 +19,11 @@
  *     uses React Navigation's own tab navigation so cached tab state is
  *     preserved.
  *   - Outside the Tabs navigator no `onSelectTab` is passed, so a tap
- *     calls `router.replace(path)` and swaps the current root-Stack
- *     screen for the selected tab — the user never has to pop a stack
- *     of detail screens on top of a tab they already left behind.
+ *     calls `router.navigate(path)`. When the Tabs route already exists
+ *     in navigation history Expo Router returns to the existing entry
+ *     instead of mounting a fresh one, which preserves already-loaded
+ *     tab state. When it does not exist yet, `router.navigate` falls
+ *     back to a normal navigation to that path.
  */
 import { useRouter } from "expo-router";
 import Ionicons from "@react-native-vector-icons/ionicons";
@@ -166,15 +168,17 @@ export default function AppBottomNavigation(props: AppBottomNavigationProps) {
   const barHeight = 62 + insets.bottom;
 
   // Inside the Tabs navigator the parent passes `onSelectTab`, which uses
-  // React Navigation's own tab navigation so cached tab state is preserved.
-  // Outside the Tabs navigator we `router.replace` so the user doesn't end
-  // up with the previous root screen stacked below the destination tab.
+  // React Navigation's own tab navigation so already-mounted tab state is
+  // preserved. Outside the Tabs navigator we call `router.navigate`, which
+  // returns to the existing Tabs route when one already sits in navigation
+  // history — preserving its loaded state — and otherwise navigates to it
+  // normally.
   const selectTab = (tab: TabDefinition) => {
     if (onSelectTab) {
       onSelectTab(tab.name);
       return;
     }
-    router.replace(tab.path as any);
+    router.navigate(tab.path as any);
   };
 
   return (
