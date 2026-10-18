@@ -89,6 +89,7 @@ export default function TimelineScreen() {
   const [debounced, setDebounced] = useState("");
   const [searching, setSearching] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skippedInitialSearchEffect = useRef(false);
 
   // The server-side filter is already user-scoped (user_id filter is applied
   // before any $regex match), so a search request will never surface another
@@ -120,10 +121,12 @@ export default function TimelineScreen() {
   }, [query]);
 
   useEffect(() => {
-    // On first render `debounced` starts as "" — that matches the initial
-    // useFocusEffect load and just re-fetches the full list. Subsequent
-    // changes correspond to real user typing.
-    load({ silent: true, term: debounced });
+    if (!skippedInitialSearchEffect.current) {
+      skippedInitialSearchEffect.current = true;
+      return;
+    }
+
+    void load({ silent: true, term: debounced });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debounced]);
 

@@ -16,14 +16,12 @@
  *
  * Navigation semantics
  *   - Inside the Tabs navigator the parent passes `onSelectTab`, which
- *     uses React Navigation's own tab navigation so cached tab state is
- *     preserved.
- *   - Outside the Tabs navigator no `onSelectTab` is passed, so a tap
- *     calls `router.navigate(path)`. When the Tabs route already exists
- *     in navigation history Expo Router returns to the existing entry
- *     instead of mounting a fresh one, which preserves already-loaded
- *     tab state. When it does not exist yet, `router.navigate` falls
- *     back to a normal navigation to that path.
+ *     uses React Navigation's tab navigation and preserves the mounted
+ *     tab tree.
+ *   - Outside the Tabs navigator a tab press uses `router.dismissTo(path)`.
+ *     This dismisses the current root-Stack screen back to the existing
+ *     tab destination. If that destination is not already in the stack,
+ *     Expo Router replaces the current screen with it.
  */
 import { useRouter } from "expo-router";
 import Ionicons from "@react-native-vector-icons/ionicons";
@@ -167,18 +165,17 @@ export default function AppBottomNavigation(props: AppBottomNavigationProps) {
 
   const barHeight = 62 + insets.bottom;
 
-  // Inside the Tabs navigator the parent passes `onSelectTab`, which uses
-  // React Navigation's own tab navigation so already-mounted tab state is
-  // preserved. Outside the Tabs navigator we call `router.navigate`, which
-  // returns to the existing Tabs route when one already sits in navigation
-  // history — preserving its loaded state — and otherwise navigates to it
-  // normally.
+  // The Tabs-owned copy delegates to React Navigation. The root-Stack copy
+  // dismisses back to the existing tab destination, preserving its mounted
+  // state. Expo Router replaces the current screen when no matching tab
+  // destination exists in the stack.
   const selectTab = (tab: TabDefinition) => {
     if (onSelectTab) {
       onSelectTab(tab.name);
       return;
     }
-    router.navigate(tab.path as any);
+
+    router.dismissTo(tab.path as any);
   };
 
   return (
