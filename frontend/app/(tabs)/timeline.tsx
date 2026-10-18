@@ -89,6 +89,7 @@ export default function TimelineScreen() {
   const [debounced, setDebounced] = useState("");
   const [searching, setSearching] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeTermRef = useRef("");
   const skippedInitialSearchEffect = useRef(false);
 
   // The server-side filter is already user-scoped (user_id filter is applied
@@ -96,7 +97,8 @@ export default function TimelineScreen() {
   // user's check-ins even if the query string is wide open.
   const load = useCallback(async (opts?: { silent?: boolean; term?: string }) => {
     if (!opts?.silent) setError(null);
-    const currentTerm = opts?.term !== undefined ? opts.term : debounced;
+    const currentTerm =
+      opts?.term !== undefined ? opts.term : activeTermRef.current;
     try {
       if (currentTerm) setSearching(true);
       const items = await api.listCheckins(currentTerm ? { q: currentTerm } : undefined);
@@ -107,7 +109,7 @@ export default function TimelineScreen() {
       setLoading(false);
       setSearching(false);
     }
-  }, [debounced]);
+  }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -121,6 +123,8 @@ export default function TimelineScreen() {
   }, [query]);
 
   useEffect(() => {
+    activeTermRef.current = debounced;
+
     if (!skippedInitialSearchEffect.current) {
       skippedInitialSearchEffect.current = true;
       return;
