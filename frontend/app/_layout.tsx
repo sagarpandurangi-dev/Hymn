@@ -1,4 +1,4 @@
-import { Stack, useRouter, useSegments } from "expo-router";
+import { Stack, useNavigationContainerRef, useRouter, useSegments } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import { useEffect } from "react";
 import { LogBox, View } from "react-native";
@@ -6,7 +6,9 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider, useAuth } from "@/src/lib/AuthContext";
-import AppBottomNavigation from "@/src/components/AppBottomNavigation";
+import AppBottomNavigation, {
+  type MainTabName,
+} from "@/src/components/AppBottomNavigation";
 
 LogBox.ignoreAllLogs(true);
 SplashScreen.preventAutoHideAsync();
@@ -57,6 +59,7 @@ function AuthGate() {
 function AuthenticatedAppShell() {
   const { user, loading } = useAuth();
   const segments = useSegments();
+  const navigationRef = useNavigationContainerRef();
 
   const seg0 = segments[0] as string | undefined;
 
@@ -82,6 +85,22 @@ function AuthenticatedAppShell() {
     seg0 !== "(auth)" &&
     seg0 !== "(tabs)" &&
     !onPortfolioSetup;
+
+  const selectRootTab = (name: MainTabName) => {
+    const rootNavigation = navigationRef.current;
+    if (!rootNavigation) return;
+
+    rootNavigation.dispatch({
+      type: "NAVIGATE",
+      payload: {
+        name: "(tabs)",
+        params: {
+          screen: name,
+        },
+        pop: true,
+      },
+    });
+  };
 
   return (
     <View style={{ flex: 1, backgroundColor: "#FBFBF9" }}>
@@ -120,7 +139,10 @@ function AuthenticatedAppShell() {
       </Stack>
 
       {showRootBottomNavigation ? (
-        <AppBottomNavigation activeRouteName={null} />
+        <AppBottomNavigation
+          activeRouteName={null}
+          onSelectTab={selectRootTab}
+        />
       ) : null}
     </View>
   );

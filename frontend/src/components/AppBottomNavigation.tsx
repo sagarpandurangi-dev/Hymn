@@ -16,12 +16,11 @@
  *
  * Navigation semantics
  *   - Inside the Tabs navigator the parent passes `onSelectTab`, which
- *     uses React Navigation's tab navigation and preserves the mounted
- *     tab tree.
- *   - Outside the Tabs navigator a tab press uses `router.dismissTo(path)`.
- *     This dismisses the current root-Stack screen back to the existing
- *     tab destination. If that destination is not already in the stack,
- *     Expo Router replaces the current screen with it.
+ *     delegates to the Tabs navigator and preserves the mounted tab tree.
+ *   - Outside the Tabs navigator the parent still passes `onSelectTab`,
+ *     which delegates to the root navigation container and targets the
+ *     existing `(tabs)` route so its mounted tab tree is reused instead
+ *     of being replaced.
  */
 import { useRouter } from "expo-router";
 import Ionicons from "@react-native-vector-icons/ionicons";
@@ -39,7 +38,7 @@ export type MainTabName =
 
 type AppBottomNavigationProps = {
   activeRouteName?: string | null;
-  onSelectTab?: (name: MainTabName) => void;
+  onSelectTab: (name: MainTabName) => void;
 };
 
 type TabDefinition = {
@@ -159,23 +158,17 @@ function ChooserModal({ visible, onClose }: { visible: boolean; onClose: () => v
 
 export default function AppBottomNavigation(props: AppBottomNavigationProps) {
   const { activeRouteName, onSelectTab } = props;
-  const router = useRouter();
   const insets = useSafeAreaInsets();
   const [chooserOpen, setChooserOpen] = useState(false);
 
   const barHeight = 62 + insets.bottom;
 
-  // The Tabs-owned copy delegates to React Navigation. The root-Stack copy
-  // dismisses back to the existing tab destination, preserving its mounted
-  // state. Expo Router replaces the current screen when no matching tab
-  // destination exists in the stack.
+  // Both call sites must supply `onSelectTab`. The Tabs-owned copy delegates
+  // to the Tabs navigator (preserving tab state); the root-owned copy
+  // delegates to the root navigation container and targets the existing
+  // `(tabs)` route (preserving its mounted tab tree instead of replacing it).
   const selectTab = (tab: TabDefinition) => {
-    if (onSelectTab) {
-      onSelectTab(tab.name);
-      return;
-    }
-
-    router.dismissTo(tab.path as any);
+    onSelectTab(tab.name);
   };
 
   return (
