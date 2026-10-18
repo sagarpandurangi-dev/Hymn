@@ -591,6 +591,24 @@ export const api = {
     request<any>(`/finance/commitments/${id}/reserve`, { method: "POST", auth: true }),
   completeFinancialCommitment: (id: string, payload: { actual_amount?: string | number; actual_event_id?: string; event_date?: string; account_id?: string; occurred_at?: string }) =>
     request<any>(`/finance/commitments/${id}/complete`, { method: "POST", body: payload, auth: true }),
+  recordFinancialCommitmentPayment: (
+    id: string,
+    payload: {
+      amount: string | number;
+      account_id: string;
+      occurred_at: string;
+      event_date: string;
+      idempotency_key: string;
+    },
+  ) =>
+    request<any>(
+      `/finance/commitments/${id}/payments`,
+      {
+        method: "POST",
+        body: payload,
+        auth: true,
+      },
+    ),
   cancelFinancialCommitment: (id: string) =>
     request<any>(`/finance/commitments/${id}/cancel`, { method: "POST", auth: true }),
   postponeFinancialCommitment: (id: string, new_due_date: string) =>

@@ -39,6 +39,7 @@ from typing import Any, List, Optional
 from bson.decimal128 import Decimal128
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from pymongo.errors import DuplicateKeyError
 
 from deps import get_current_user, get_db
 
@@ -821,6 +822,14 @@ class ReviewPayload(BaseModel):
     actual_event_id: Optional[str] = None
     account_id: Optional[str] = None
     occurred_at: Optional[str] = None
+
+
+class CommitmentPaymentCreate(BaseModel):
+    amount: Any
+    account_id: str
+    occurred_at: str
+    event_date: str
+    idempotency_key: str
 
 
 class FinancialEventCreate(BaseModel):
@@ -1855,6 +1864,274 @@ async def complete_commitment(
     except Exception:  # noqa: BLE001 — best-effort; do not fail completion
         pass
     return _project_commitment(updated)
+
+
+@finance_router.post(
+    "/commitments/{commitment_id}/payments",
+    response_model=FinancialCommitmentResponse,
+    status_code=201,
+)
+async def record_commitment_payment(
+    commitment_id: str,
+    body: CommitmentPaymentCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """Record a single payment made against this commitment.
+
+    One request produces exactly one canonical outflow Financial Event and
+    exactly one allocation of that event's full amount to this commitment.
+    The Financial Event is the sole account-affecting record; account
+    balances are never touched directly. Multiple payments against one
+    commitment, and events split across commitments through the existing
+    allocation endpoints, remain fully supported.
+
+    Retries are keyed by ``idempotency_key``:
+
+    * The Financial Event ID is derived deterministically from
+      ``(user, commitment, idempotency_key)`` via ``uuid5`` so a replay
+      cannot create a second event.
+    * The allocation is pushed through ``_conditional_push_allocation``
+      which treats the same ``idempotency_key`` as a no-op.
+    * Replays with the same key but different payment parameters return
+      HTTP 409.
+
+    This endpoint deliberately does NOT run ``_dedupe_check``. The
+    deterministic event ID and idempotent allocation key already prevent
+    the only duplication path a direct submission could create;
+    check-in and import pipelines keep their own deduplication.
+    """
+    db = get_db()
+
+    idempotency_key = (body.idempotency_key or "").strip()
+    if not idempotency_key or len(idempotency_key) < 16 or len(idempotency_key) > 128:
+        raise HTTPException(
+            status_code=400,
+            detail="idempotency_key must be between 16 and 128 characters",
+        )
+
+    commitment = await _read_commitment_by_id(db, current_user["id"], commitment_id)
+    if not commitment:
+        raise HTTPException(status_code=404, detail="Financial Commitment not found")
+
+    state = commitment.get("state")
+    if state not in ("reserved", "expired", "partial"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Commitment in state '{state}' cannot receive a payment",
+        )
+
+    commitment_currency = commitment.get("currency") or ""
+
+    stored_amount = _money_to_stored(body.amount, "amount")
+    amount_dec = _decimal_from_stored(stored_amount)
+    if amount_dec <= 0:
+        raise HTTPException(status_code=400, detail="Payment amount must be greater than zero")
+
+    _require_date_str(body.event_date, "event_date")
+    normalized_occurred_at = _normalise_occurred_at(body.occurred_at)
+    if not normalized_occurred_at:
+        raise HTTPException(
+            status_code=400,
+            detail="occurred_at must be a timezone-aware ISO 8601 timestamp",
+        )
+
+    await _resolve_event_account(
+        db,
+        current_user["id"],
+        body.account_id,
+        commitment_currency,
+    )
+
+    # Deterministic Financial Event ID. The same (user, commitment,
+    # idempotency_key) triple always produces the same UUID, which is the
+    # authoritative retry boundary for this endpoint.
+    payment_event_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            (
+                "hymn:commitment-payment:"
+                f"{current_user['id']}:"
+                f"{commitment_id}:"
+                f"{idempotency_key}"
+            ),
+        )
+    )
+    source_reference = (
+        f"commitment_payment:{commitment_id}:{idempotency_key}"
+    )
+
+    def _event_matches(doc: dict) -> bool:
+        """Verify a pre-existing deterministic event matches this request
+        exactly. Any mismatch means the caller reused the idempotency key
+        with a different payment and must be rejected."""
+        try:
+            if _decimal_from_stored(doc.get("amount")) != amount_dec:
+                return False
+        except Exception:
+            return False
+        return (
+            (doc.get("currency") or "") == commitment_currency
+            and doc.get("direction") == "outflow"
+            and doc.get("event_date") == body.event_date
+            and doc.get("account_id") == body.account_id
+            and doc.get("occurred_at") == normalized_occurred_at
+            and doc.get("source_reference") == source_reference
+            and doc.get("commitment_id") == commitment_id
+        )
+
+    event_inserted_by_this_request = False
+    allocation_persisted = False
+
+    # 1) Resolve the Financial Event — either an existing deterministic
+    #    retry match, or a brand-new insertion.
+    existing_event = await db.financial_events.find_one(
+        {"id": payment_event_id, "user_id": current_user["id"]},
+        {"_id": 0},
+    )
+    if existing_event is not None:
+        if not _event_matches(existing_event):
+            raise HTTPException(
+                status_code=409,
+                detail="Idempotency key already used with different payment parameters",
+            )
+        payment_event = existing_event
+    else:
+        now = _now()
+        payment_event = {
+            "id": payment_event_id,
+            "user_id": current_user["id"],
+            "amount": stored_amount,
+            "currency": commitment_currency,
+            "direction": "outflow",
+            "event_date": body.event_date,
+            "description": f"Payment: {commitment.get('title') or ''}",
+            "source": "manual",
+            "source_reference": source_reference,
+            "confirmation_status": "confirmed",
+            "checkin_id": None,
+            "commitment_id": commitment_id,
+            "account_id": body.account_id,
+            "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
+            "occurred_at": normalized_occurred_at,
+            "occurred_at_precision": "exact",
+            "occurred_at_offset_minutes": None,
+            "allocations": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        try:
+            await db.financial_events.insert_one(dict(payment_event))
+            event_inserted_by_this_request = True
+        except DuplicateKeyError:
+            # A concurrent sibling request inserted the deterministic
+            # event between our read and our insert. Re-read it and
+            # verify it matches this submission exactly.
+            racing = await db.financial_events.find_one(
+                {"id": payment_event_id, "user_id": current_user["id"]},
+                {"_id": 0},
+            )
+            if racing is None or not _event_matches(racing):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency key already used with different payment parameters",
+                )
+            payment_event = racing
+
+        if event_inserted_by_this_request:
+            await _audit(
+                db,
+                current_user["id"],
+                "financial_event",
+                payment_event_id,
+                "created",
+                source="manual",
+                new_value={
+                    "amount": _quantize_out(amount_dec),
+                    "currency": commitment_currency,
+                    "commitment_id": commitment_id,
+                    "account_id": body.account_id,
+                    "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
+                },
+            )
+
+    # 2) Allocate the entire event amount to the commitment. The
+    #    allocation idempotency key is the same key that identifies this
+    #    submission so a retry is a true no-op inside the helper.
+    try:
+        allocation = _allocation_shape(
+            target_type="commitment",
+            target_id=commitment_id,
+            amount_stored=stored_amount,
+            currency=commitment_currency,
+            idempotency_key=idempotency_key,
+        )
+        written, created = await _conditional_push_allocation(
+            db,
+            current_user["id"],
+            payment_event_id,
+            allocation,
+            amount_dec,
+        )
+        allocation_persisted = True
+
+        if created:
+            await _audit(
+                db,
+                current_user["id"],
+                "financial_event",
+                payment_event_id,
+                "updated",
+                source="manual",
+                new_value={
+                    "allocation_created": {
+                        "id": written["id"],
+                        "target_type": "commitment",
+                        "target_id": commitment_id,
+                        "amount": _quantize_out(amount_dec),
+                        "currency": commitment_currency,
+                        "idempotency_key": idempotency_key,
+                    },
+                },
+            )
+
+        # Always propagate allocation effects — this is the single
+        # mechanism that updates paid_amount / remaining_amount / state /
+        # consumed_amount / released_amount / actual_amount / variance /
+        # overrun_amount / completed_at. Running it on retry is safe and
+        # intentional: it rebuilds target aggregates from the current
+        # allocation set and never writes duplicate audits of its own.
+        await _apply_allocation_effects(
+            db,
+            current_user["id"],
+            target_type="commitment",
+            target_id=commitment_id,
+            currency=commitment_currency,
+        )
+    except Exception:
+        # If THIS request inserted the deterministic event but the
+        # allocation never landed, roll the event and its creation audit
+        # back so a retry can start cleanly. If the allocation was
+        # already persisted, the event is referenced by that allocation
+        # and must be preserved — a retry will repair aggregates via
+        # ``_apply_allocation_effects`` above.
+        if event_inserted_by_this_request and not allocation_persisted:
+            try:
+                await db.financial_events.delete_one(
+                    {"id": payment_event_id, "user_id": current_user["id"]},
+                )
+                await db.financial_audit.delete_many(
+                    {
+                        "record_type": "financial_event",
+                        "record_id": payment_event_id,
+                        "user_id": current_user["id"],
+                    },
+                )
+            except Exception:  # noqa: BLE001 — cleanup must never mask the original error
+                pass
+        raise
+
+    fresh = await _read_commitment_by_id(db, current_user["id"], commitment_id)
+    return _project_commitment(fresh or commitment)
 
 
 @finance_router.post("/commitments/{commitment_id}/cancel", response_model=FinancialCommitmentResponse)

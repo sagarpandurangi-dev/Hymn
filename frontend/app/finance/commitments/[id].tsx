@@ -11,7 +11,7 @@ import { FoldAmount, FoldCard, FoldHero, FoldPill, FoldRow, FoldSectionHeader, f
 import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
 import { dateLabel, formatMoney } from "@/src/lib/finance/format";
 
-type Action = "complete" | "cancel" | "postpone" | "keep-active" | "allocate" | null;
+type Action = "complete" | "cancel" | "postpone" | "keep-active" | "allocate" | "payment" | null;
 
 // Correction 2: build a device-local, timezone-aware ISO 8601 timestamp
 // so the backend can normalise it to UTC without ever silently
@@ -136,6 +136,27 @@ export default function CommitmentDetail() {
         });
         // Only clear on success — an error must preserve the key.
         allocateIdemKeyRef.current = null;
+      } else if (a === "payment") {
+        if (!actualAmount) { Alert.alert("Amount required", "Enter the amount you just paid."); setBusy(false); return; }
+        if (!accountId) { Alert.alert("Account required", "Pick the account this money came out of."); setBusy(false); return; }
+        // Reuse the submission idempotency ref so a network retry or
+        // accidental double-tap resolves to a single Financial Event
+        // and a single allocation on the backend. Cleared on success,
+        // on explicit close, or when the user changes amount/account.
+        if (!allocateIdemKeyRef.current) {
+          allocateIdemKeyRef.current = createAllocationIdempotencyKey();
+        }
+        const occurredAt = nowLocalIso();
+        await api.recordFinancialCommitmentPayment(c.id, {
+          amount: actualAmount,
+          account_id: accountId,
+          occurred_at: occurredAt,
+          event_date: occurredAt.slice(0, 10),
+          idempotency_key: allocateIdemKeyRef.current,
+        });
+        // Only clear on success. The catch block must leave the key
+        // intact so a retry replays the same deterministic event.
+        allocateIdemKeyRef.current = null;
       }
       setAction(null); setActualAmount(""); setNewDue(""); setAccountId(null); setAccountLabel("Choose account");
       setSelectedEventId(null); setAllocateAmount("");
@@ -164,6 +185,12 @@ export default function CommitmentDetail() {
   const canPostpone = c.state === "reserved" || c.state === "expired" || c.state === "partial";
   const canReserve = c.state === "draft";
   const canKeepActive = c.state === "expired";
+  // Record payment is always available on an active commitment. The
+  // backend creates a single canonical Financial Event + allocation per
+  // tap, so the user never has to pre-record the transaction elsewhere.
+  const canPayment = ["reserved", "expired", "partial"].includes(c.state);
+  // Use existing transaction remains available only when at least one
+  // eligible already-recorded outflow event exists.
   const canAllocate = ["reserved", "expired", "partial"].includes(c.state) && eligibleEvents.length > 0;
 
   return (
@@ -183,11 +210,13 @@ export default function CommitmentDetail() {
           <Text style={styles.meta}>Original due {dateLabel(c.original_due_date)} · postponed {c.postpone_count}×</Text>
         ) : null}
 
-        {/* Correction 3 — payment progress derived from active
-            allocations on APPLIED events. Always shown once any
-            payment has landed (even if state is still 'reserved'
-            because the last allocation didn't cover the full amount). */}
-        {parseFloat(c.paid_amount || "0") > 0 ? (
+        {/* Payment progress — the backend-owned paid / remaining
+            aggregates are always shown for any active or completed
+            commitment so the user can see how far along a multi-payment
+            commitment is before deciding whether to add another
+            payment. Both values originate from the commitment projection
+            and are never recomputed in the frontend. */}
+        {["reserved", "expired", "partial", "completed"].includes(c.state) ? (
           <View>
             <FoldSectionHeader label="Payment progress" />
             <FoldCard>
@@ -223,7 +252,8 @@ export default function CommitmentDetail() {
         <View style={styles.actionsRow}>
           {canReserve ? <Pressable style={styles.primary} disabled={busy} onPress={reserve} testID="fc-reserve"><Text style={styles.primaryText}>Reserve now</Text></Pressable> : null}
           {canComplete ? <Pressable style={styles.primary} disabled={busy} onPress={() => setAction("complete")} testID="fc-complete-open"><Text style={styles.primaryText}>Complete</Text></Pressable> : null}
-          {canAllocate ? <Pressable style={styles.secondary} disabled={busy} onPress={() => { allocateIdemKeyRef.current = null; setSelectedEventId(null); setAllocateAmount(""); setAction("allocate"); }} testID="fc-allocate-open"><Text style={styles.secondaryText}>Record partial payment</Text></Pressable> : null}
+          {canPayment ? <Pressable style={styles.secondary} disabled={busy} onPress={() => { allocateIdemKeyRef.current = null; setActualAmount(""); setAccountId(null); setAccountLabel("Choose account"); setAction("payment"); }} testID="fc-payment-open"><Text style={styles.secondaryText}>Record payment</Text></Pressable> : null}
+          {canAllocate ? <Pressable style={styles.secondary} disabled={busy} onPress={() => { allocateIdemKeyRef.current = null; setSelectedEventId(null); setAllocateAmount(""); setAction("allocate"); }} testID="fc-allocate-open"><Text style={styles.secondaryText}>Use existing transaction</Text></Pressable> : null}
           {canPostpone ? <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("postpone")} testID="fc-postpone-open"><Text style={styles.secondaryText}>Postpone</Text></Pressable> : null}
           {canKeepActive ? <Pressable style={styles.secondary} disabled={busy} onPress={() => run("keep-active")} testID="fc-keep-active"><Text style={styles.secondaryText}>Keep active</Text></Pressable> : null}
           {canCancel ? <Pressable style={styles.danger} disabled={busy} onPress={() => setAction("cancel")} testID="fc-cancel-open"><Text style={styles.dangerText}>Cancel</Text></Pressable> : null}
@@ -255,7 +285,7 @@ export default function CommitmentDetail() {
         <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.sheetCard}>
             <View style={styles.sheetHead}>
-              <Text style={styles.sheetTitle}>{action === "complete" ? "Complete" : action === "cancel" ? "Cancel" : action === "postpone" ? "Postpone" : action === "allocate" ? "Record partial payment" : ""}</Text>
+              <Text style={styles.sheetTitle}>{action === "complete" ? "Complete" : action === "cancel" ? "Cancel" : action === "postpone" ? "Postpone" : action === "payment" ? "Record payment" : action === "allocate" ? "Use existing transaction" : ""}</Text>
               <Pressable onPress={() => { allocateIdemKeyRef.current = null; setAction(null); }} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
             {action === "complete" ? (
@@ -295,6 +325,40 @@ export default function CommitmentDetail() {
                 </Pressable>
               </>
             ) : null}
+            {action === "payment" ? (
+              <>
+                <Text style={styles.sheetBody}>Record money that has just left one of your accounts. Hymn will count it once, apply it to this commitment, and update the paid and remaining amounts.</Text>
+                <Text style={styles.label}>AMOUNT ({c.currency})</Text>
+                <TextInput
+                  value={actualAmount}
+                  onChangeText={(v) => { allocateIdemKeyRef.current = null; setActualAmount(v); }}
+                  keyboardType="decimal-pad"
+                  placeholder="0.00"
+                  placeholderTextColor={financeColors.inkFaint}
+                  style={styles.input}
+                  testID="fc-payment-amount"
+                />
+                <Text style={styles.label}>PAYING ACCOUNT</Text>
+                <Pressable
+                  onPress={() => { allocateIdemKeyRef.current = null; setAccountPickerOpen(true); }}
+                  style={styles.input}
+                  testID="fc-payment-account"
+                >
+                  <Text style={{ color: accountId ? financeColors.ink : financeColors.inkFaint, fontSize: 15 }}>{accountLabel}</Text>
+                </Pressable>
+                <Text style={{ fontSize: 12, color: financeColors.inkFaint, marginTop: 4 }}>
+                  This payment will be recorded at the current time. To use an earlier transaction, choose “Use existing transaction” instead.
+                </Text>
+                <Pressable
+                  style={[styles.primary, (busy || !actualAmount || !accountId) && { opacity: 0.5 }]}
+                  disabled={busy || !actualAmount || !accountId}
+                  onPress={() => run("payment")}
+                  testID="fc-payment-submit"
+                >
+                  <Text style={styles.primaryText}>Save payment</Text>
+                </Pressable>
+              </>
+            ) : null}
             {action === "allocate" ? (
               <>
                 <Text style={styles.sheetBody}>Pick an existing spending event and how much of it to apply to this commitment. The event stays as-is — allocations only classify the money, they never move an account balance.</Text>
@@ -331,6 +395,11 @@ export default function CommitmentDetail() {
         currency={c.currency}
         selectedId={accountId}
         onSelect={async (id) => {
+          // Changing the paying account must invalidate any pending
+          // payment idempotency key so a subsequent submit cannot
+          // collide with the deterministic Financial Event derived
+          // from the previously selected account.
+          allocateIdemKeyRef.current = null;
           setAccountId(id);
           if (!id) { setAccountLabel("Assign later"); return; }
           try {

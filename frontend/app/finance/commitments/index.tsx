@@ -10,10 +10,10 @@ import { financeColors, financeSpace, financeType } from "@/src/lib/finance/them
 import { dateLabel, formatMoney } from "@/src/lib/finance/format";
 
 const STATE_TONE: Record<string, "neutral" | "info" | "ok" | "err" | "warn"> = {
-  draft: "neutral", reserved: "info", completed: "ok", cancelled: "neutral", expired: "err",
+  draft: "neutral", reserved: "info", partial: "warn", completed: "ok", cancelled: "neutral", expired: "err",
 };
 const STATE_LABEL: Record<string, string> = {
-  draft: "Draft", reserved: "Reserved", completed: "Completed", cancelled: "Cancelled", expired: "Expired",
+  draft: "Draft", reserved: "Reserved", partial: "Partial", completed: "Completed", cancelled: "Cancelled", expired: "Expired",
 };
 
 export default function CommitmentsList() {
@@ -61,7 +61,7 @@ export default function CommitmentsList() {
                       {c.is_overdue ? <FoldPill label="Overdue" tone="err" size="xs" /> : null}
                     </View>
                   }
-                  meta={`Due ${dateLabel(c.due_date)}`}
+                  meta={`Due ${dateLabel(c.due_date)} · Paid ${c.currency} ${formatMoney(c.paid_amount || "0")} · Remaining ${c.currency} ${formatMoney(c.remaining_amount || "0")}`}
                   right={<FoldAmount currency={c.currency} value={formatMoney(c.amount)} />}
                 />
               ))}
