@@ -375,7 +375,7 @@ export default function CommitmentDetail() {
                 />
                 <Text style={styles.label}>PAYING ACCOUNT</Text>
                 <Pressable
-                  onPress={() => { pendingPaymentRef.current = null; setAccountPickerOpen(true); }}
+                  onPress={() => { setAccountPickerOpen(true); }}
                   style={styles.input}
                   testID="fc-payment-account"
                 >
@@ -430,12 +430,16 @@ export default function CommitmentDetail() {
         currency={c.currency}
         selectedId={accountId}
         onSelect={async (id) => {
-          // 5B1 — Changing the paying account must invalidate the
-          // pending direct-payment submission so a subsequent submit
-          // cannot send the previously stored account under the same
-          // idempotency key. The existing-event allocation journey
-          // does not use this picker and keeps its own key handling.
-          pendingPaymentRef.current = null;
+          // 5B1.1 — Only a genuinely different account invalidates the
+          // pending direct-payment submission. Reselecting the already
+          // chosen account must preserve the retry identity so a prior
+          // uncertain attempt is still recognised by the backend as a
+          // deterministic replay. Opening/closing the picker without
+          // picking a different account is handled by not touching
+          // ``pendingPaymentRef`` in the row's ``onPress``.
+          if (id !== accountId) {
+            pendingPaymentRef.current = null;
+          }
           setAccountId(id);
           if (!id) { setAccountLabel("Assign later"); return; }
           try {

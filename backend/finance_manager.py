@@ -2012,6 +2012,15 @@ async def record_commitment_payment(
             currency=commitment_currency,
         )
         if matching_allocation is not None:
+            # 5B1.1 — Only an ``active`` matching allocation represents a
+            # successful retry. A ``void`` allocation means the payment
+            # was explicitly reversed; the deterministic key cannot be
+            # silently reused to re-animate it.
+            if matching_allocation.get("status") != "active":
+                raise HTTPException(
+                    status_code=409,
+                    detail="This payment allocation was reversed or is no longer active",
+                )
             # Fully-landed retry: do not reapply the lifecycle gate, do
             # not create another event or allocation, do not write
             # another allocation audit. Re-run allocation effects once
@@ -2086,7 +2095,10 @@ async def record_commitment_payment(
         except DuplicateKeyError:
             # A concurrent sibling request inserted the deterministic
             # event between our read and our insert. Re-read it and
-            # verify it matches this submission exactly.
+            # apply the same event + allocation lifecycle rules the
+            # normal existing-event branch uses, so a racing winner
+            # that voided its allocation (or whose event is no longer
+            # confirmed and matched) cannot be silently reused.
             racing = await db.financial_events.find_one(
                 {"id": payment_event_id, "user_id": current_user["id"]},
                 {"_id": 0},
@@ -2096,6 +2108,54 @@ async def record_commitment_payment(
                     status_code=409,
                     detail="Idempotency key already used with different payment parameters",
                 )
+            # 5B1.1 — The racing event must still be a live, matched
+            # outflow; otherwise the payment it represented was
+            # reversed.
+            if (
+                racing.get("confirmation_status") != "confirmed"
+                or racing.get("lifecycle_status") != LIFECYCLE_STATUS_MATCHED
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This payment was reversed or is no longer active",
+                )
+            racing_allocation = _match_allocation_by_idempotency_key(
+                racing.get("allocations"),
+                idempotency_key=idempotency_key,
+                target_type="commitment",
+                target_id=commitment_id,
+                amount=amount_dec,
+                currency=commitment_currency,
+            )
+            if racing_allocation is not None:
+                # 5B1.1 — Only an ``active`` racing allocation
+                # qualifies as a successful retry.
+                if racing_allocation.get("status") != "active":
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This payment allocation was reversed or is no longer active",
+                    )
+                # The racing sibling fully landed this payment. Do not
+                # create another allocation or write another audit;
+                # re-apply allocation effects once (safe repair) and
+                # return the fresh projection. The lifecycle gate is
+                # deliberately not reapplied here — this request
+                # already passed the first-time gate before attempting
+                # insertion, and a completed commitment produced by
+                # the racing sibling must still resolve to its
+                # projection.
+                await _apply_allocation_effects(
+                    db,
+                    current_user["id"],
+                    target_type="commitment",
+                    target_id=commitment_id,
+                    currency=commitment_currency,
+                )
+                fresh = await _read_commitment_by_id(db, current_user["id"], commitment_id)
+                return _project_commitment(fresh or commitment)
+            # No matching racing allocation yet — continue through the
+            # existing allocation recovery path with the racing event
+            # as our live payment_event.
             payment_event = racing
 
         if event_inserted_by_this_request:
