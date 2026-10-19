@@ -13,6 +13,20 @@ import { dateLabel, formatMoney } from "@/src/lib/finance/format";
 
 type Action = "complete" | "cancel" | "postpone" | "keep-active" | "allocate" | "payment" | null;
 
+// 5B1 — The direct-payment journey must preserve the complete immutable
+// submission across retries, not merely the idempotency key. Rebuilding
+// ``occurred_at`` / ``event_date`` on every attempt reused the same key
+// with different payment parameters and triggered the backend's
+// mismatch rejection. Capturing the whole submission makes a retry
+// byte-identical.
+type PendingPaymentSubmission = {
+  idempotencyKey: string;
+  amount: string;
+  accountId: string;
+  occurredAt: string;
+  eventDate: string;
+};
+
 // Correction 2: build a device-local, timezone-aware ISO 8601 timestamp
 // so the backend can normalise it to UTC without ever silently
 // interpreting a naive wall-clock string as UTC.
@@ -63,7 +77,19 @@ export default function CommitmentDetail() {
   // retry (network error, timeout) so the backend recognises the
   // retry and does not create a duplicate allocation. Cleared on
   // success, close, event change, amount change, and fresh journey.
+  //
+  // 5B1 — ``allocateIdemKeyRef`` is now EXCLUSIVELY used by the existing-
+  // event allocation journey. The direct-payment journey has its own
+  // ref that preserves the complete immutable submission across retries.
   const allocateIdemKeyRef = useRef<string | null>(null);
+  const pendingPaymentRef = useRef<PendingPaymentSubmission | null>(null);
+
+  // Clear the pending direct-payment submission when the loaded
+  // commitment changes — a different commitment is a different
+  // payment and must not inherit the previous payment's identity.
+  useEffect(() => {
+    pendingPaymentRef.current = null;
+  }, [id]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -139,24 +165,33 @@ export default function CommitmentDetail() {
       } else if (a === "payment") {
         if (!actualAmount) { Alert.alert("Amount required", "Enter the amount you just paid."); setBusy(false); return; }
         if (!accountId) { Alert.alert("Account required", "Pick the account this money came out of."); setBusy(false); return; }
-        // Reuse the submission idempotency ref so a network retry or
-        // accidental double-tap resolves to a single Financial Event
-        // and a single allocation on the backend. Cleared on success,
-        // on explicit close, or when the user changes amount/account.
-        if (!allocateIdemKeyRef.current) {
-          allocateIdemKeyRef.current = createAllocationIdempotencyKey();
+        // 5B1 — Preserve the COMPLETE immutable submission across
+        // retries, not just the idempotency key. ``nowLocalIso()`` is
+        // called exactly once at first attempt; every subsequent retry
+        // replays the stored amount / account / occurredAt / eventDate
+        // verbatim so the backend recognises the deterministic event
+        // instead of rejecting a key reused with different parameters.
+        if (!pendingPaymentRef.current) {
+          const occurredAt = nowLocalIso();
+          pendingPaymentRef.current = {
+            idempotencyKey: createAllocationIdempotencyKey(),
+            amount: actualAmount,
+            accountId,
+            occurredAt,
+            eventDate: occurredAt.slice(0, 10),
+          };
         }
-        const occurredAt = nowLocalIso();
+        const submission = pendingPaymentRef.current;
         await api.recordFinancialCommitmentPayment(c.id, {
-          amount: actualAmount,
-          account_id: accountId,
-          occurred_at: occurredAt,
-          event_date: occurredAt.slice(0, 10),
-          idempotency_key: allocateIdemKeyRef.current,
+          amount: submission.amount,
+          account_id: submission.accountId,
+          occurred_at: submission.occurredAt,
+          event_date: submission.eventDate,
+          idempotency_key: submission.idempotencyKey,
         });
-        // Only clear on success. The catch block must leave the key
-        // intact so a retry replays the same deterministic event.
-        allocateIdemKeyRef.current = null;
+        // Only cleared on success. The catch path must leave the ref
+        // intact so a retry sends an identical payload.
+        pendingPaymentRef.current = null;
       }
       setAction(null); setActualAmount(""); setNewDue(""); setAccountId(null); setAccountLabel("Choose account");
       setSelectedEventId(null); setAllocateAmount("");
@@ -252,7 +287,7 @@ export default function CommitmentDetail() {
         <View style={styles.actionsRow}>
           {canReserve ? <Pressable style={styles.primary} disabled={busy} onPress={reserve} testID="fc-reserve"><Text style={styles.primaryText}>Reserve now</Text></Pressable> : null}
           {canComplete ? <Pressable style={styles.primary} disabled={busy} onPress={() => setAction("complete")} testID="fc-complete-open"><Text style={styles.primaryText}>Complete</Text></Pressable> : null}
-          {canPayment ? <Pressable style={styles.secondary} disabled={busy} onPress={() => { allocateIdemKeyRef.current = null; setActualAmount(""); setAccountId(null); setAccountLabel("Choose account"); setAction("payment"); }} testID="fc-payment-open"><Text style={styles.secondaryText}>Record payment</Text></Pressable> : null}
+          {canPayment ? <Pressable style={styles.secondary} disabled={busy} onPress={() => { pendingPaymentRef.current = null; setActualAmount(""); setAccountId(null); setAccountLabel("Choose account"); setAction("payment"); }} testID="fc-payment-open"><Text style={styles.secondaryText}>Record payment</Text></Pressable> : null}
           {canAllocate ? <Pressable style={styles.secondary} disabled={busy} onPress={() => { allocateIdemKeyRef.current = null; setSelectedEventId(null); setAllocateAmount(""); setAction("allocate"); }} testID="fc-allocate-open"><Text style={styles.secondaryText}>Use existing transaction</Text></Pressable> : null}
           {canPostpone ? <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("postpone")} testID="fc-postpone-open"><Text style={styles.secondaryText}>Postpone</Text></Pressable> : null}
           {canKeepActive ? <Pressable style={styles.secondary} disabled={busy} onPress={() => run("keep-active")} testID="fc-keep-active"><Text style={styles.secondaryText}>Keep active</Text></Pressable> : null}
@@ -281,12 +316,12 @@ export default function CommitmentDetail() {
         </View>
       </ScrollView>
 
-      <Modal visible={!!action} animationType="slide" transparent onRequestClose={() => { allocateIdemKeyRef.current = null; setAction(null); }}>
+      <Modal visible={!!action} animationType="slide" transparent onRequestClose={() => { allocateIdemKeyRef.current = null; pendingPaymentRef.current = null; setAction(null); }}>
         <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.sheetCard}>
             <View style={styles.sheetHead}>
               <Text style={styles.sheetTitle}>{action === "complete" ? "Complete" : action === "cancel" ? "Cancel" : action === "postpone" ? "Postpone" : action === "payment" ? "Record payment" : action === "allocate" ? "Use existing transaction" : ""}</Text>
-              <Pressable onPress={() => { allocateIdemKeyRef.current = null; setAction(null); }} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
+              <Pressable onPress={() => { allocateIdemKeyRef.current = null; pendingPaymentRef.current = null; setAction(null); }} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
             {action === "complete" ? (
               <>
@@ -331,7 +366,7 @@ export default function CommitmentDetail() {
                 <Text style={styles.label}>AMOUNT ({c.currency})</Text>
                 <TextInput
                   value={actualAmount}
-                  onChangeText={(v) => { allocateIdemKeyRef.current = null; setActualAmount(v); }}
+                  onChangeText={(v) => { pendingPaymentRef.current = null; setActualAmount(v); }}
                   keyboardType="decimal-pad"
                   placeholder="0.00"
                   placeholderTextColor={financeColors.inkFaint}
@@ -340,7 +375,7 @@ export default function CommitmentDetail() {
                 />
                 <Text style={styles.label}>PAYING ACCOUNT</Text>
                 <Pressable
-                  onPress={() => { allocateIdemKeyRef.current = null; setAccountPickerOpen(true); }}
+                  onPress={() => { pendingPaymentRef.current = null; setAccountPickerOpen(true); }}
                   style={styles.input}
                   testID="fc-payment-account"
                 >
@@ -395,11 +430,12 @@ export default function CommitmentDetail() {
         currency={c.currency}
         selectedId={accountId}
         onSelect={async (id) => {
-          // Changing the paying account must invalidate any pending
-          // payment idempotency key so a subsequent submit cannot
-          // collide with the deterministic Financial Event derived
-          // from the previously selected account.
-          allocateIdemKeyRef.current = null;
+          // 5B1 — Changing the paying account must invalidate the
+          // pending direct-payment submission so a subsequent submit
+          // cannot send the previously stored account under the same
+          // idempotency key. The existing-event allocation journey
+          // does not use this picker and keeps its own key handling.
+          pendingPaymentRef.current = null;
           setAccountId(id);
           if (!id) { setAccountLabel("Assign later"); return; }
           try {

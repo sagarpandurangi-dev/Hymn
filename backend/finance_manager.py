@@ -1885,15 +1885,26 @@ async def record_commitment_payment(
     commitment, and events split across commitments through the existing
     allocation endpoints, remain fully supported.
 
-    Retries are keyed by ``idempotency_key``:
+    Retry contract (5B1):
 
     * The Financial Event ID is derived deterministically from
       ``(user, commitment, idempotency_key)`` via ``uuid5`` so a replay
       cannot create a second event.
-    * The allocation is pushed through ``_conditional_push_allocation``
-      which treats the same ``idempotency_key`` as a no-op.
-    * Replays with the same key but different payment parameters return
-      HTTP 409.
+    * The lookup for that deterministic event runs **before** the
+      commitment lifecycle gate. A first request that successfully
+      completed the commitment but lost its HTTP response can therefore
+      be retried: the retry resolves its own event and allocation and
+      returns the final commitment projection, instead of being rejected
+      because the commitment is already ``completed``.
+    * The matching allocation is resolved through
+      ``_match_allocation_by_idempotency_key`` so a retry recognises the
+      allocation it previously wrote even if the first attempt failed
+      before refreshing commitment aggregates.
+    * Replays with the same key but different payment parameters still
+      return HTTP 409. A retry targeting a reversed or void event is
+      rejected rather than silently reactivated.
+    * The lifecycle gate still protects first-time payments and any
+      recovery that still needs to create an allocation.
 
     This endpoint deliberately does NOT run ``_dedupe_check``. The
     deterministic event ID and idempotent allocation key already prevent
@@ -1913,13 +1924,6 @@ async def record_commitment_payment(
     if not commitment:
         raise HTTPException(status_code=404, detail="Financial Commitment not found")
 
-    state = commitment.get("state")
-    if state not in ("reserved", "expired", "partial"):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Commitment in state '{state}' cannot receive a payment",
-        )
-
     commitment_currency = commitment.get("currency") or ""
 
     stored_amount = _money_to_stored(body.amount, "amount")
@@ -1934,13 +1938,6 @@ async def record_commitment_payment(
             status_code=400,
             detail="occurred_at must be a timezone-aware ISO 8601 timestamp",
         )
-
-    await _resolve_event_account(
-        db,
-        current_user["id"],
-        body.account_id,
-        commitment_currency,
-    )
 
     # Deterministic Financial Event ID. The same (user, commitment,
     # idempotency_key) triple always produces the same UUID, which is the
@@ -1979,11 +1976,11 @@ async def record_commitment_payment(
             and doc.get("commitment_id") == commitment_id
         )
 
-    event_inserted_by_this_request = False
-    allocation_persisted = False
+    state = commitment.get("state")
 
-    # 1) Resolve the Financial Event — either an existing deterministic
-    #    retry match, or a brand-new insertion.
+    # 1) Resolve the deterministic event **before** the lifecycle gate.
+    #    A successful retry whose commitment is already ``completed``
+    #    must be recognised and returned instead of rejected.
     existing_event = await db.financial_events.find_one(
         {"id": payment_event_id, "user_id": current_user["id"]},
         {"_id": 0},
@@ -1994,8 +1991,71 @@ async def record_commitment_payment(
                 status_code=409,
                 detail="Idempotency key already used with different payment parameters",
             )
+        # The event must still be a live, matched outflow. A rejected or
+        # voided deterministic event means the payment was reversed; the
+        # key cannot be silently reused to re-animate it.
+        if (
+            existing_event.get("confirmation_status") != "confirmed"
+            or existing_event.get("lifecycle_status") != LIFECYCLE_STATUS_MATCHED
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This payment was reversed or is no longer active",
+            )
+
+        matching_allocation = _match_allocation_by_idempotency_key(
+            existing_event.get("allocations"),
+            idempotency_key=idempotency_key,
+            target_type="commitment",
+            target_id=commitment_id,
+            amount=amount_dec,
+            currency=commitment_currency,
+        )
+        if matching_allocation is not None:
+            # Fully-landed retry: do not reapply the lifecycle gate, do
+            # not create another event or allocation, do not write
+            # another allocation audit. Re-run allocation effects once
+            # so a prior attempt that persisted the allocation but
+            # failed before refreshing commitment aggregates is
+            # repaired, then return the fresh projection.
+            await _apply_allocation_effects(
+                db,
+                current_user["id"],
+                target_type="commitment",
+                target_id=commitment_id,
+                currency=commitment_currency,
+            )
+            fresh = await _read_commitment_by_id(db, current_user["id"], commitment_id)
+            return _project_commitment(fresh or commitment)
+
+        # The deterministic event exists but its allocation never
+        # landed. Finishing this payment requires an active commitment —
+        # protect against attaching the orphan event to a commitment
+        # that was independently completed or cancelled.
+        if state not in ("reserved", "expired", "partial"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Commitment in state '{state}' cannot receive a payment",
+            )
+
         payment_event = existing_event
+        event_inserted_by_this_request = False
     else:
+        # First-time path: the lifecycle gate and account validation
+        # protect the write just as they always have.
+        if state not in ("reserved", "expired", "partial"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Commitment in state '{state}' cannot receive a payment",
+            )
+
+        await _resolve_event_account(
+            db,
+            current_user["id"],
+            body.account_id,
+            commitment_currency,
+        )
+
         now = _now()
         payment_event = {
             "id": payment_event_id,
@@ -2019,6 +2079,7 @@ async def record_commitment_payment(
             "created_at": now,
             "updated_at": now,
         }
+        event_inserted_by_this_request = False
         try:
             await db.financial_events.insert_one(dict(payment_event))
             event_inserted_by_this_request = True
@@ -2053,6 +2114,8 @@ async def record_commitment_payment(
                     "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
                 },
             )
+
+    allocation_persisted = False
 
     # 2) Allocate the entire event amount to the commitment. The
     #    allocation idempotency key is the same key that identifies this
