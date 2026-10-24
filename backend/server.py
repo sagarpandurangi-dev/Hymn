@@ -25,10 +25,14 @@ DB_NAME = os.environ["DB_NAME"]
 # fall back to a deterministic secret that is never returned in any
 # other mode). See backend/runtime.py.
 from runtime import get_jwt_secret  # noqa: E402
+import auth_throttle  # noqa: E402
 JWT_SECRET = get_jwt_secret()
 JWT_ALG = "HS256"
-# Long-lived token; client-side logout controls session end.
+# Long-lived token. Each token carries the user's ``token_version``;
+# logout and password reset bump it, revoking every issued token.
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 days
+MIN_PASSWORD_LENGTH = 10
+MAX_PASSWORD_LENGTH = 128
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -44,7 +48,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 class SignUpRequest(BaseModel):
     name: str
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str
     security_question: str = Field(min_length=1)
     security_answer: str = Field(min_length=1)
 
@@ -61,7 +65,7 @@ class LoginRequest(BaseModel):
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
     security_answer: str
-    new_password: str = Field(min_length=6)
+    new_password: str
 
 
 class SecurityQuestionResponse(BaseModel):
@@ -561,6 +565,15 @@ def verify_password(password: str, stored_hash) -> bool:
         return False
 
 
+def _validate_new_password(password: str) -> None:
+    """400 with a readable message (the client shows ``detail`` as-is)."""
+    if not (MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be between {MIN_PASSWORD_LENGTH} and {MAX_PASSWORD_LENGTH} characters",
+        )
+
+
 def _normalise_account_name(value: str) -> str:
     """Canonical name normaliser used by signup and profile update.
 
@@ -581,9 +594,14 @@ def _normalise_account_name(value: str) -> str:
     return cleaned
 
 
-def create_access_token(subject: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"sub": subject, "exp": expire}
+def create_access_token(user: dict) -> str:
+    now = datetime.now(timezone.utc)
+    to_encode = {
+        "sub": user["id"],
+        "tv": user.get("token_version", 0),
+        "iat": now,
+        "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    }
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALG)
 
 
@@ -628,6 +646,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         raise credentials_exc
     user = await db.users.find_one({"id": user_id})
     if not user:
+        raise credentials_exc
+    # Tokens issued before versioning carry no ``tv``; they stay valid
+    # until the first logout / reset bumps the user's version.
+    if payload.get("tv", 0) != user.get("token_version", 0):
         raise credentials_exc
     return user
 
@@ -851,6 +873,7 @@ async def signup(body: SignUpRequest):
         raise HTTPException(status_code=400, detail="Email already registered")
     # Batch 2B5 — canonical display name.
     name = _normalise_account_name(body.name)
+    _validate_new_password(body.password)
     user_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     user_doc = {
@@ -860,11 +883,12 @@ async def signup(body: SignUpRequest):
         "hashed_password": hash_password(body.password),
         "security_question": body.security_question.strip(),
         "hashed_security_answer": hash_password(body.security_answer.strip().lower()),
+        "token_version": 0,
         "created_at": now,
         "updated_at": now,
     }
     await db.users.insert_one(user_doc)
-    token = create_access_token(user_id)
+    token = create_access_token(user_doc)
     return TokenResponse(
         access_token=token,
         user=user_to_response(user_doc),
@@ -880,14 +904,13 @@ async def login(body: LoginRequest):
     # invalid-credential branch returns the same 400 so we never
     # reveal whether the email belongs to such an account.
     invalid_credentials = HTTPException(status_code=400, detail="Incorrect email or password")
-    if not user:
+    await auth_throttle.check(db, "login", email)
+    hashed = user.get("hashed_password") if user else None
+    if not isinstance(hashed, str) or not hashed or not verify_password(body.password, hashed):
+        await auth_throttle.record_failure(db, "login", email)
         raise invalid_credentials
-    hashed = user.get("hashed_password")
-    if not isinstance(hashed, str) or not hashed:
-        raise invalid_credentials
-    if not verify_password(body.password, hashed):
-        raise invalid_credentials
-    token = create_access_token(user["id"])
+    await auth_throttle.clear(db, "login", email)
+    token = create_access_token(user)
     return TokenResponse(access_token=token, user=user_to_response(user))
 
 
@@ -908,19 +931,25 @@ async def forgot_password(body: ForgotPasswordRequest):
     email = body.email.lower().strip()
     user = await db.users.find_one({"email": email})
     invalid = HTTPException(status_code=400, detail="Invalid email or security answer")
-    if not user:
-        raise invalid
+    await auth_throttle.check(db, "forgot_password", email)
     # Batch 2B5 — missing / empty / non-string / malformed hashes now
     # behave exactly like an incorrect answer via the hardened
     # verify_password helper.
-    if not verify_password(body.security_answer.strip().lower(), user.get("hashed_security_answer")):
+    if not user or not verify_password(
+        body.security_answer.strip().lower(), user.get("hashed_security_answer"),
+    ):
+        await auth_throttle.record_failure(db, "forgot_password", email)
         raise invalid
+    _validate_new_password(body.new_password)
+    # Successful resets are not cleared from the throttle, so a guessed
+    # answer can't be reused to keep resetting the password freely.
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {
             "hashed_password": hash_password(body.new_password),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
+        },
+         "$inc": {"token_version": 1}},
     )
     return {"detail": "Password updated"}
 
@@ -974,9 +1003,9 @@ async def update_post_creation_decomposition_preference(
 
 @api_router.post("/auth/logout")
 async def logout(current_user: dict = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
-    # Batch 2B5: stateless JWT for email/password users. This delete
-    # also revokes any legacy stored session whose token matches, so
-    # previously issued stored sessions can be signed out.
+    # Bumping token_version revokes every JWT issued to this user (all
+    # devices). The delete also revokes a matching legacy stored session.
+    await db.users.update_one({"id": current_user["id"]}, {"$inc": {"token_version": 1}})
     await db.user_sessions.delete_one({"session_token": token})
     return {"detail": "Logged out"}
 
@@ -2817,10 +2846,13 @@ api_router.include_router(planning_router)
 api_router.include_router(planning_space_router)
 app.include_router(api_router)
 
+# Auth is a bearer header, never a cookie, so credentialed CORS is not
+# needed. CORS_ORIGINS (comma-separated) narrows the allowed origins.
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=["*"],
+    allow_credentials=False,
+    allow_origins=_cors_origins or ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2839,6 +2871,7 @@ async def startup_indexes():
     await db.user_sessions.create_index("session_token", unique=True)
     await db.user_sessions.create_index("user_id")
     await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await auth_throttle.ensure_indexes(db)
     await ensure_portfolio_indexes(db)
     await ensure_finance_indexes(db)
     await ensure_finance_advanced_indexes(db)

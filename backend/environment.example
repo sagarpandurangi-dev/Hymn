@@ -24,6 +24,11 @@ DB_NAME=REPLACE_WITH_YOUR_DB_NAME
 # Must be non-empty; startup refuses to run without it.
 JWT_SECRET=REPLACE_WITH_LONG_RANDOM_SECRET
 
+# ---- CORS (optional) -----------------------------------------------------
+# Comma-separated origins allowed to call the API from a browser, e.g. the
+# deployed web build. Defaults to "*" (auth is a bearer header, not a cookie).
+CORS_ORIGINS=
+
 # ---- LLM / integrations (optional) --------------------------------------
 # Fill in only if the corresponding integration is enabled locally.
 EMERGENT_LLM_KEY=
