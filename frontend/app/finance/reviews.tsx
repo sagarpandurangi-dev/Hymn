@@ -43,7 +43,7 @@ export default function ReviewsScreen() {
                 <Text style={styles.body}>Is this financial commitment still expected to happen?</Text>
                 <View style={styles.actions}>
                   <Pressable style={styles.primary} onPress={() => keep(c.id)} testID={`rv-keep-${c.id}`}>
-                    <Text style={styles.primaryText}>Keep reserved</Text>
+                    <Text style={styles.primaryText}>Keep active</Text>
                   </Pressable>
                   <Pressable style={styles.secondary} onPress={() => router.push(`/finance/commitments/${c.id}`)} testID={`rv-open-${c.id}`}>
                     <Text style={styles.secondaryText}>Complete / Cancel / Postpone</Text>

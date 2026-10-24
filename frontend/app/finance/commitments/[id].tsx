@@ -215,7 +215,7 @@ export default function CommitmentDetail() {
     </SafeAreaView>
   );
 
-  const canComplete = c.state === "reserved" || c.state === "expired" || c.state === "partial";
+  const canComplete = c.state === "reserved" || c.state === "expired";
   const canCancel = c.state === "draft" || c.state === "reserved" || c.state === "expired" || c.state === "partial";
   const canPostpone = c.state === "reserved" || c.state === "expired" || c.state === "partial";
   const canReserve = c.state === "draft";
@@ -251,7 +251,8 @@ export default function CommitmentDetail() {
             commitment is before deciding whether to add another
             payment. Both values originate from the commitment projection
             and are never recomputed in the frontend. */}
-        {["reserved", "expired", "partial", "completed"].includes(c.state) ? (
+        {["reserved", "expired", "partial", "completed"].includes(c.state)
+          || (c.state === "cancelled" && parseFloat(c.paid_amount || "0") > 0) ? (
           <View>
             <FoldSectionHeader label="Payment progress" />
             <FoldCard>
@@ -344,7 +345,7 @@ export default function CommitmentDetail() {
             ) : null}
             {action === "cancel" ? (
               <>
-                <Text style={styles.sheetBody}>Cancelling releases the full reservation and returns it to the available pool. Future forecast impact will be removed. History remains. The linked task, if any, stays active — cancel it separately if needed.</Text>
+                <Text style={styles.sheetBody}>Cancelling releases any money still reserved for this commitment. Payments already recorded remain in your financial history and are not counted twice. The linked task, if any, stays active — cancel it separately if needed.</Text>
                 <Pressable style={[styles.danger, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("cancel")} testID="fc-cancel-submit">
                   <Text style={styles.dangerText}>Confirm cancel</Text>
                 </Pressable>

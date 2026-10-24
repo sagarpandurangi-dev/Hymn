@@ -107,7 +107,7 @@ DIRECT_PAYMENT_POSTING_PENDING = "pending_projection"
 DIRECT_PAYMENT_POSTING_COMPLETE = "complete"
 
 # Reserved reasons the backend derives (not user-visible states):
-_OVERDUE_STATES = {"reserved", "expired"}
+_OVERDUE_STATES = {"reserved", "partial", "expired"}
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -789,7 +789,7 @@ class FinancialCommitmentResponse(BaseModel):
     due_date: str
     original_due_date: str
     priority: str
-    state: str  # draft | reserved | completed | cancelled | expired
+    state: str  # draft | reserved | partial | completed | cancelled | expired
     is_overdue: bool
     domain_id: Optional[str]
     goal_id: Optional[str]
@@ -2700,15 +2700,19 @@ async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get
     if not c:
         raise HTTPException(status_code=404, detail="Financial Commitment not found")
     _require(
-        c.get("state") in ("draft", "reserved", "expired"),
+        c.get("state") in ("draft", "reserved", "partial", "expired"),
         f"Cannot cancel a commitment in state '{c.get('state')}'",
     )
+    from money_service import reservation_amount_for_commitment
     now = _now()
-    released_amt = _money_from_stored(c.get("amount"))
+    state = c.get("state")
+    # 5B3A — release only what is still reserved. Payments already
+    # recorded stay on their financial events and are never touched.
+    released = reservation_amount_for_commitment(c)
+    released_amt = _quantize_out(released)
     alloc_id = c.get("resource_allocation_id")
 
-    if c.get("state") in ("reserved", "expired") and alloc_id:
-        released = _decimal_from_stored(c.get("amount"))
+    if state in ("reserved", "partial", "expired") and alloc_id and released > 0:
         await _release_reservation(db, current_user["id"], alloc_id, released)
 
     await _update_lifecycle(db, current_user["id"], commitment_id, {
@@ -2716,6 +2720,9 @@ async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get
         "status": "cancelled",
         "cancelled_at": now,
         "next_review_date": None,
+        "remaining_amount": Decimal128(Decimal(0)),
+        "released_amount": Decimal128(released),
+        "unused_reservation": Decimal128(released),
     })
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "cancelled",
@@ -2723,7 +2730,7 @@ async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get
         new_value={"state": "cancelled", "released_amount": released_amt},
     )
     # Calibration hook: cancelling after an override → regretted.
-    if c.get("state") in ("reserved", "expired"):
+    if state in ("reserved", "partial", "expired"):
         try:
             await db.override_decisions.update_many(
                 {"user_id": current_user["id"], "commitment_id": commitment_id, "actual_outcome": None},
@@ -2744,17 +2751,19 @@ async def postpone_commitment(
     if not c:
         raise HTTPException(status_code=404, detail="Financial Commitment not found")
     _require(
-        c.get("state") in ("reserved", "expired"),
+        c.get("state") in ("reserved", "partial", "expired"),
         f"Cannot postpone a commitment in state '{c.get('state')}'",
     )
     _require_date_str(body.new_due_date, "new_due_date")
     _require(body.new_due_date > _today_iso(), "new_due_date must be in the future")
     prev_due = c.get("due_date")
+    current_state = c.get("state")
     # Post-reservation lifecycle write — allocation is the sole owner. The
     # ledger-only ``date`` and ``status`` fields are updated in the same call
     # so the reservation row stays coherent.
     await _update_lifecycle(db, current_user["id"], commitment_id, {
-        "state": "reserved",  # postpone always returns to Reserved
+        # Postpone returns to Reserved; a partial keeps its payment progress.
+        "state": "partial" if current_state == "partial" else "reserved",
         "status": "reserved",
         "due_date": body.new_due_date,
         "date": body.new_due_date,
@@ -2808,7 +2817,10 @@ async def review_commitment(
     _require_in(body.decision, ("keep", "complete", "cancel", "postpone"), "decision")
 
     if body.decision == "keep":
-        _require(c.get("state") == "reserved", "Only Reserved commitments can be kept")
+        _require(
+            c.get("state") in ("reserved", "partial"),
+            "Only Reserved or Partial commitments can be kept",
+        )
         now = _now()
         # Post-reservation write — allocation is the sole owner.
         await _update_lifecycle(db, current_user["id"], commitment_id, {
@@ -2820,6 +2832,12 @@ async def review_commitment(
             source="manual", new_value={"decision": "keep"},
         )
     elif body.decision == "complete":
+        # 5B3A — a partial commitment is finished by a payment or an
+        # existing-event allocation, never by the manual Complete journey.
+        _require(
+            c.get("state") in ("reserved", "expired"),
+            f"Only Reserved or Expired commitments can be completed (state={c.get('state')})",
+        )
         await _apply_complete(
             db, current_user["id"], c, body.actual_amount, body.actual_event_id, None,
             paying_account_id=body.account_id, occurred_at_raw=body.occurred_at,
@@ -2844,7 +2862,7 @@ async def commitments_due_for_review(current_user: dict = Depends(get_current_us
             "user_id": current_user["id"],
             "resource_type": "money",
             "financial_commitment_id": {"$ne": None},
-            "state": "reserved",
+            "state": {"$in": ["reserved", "partial"]},
             "$or": [
                 {"next_review_date": None},
                 {"next_review_date": {"$lte": today}},
@@ -3765,6 +3783,24 @@ async def _apply_allocation_effects(
 
         current_state = c.get("state")
         due_date = c.get("due_date") or ""
+        if current_state == "cancelled":
+            # 5B3A — cancelled is terminal. Recalculation refreshes the
+            # payment totals but never reopens the commitment.
+            released = planned - consumed if planned - consumed > 0 else Decimal(0)
+            await _update_lifecycle(db, user_id, target_id, {
+                "state": "cancelled",
+                "status": "cancelled",
+                "paid_amount": Decimal128(paid),
+                "remaining_amount": Decimal128(Decimal(0)),
+                "consumed_amount": Decimal128(consumed),
+                "released_amount": Decimal128(released),
+                "completed_at": None,
+                "actual_amount": Decimal128(paid) if paid > 0 else None,
+                "variance": Decimal128(planned - paid) if paid > 0 else None,
+                "unused_reservation": Decimal128(released),
+                "overrun_amount": Decimal128(overrun),
+            })
+            return
         if paid == 0:
             new_state = "expired" if due_date and due_date < _today_iso() else "reserved"
             updates: dict = {
