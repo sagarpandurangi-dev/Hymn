@@ -1316,14 +1316,23 @@ async def _promote_draft_to_reserved(db, user_id: str, commitment_id: str) -> st
     return alloc["id"]
 
 
-async def _update_lifecycle(db, commitment_id: str, fields: dict) -> None:
+async def _update_lifecycle(
+    db,
+    user_id: str,
+    commitment_id: str,
+    fields: dict,
+) -> None:
     """Write a lifecycle update onto the allocation row identified by
     ``financial_commitment_id``. This is the ONLY write path for
     commitments — ``financial_commitments`` is never touched."""
     payload = dict(fields)
     payload["updated_at"] = _now()
     await db.resource_allocations.update_one(
-        {"resource_type": "money", "financial_commitment_id": commitment_id},
+        {
+            "user_id": user_id,
+            "resource_type": "money",
+            "financial_commitment_id": commitment_id,
+        },
         {"$set": payload},
     )
 
@@ -1504,15 +1513,67 @@ async def _finalize_direct_payment_event(
     """5B2 — project a version-1 direct-payment event onto its
     commitment and write its immutable deterministic audits, then mark
     the posting complete. Safe to re-run after any interruption."""
-    if not _direct_payment_event_is_eligible(event):
+    changed_detail = (
+        "Direct payment changed during projection; refresh and try again"
+    )
+    current = await db.financial_events.find_one(
+        {
+            "id": event.get("id"),
+            "user_id": user_id,
+        },
+        {"_id": 0},
+    )
+    if not current or not _direct_payment_event_is_eligible(current):
         raise HTTPException(
             status_code=409,
-            detail="Direct payment event is not eligible for projection",
+            detail=changed_detail,
+        )
+    event = current
+
+    matching_allocations = _direct_payment_allocations(event)
+    if not _direct_payment_allocation_is_valid(
+        event,
+        matching_allocations,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Direct payment allocation invariant failed",
         )
 
     if event.get("direct_payment_posting_state") == DIRECT_PAYMENT_POSTING_COMPLETE:
+        await _apply_allocation_effects(
+            db,
+            user_id,
+            target_type="commitment",
+            target_id=event["commitment_id"],
+            currency=event["currency"],
+            write_audit=False,
+        )
+        settled = await db.financial_events.find_one(
+            {
+                "id": event["id"],
+                "user_id": user_id,
+            },
+            {"_id": 0},
+        )
+        if (
+            not _direct_payment_event_is_eligible(settled)
+            or settled.get("direct_payment_posting_state")
+            != DIRECT_PAYMENT_POSTING_COMPLETE
+            or not _direct_payment_allocation_is_valid(
+                settled,
+                _direct_payment_allocations(settled),
+            )
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=changed_detail,
+            )
         done = await _read_commitment_by_id(
-            db, user_id, event["commitment_id"], repair_pending=False,
+            db,
+            user_id,
+            settled["commitment_id"],
+            repair_pending=False,
         )
         if not done:
             raise HTTPException(
@@ -1520,13 +1581,6 @@ async def _finalize_direct_payment_event(
                 detail="Payment was recorded but commitment projection failed",
             )
         return done
-
-    matching_allocations = _direct_payment_allocations(event)
-    if not _direct_payment_allocation_is_valid(event, matching_allocations):
-        raise HTTPException(
-            status_code=409,
-            detail="Direct payment allocation invariant failed",
-        )
 
     await _apply_allocation_effects(
         db,
@@ -1610,7 +1664,6 @@ async def _finalize_direct_payment_event(
         },
     )
 
-    changed_detail = "Direct payment changed during projection; refresh and try again"
     current = await db.financial_events.find_one(
         {"id": event["id"], "user_id": user_id}, {"_id": 0},
     )
@@ -1645,11 +1698,18 @@ async def _finalize_direct_payment_event(
             {"id": event["id"], "user_id": user_id}, {"_id": 0},
         )
         if (
-            not settled
+            not _direct_payment_event_is_eligible(settled)
             or settled.get("direct_payment_posting_state")
             != DIRECT_PAYMENT_POSTING_COMPLETE
+            or not _direct_payment_allocation_is_valid(
+                settled,
+                _direct_payment_allocations(settled),
+            )
         ):
-            raise HTTPException(status_code=409, detail=changed_detail)
+            raise HTTPException(
+                status_code=409,
+                detail=changed_detail,
+            )
 
     fresh = await _read_commitment_by_id(
         db, user_id, event["commitment_id"], repair_pending=False,
@@ -1874,7 +1934,7 @@ async def get_commitment(commitment_id: str, current_user: dict = Depends(get_cu
         raise HTTPException(status_code=404, detail="Financial Commitment not found")
     # Lazy auto-expiration — write goes to the allocation row only.
     if doc.get("state") == "reserved" and (doc.get("due_date") or "") < _today_iso():
-        await _update_lifecycle(db, commitment_id, {"state": "expired"})
+        await _update_lifecycle(db, current_user["id"], commitment_id, {"state": "expired"})
         await _audit(
             db, current_user["id"], "financial_commitment", commitment_id, "expired",
             source="system", new_value={"state": "expired"},
@@ -1926,7 +1986,7 @@ async def update_commitment(commitment_id: str, body: FinancialCommitmentUpdate,
         alloc_update["quantity"] = alloc_update["amount"]
     if "due_date" in alloc_update:
         alloc_update["date"] = alloc_update["due_date"]
-    await _update_lifecycle(db, commitment_id, alloc_update)
+    await _update_lifecycle(db, current_user["id"], commitment_id, alloc_update)
 
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "updated",
@@ -2651,7 +2711,7 @@ async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get
         released = _decimal_from_stored(c.get("amount"))
         await _release_reservation(db, current_user["id"], alloc_id, released)
 
-    await _update_lifecycle(db, commitment_id, {
+    await _update_lifecycle(db, current_user["id"], commitment_id, {
         "state": "cancelled",
         "status": "cancelled",
         "cancelled_at": now,
@@ -2693,7 +2753,7 @@ async def postpone_commitment(
     # Post-reservation lifecycle write — allocation is the sole owner. The
     # ledger-only ``date`` and ``status`` fields are updated in the same call
     # so the reservation row stays coherent.
-    await _update_lifecycle(db, commitment_id, {
+    await _update_lifecycle(db, current_user["id"], commitment_id, {
         "state": "reserved",  # postpone always returns to Reserved
         "status": "reserved",
         "due_date": body.new_due_date,
@@ -2723,7 +2783,7 @@ async def keep_active_commitment(commitment_id: str, current_user: dict = Depend
     _require(c.get("state") == "expired", "Keep-active applies only to Expired commitments")
     now = _now()
     # Post-reservation write — target the allocation exclusively.
-    await _update_lifecycle(db, commitment_id, {
+    await _update_lifecycle(db, current_user["id"], commitment_id, {
         "last_reviewed_at": now,
         "next_review_date": _add_days(_today_iso(), REVIEW_INTERVAL_DAYS),
     })
@@ -2751,7 +2811,7 @@ async def review_commitment(
         _require(c.get("state") == "reserved", "Only Reserved commitments can be kept")
         now = _now()
         # Post-reservation write — allocation is the sole owner.
-        await _update_lifecycle(db, commitment_id, {
+        await _update_lifecycle(db, current_user["id"], commitment_id, {
             "last_reviewed_at": now,
             "next_review_date": _add_days(_today_iso(), REVIEW_INTERVAL_DAYS),
         })
@@ -3244,6 +3304,17 @@ async def reject_event(event_id: str, current_user: dict = Depends(get_current_u
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Financial Event not found")
+    if (
+        ev.get("direct_payment_posting_version")
+        == DIRECT_PAYMENT_POSTING_VERSION
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Direct payments cannot be rejected here; "
+                "void the payment allocation instead"
+            ),
+        )
     # Correction 3: generic reject MUST NOT bypass an open dedupe case.
     if await _event_has_pending_dedupe(db, current_user["id"], event_id):
         raise HTTPException(
@@ -3252,16 +3323,6 @@ async def reject_event(event_id: str, current_user: dict = Depends(get_current_u
                 "This event is part of an open deduplication case. "
                 "Resolve the dedupe candidate before rejecting."
             ),
-        )
-    if (
-        ev.get("direct_payment_posting_version")
-        == DIRECT_PAYMENT_POSTING_VERSION
-        and ev.get("direct_payment_posting_state")
-        == DIRECT_PAYMENT_POSTING_PENDING
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Direct payment is still being projected; refresh and try again",
         )
     await db.financial_events.update_one(
         {"id": event_id, "user_id": current_user["id"]},
@@ -3752,7 +3813,7 @@ async def _apply_allocation_effects(
             # don't rewrite the historical timestamp.
             if not c.get("completed_at"):
                 updates["completed_at"] = _now()
-        await _update_lifecycle(db, target_id, updates)
+        await _update_lifecycle(db, user_id, target_id, updates)
         if write_audit and new_state != current_state:
             await _audit(
                 db, user_id, "financial_commitment", target_id,
