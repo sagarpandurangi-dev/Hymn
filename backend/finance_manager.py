@@ -34,7 +34,7 @@ import re
 import uuid
 from datetime import date as date_type, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, List, Optional
+from typing import Any, Iterable, List, Optional
 
 from bson.decimal128 import Decimal128
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -105,6 +105,12 @@ APPLIED_LIFECYCLE_STATUSES = frozenset({
 DIRECT_PAYMENT_POSTING_VERSION = 1
 DIRECT_PAYMENT_POSTING_PENDING = "pending_projection"
 DIRECT_PAYMENT_POSTING_COMPLETE = "complete"
+
+# 5B3B: internal optimistic-concurrency contract for commitment rows.
+_COMMITMENT_CONFLICT_DETAIL = (
+    "Commitment changed concurrently; refresh and try again."
+)
+_COMMITMENT_PROJECTION_MAX_RETRIES = 5
 
 # Reserved reasons the backend derives (not user-visible states):
 _OVERDUE_STATES = {"reserved", "partial", "expired"}
@@ -1212,6 +1218,8 @@ def _project_commitment(doc: dict) -> dict:
             doc["remaining_amount"] = _quantize_out(planned - paid if planned - paid > 0 else Decimal(0))
         except Exception:
             doc["remaining_amount"] = "0"
+    # 5B3B — internal concurrency revision never leaves the backend.
+    doc.pop("commitment_revision", None)
     # Derived overdue marker
     doc["is_overdue"] = (
         doc.get("state") in _OVERDUE_STATES and
@@ -1280,40 +1288,79 @@ async def _insert_commitment_allocation(
             _add_days(_today_iso(), REVIEW_INTERVAL_DAYS) if fc_state == "reserved" else None
         ),
         "source": doc.get("source") or "manual",
+        "commitment_revision": 0,
         "created_at": now,
         "updated_at": now,
     })
     return alloc_id
 
 
-async def _promote_draft_to_reserved(db, user_id: str, commitment_id: str) -> str:
+async def _promote_draft_to_reserved(db, user_id: str, commitment: dict) -> str:
     """Transition an existing draft commitment row to Reserved. Returns the
     allocation id. No new row is inserted — the row was created at commitment
     creation time. Ledger status flips from ``proposed`` to ``reserved`` and
-    lifecycle state flips from ``draft`` to ``reserved``."""
-    alloc = await db.resource_allocations.find_one(
-        {"user_id": user_id, "resource_type": "money",
-         "financial_commitment_id": commitment_id}, {"_id": 0},
-    )
-    if not alloc:
-        raise HTTPException(status_code=404, detail="Financial Commitment not found")
-    now = _now()
-    await db.resource_allocations.update_one(
-        {"id": alloc["id"]},
-        {"$set": {
+    lifecycle state flips from ``draft`` to ``reserved``.
+
+    5B3B: writes only if the row is still the draft snapshot the caller
+    read; otherwise raises 409 without auditing."""
+    alloc_id = commitment["resource_allocation_id"]
+    promoted = await _update_lifecycle(
+        db,
+        user_id,
+        commitment["id"],
+        {
             "state": "reserved",
             "status": "reserved",
             "next_review_date": _add_days(_today_iso(), REVIEW_INTERVAL_DAYS),
-            "updated_at": now,
-        }},
+        },
+        allocation_id=alloc_id,
+        expected_revision=_commitment_revision(commitment),
+        allowed_states=("draft",),
     )
+    if not promoted:
+        raise HTTPException(status_code=409, detail=_COMMITMENT_CONFLICT_DETAIL)
     await _audit(
-        db, user_id, "resource_allocation", alloc["id"], "reservation_created",
+        db, user_id, "resource_allocation", alloc_id, "reservation_created",
         source="manual",
-        new_value={"amount": _money_from_stored(alloc.get("amount")),
-                   "currency": alloc.get("currency")},
+        new_value={"amount": _money_from_stored(commitment.get("amount")),
+                   "currency": commitment.get("currency")},
     )
-    return alloc["id"]
+    return alloc_id
+
+
+def _commitment_revision(record: dict) -> int:
+    raw = record.get("commitment_revision", 0)
+    if type(raw) is not int or raw < 0:
+        raise RuntimeError("Commitment has an invalid commitment_revision")
+    return raw
+
+
+def _commitment_cas_filter(
+    *,
+    user_id: str,
+    commitment_id: str,
+    allocation_id: str,
+    expected_revision: int,
+    allowed_states: Optional[Iterable[str]] = None,
+) -> dict:
+    """5B3B — comparison-and-set filter for one exact Finance-owned
+    commitment row. Legacy rows without a revision match revision 0."""
+    query: dict = {
+        "id": allocation_id,
+        "user_id": user_id,
+        "resource_type": "money",
+        "financial_commitment_id": commitment_id,
+    }
+    if expected_revision == 0:
+        query["$or"] = [
+            {"commitment_revision": {"$exists": False}},
+            {"commitment_revision": 0},
+        ]
+    else:
+        query["commitment_revision"] = expected_revision
+    if allowed_states is not None:
+        query["state"] = {"$in": list(allowed_states)}
+    return query
 
 
 async def _update_lifecycle(
@@ -1321,20 +1368,37 @@ async def _update_lifecycle(
     user_id: str,
     commitment_id: str,
     fields: dict,
-) -> None:
-    """Write a lifecycle update onto the allocation row identified by
-    ``financial_commitment_id``. This is the ONLY write path for
-    commitments — ``financial_commitments`` is never touched."""
+    *,
+    allocation_id: str,
+    expected_revision: int,
+    allowed_states: Optional[Iterable[str]] = None,
+) -> bool:
+    """Conditionally write a lifecycle update onto the exact allocation
+    row that owns the commitment. This is the ONLY write path for
+    commitments — ``financial_commitments`` is never touched.
+
+    5B3B: writes only when the row still carries ``expected_revision``
+    (and, if given, one of ``allowed_states``), incrementing the
+    revision once. Returns False when the comparison loses. Never
+    audits."""
+    if "commitment_revision" in fields:
+        raise RuntimeError("commitment_revision is managed by _update_lifecycle")
     payload = dict(fields)
     payload["updated_at"] = _now()
-    await db.resource_allocations.update_one(
+    result = await db.resource_allocations.update_one(
+        _commitment_cas_filter(
+            user_id=user_id,
+            commitment_id=commitment_id,
+            allocation_id=allocation_id,
+            expected_revision=expected_revision,
+            allowed_states=allowed_states,
+        ),
         {
-            "user_id": user_id,
-            "resource_type": "money",
-            "financial_commitment_id": commitment_id,
+            "$set": payload,
+            "$inc": {"commitment_revision": 1},
         },
-        {"$set": payload},
     )
+    return result.modified_count == 1
 
 
 # ============================================================================
@@ -1375,6 +1439,9 @@ def _alloc_to_commitment_view(a: dict) -> Optional[dict]:
     view: dict = {k: a.get(k) for k in KEEP if k in a}
     view["id"] = a["financial_commitment_id"]
     view["resource_allocation_id"] = a.get("id")
+    # 5B3B — internal only; stripped by ``_project_commitment``.
+    if "commitment_revision" in a:
+        view["commitment_revision"] = a["commitment_revision"]
     return view
 
 
@@ -1743,43 +1810,6 @@ async def _repair_pending_direct_payments(
         await _finalize_direct_payment_event(db, user_id, ev)
 
 
-async def _consume_reservation(
-    db, user_id: str, allocation_id: str, consumed_amount: Decimal, released_amount: Decimal,
-) -> None:
-    now = _now()
-    await db.resource_allocations.update_one(
-        {"id": allocation_id, "user_id": user_id},
-        {"$set": {
-            "status": "consumed",
-            "consumed_amount": Decimal128(consumed_amount),
-            "released_amount": Decimal128(released_amount),
-            "updated_at": now,
-        }},
-    )
-    await _audit(
-        db, user_id, "resource_allocation", allocation_id, "reservation_consumed",
-        source="manual",
-        new_value={"consumed": _quantize_out(consumed_amount),
-                   "released": _quantize_out(released_amount)},
-    )
-
-
-async def _release_reservation(db, user_id: str, allocation_id: str, released_amount: Decimal) -> None:
-    now = _now()
-    await db.resource_allocations.update_one(
-        {"id": allocation_id, "user_id": user_id},
-        {"$set": {
-            "status": "released",
-            "released_amount": Decimal128(released_amount),
-            "updated_at": now,
-        }},
-    )
-    await _audit(
-        db, user_id, "resource_allocation", allocation_id, "reservation_released",
-        source="manual", new_value={"released": _quantize_out(released_amount)},
-    )
-
-
 async def _maybe_create_task(db, user_id: str, commitment: dict, task_title: Optional[str], task_due_date: Optional[str]) -> Optional[str]:
     if not task_title:
         return None
@@ -1889,7 +1919,7 @@ async def reserve_commitment(commitment_id: str, current_user: dict = Depends(ge
         raise HTTPException(status_code=404, detail="Financial Commitment not found")
     _require(c.get("state") == "draft", f"Cannot reserve a commitment in state '{c.get('state')}'")
 
-    alloc_id = await _promote_draft_to_reserved(db, current_user["id"], commitment_id)
+    alloc_id = await _promote_draft_to_reserved(db, current_user["id"], c)
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "reservation_created",
         source="manual", new_value={"state": "reserved", "allocation_id": alloc_id},
@@ -1917,7 +1947,10 @@ async def list_commitments(
         {"user_id": current_user["id"], "resource_type": "money",
          "financial_commitment_id": {"$ne": None},
          "state": "reserved", "due_date": {"$lt": today}},
-        {"$set": {"state": "expired", "updated_at": _now(), "fc_mirrored_at": _now()}},
+        {
+            "$set": {"state": "expired", "updated_at": _now(), "fc_mirrored_at": _now()},
+            "$inc": {"commitment_revision": 1},
+        },
     )
     docs = await _read_all_commitments(
         db, current_user["id"], state=state, currency=currency, include_terminal=include_terminal,
@@ -1934,11 +1967,22 @@ async def get_commitment(commitment_id: str, current_user: dict = Depends(get_cu
         raise HTTPException(status_code=404, detail="Financial Commitment not found")
     # Lazy auto-expiration — write goes to the allocation row only.
     if doc.get("state") == "reserved" and (doc.get("due_date") or "") < _today_iso():
-        await _update_lifecycle(db, current_user["id"], commitment_id, {"state": "expired"})
-        await _audit(
-            db, current_user["id"], "financial_commitment", commitment_id, "expired",
-            source="system", new_value={"state": "expired"},
+        expired = await _update_lifecycle(
+            db,
+            current_user["id"],
+            commitment_id,
+            {"state": "expired"},
+            allocation_id=doc["resource_allocation_id"],
+            expected_revision=_commitment_revision(doc),
+            allowed_states=("reserved",),
         )
+        # 5B3B — a lost comparison means another writer moved the row;
+        # skip the audit and return the latest commitment normally.
+        if expired:
+            await _audit(
+                db, current_user["id"], "financial_commitment", commitment_id, "expired",
+                source="system", new_value={"state": "expired"},
+            )
         doc = await _read_commitment_by_id(db, current_user["id"], commitment_id) or doc
     return _project_commitment(doc)
 
@@ -1986,7 +2030,16 @@ async def update_commitment(commitment_id: str, body: FinancialCommitmentUpdate,
         alloc_update["quantity"] = alloc_update["amount"]
     if "due_date" in alloc_update:
         alloc_update["date"] = alloc_update["due_date"]
-    await _update_lifecycle(db, current_user["id"], commitment_id, alloc_update)
+    if not await _update_lifecycle(
+        db,
+        current_user["id"],
+        commitment_id,
+        alloc_update,
+        allocation_id=c["resource_allocation_id"],
+        expected_revision=_commitment_revision(c),
+        allowed_states=(c.get("state"),),
+    ):
+        raise HTTPException(status_code=409, detail=_COMMITMENT_CONFLICT_DETAIL)
 
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "updated",
@@ -2163,11 +2216,14 @@ async def _apply_complete(
     }
     try:
         transitioned = await db.resource_allocations.find_one_and_update(
-            {"resource_type": "money",
-             "financial_commitment_id": c["id"],
-             "user_id": user_id,
-             "state": {"$in": ["reserved", "expired"]}},
-            {"$set": ledger_update},
+            _commitment_cas_filter(
+                user_id=user_id,
+                commitment_id=c["id"],
+                allocation_id=c["resource_allocation_id"],
+                expected_revision=_commitment_revision(c),
+                allowed_states=("reserved", "expired"),
+            ),
+            {"$set": ledger_update, "$inc": {"commitment_revision": 1}},
             return_document=False,
         )
     except Exception:
@@ -2688,12 +2744,13 @@ async def record_commitment_payment(
 
 @finance_router.post("/commitments/{commitment_id}/cancel", response_model=FinancialCommitmentResponse)
 async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get_current_user)):
-    """Cancel a Draft/Reserved/Expired commitment. All cancellations write
-    to ``resource_allocations`` — the single owner of the commitment row.
+    """Cancel a Draft/Reserved/Partial/Expired commitment. All cancellations
+    write to ``resource_allocations`` — the single owner of the commitment row.
 
-    * Draft cancellations skip reservation release (nothing was reserved) but
-      still flip lifecycle ``state`` to cancelled on the allocation row.
-    * Reserved/Expired cancellations release the reservation first.
+    * Draft cancellations release nothing (nothing was reserved) but still
+      flip lifecycle ``state`` to cancelled on the allocation row.
+    * Reserved/Partial/Expired cancellations release only the amount still
+      reserved, in the same conditional write that cancels the commitment.
     """
     db = get_db()
     c = await _read_commitment_by_id(db, current_user["id"], commitment_id)
@@ -2712,18 +2769,32 @@ async def cancel_commitment(commitment_id: str, current_user: dict = Depends(get
     released_amt = _quantize_out(released)
     alloc_id = c.get("resource_allocation_id")
 
-    if state in ("reserved", "partial", "expired") and alloc_id and released > 0:
-        await _release_reservation(db, current_user["id"], alloc_id, released)
-
-    await _update_lifecycle(db, current_user["id"], commitment_id, {
-        "state": "cancelled",
-        "status": "cancelled",
-        "cancelled_at": now,
-        "next_review_date": None,
-        "remaining_amount": Decimal128(Decimal(0)),
-        "released_amount": Decimal128(released),
-        "unused_reservation": Decimal128(released),
-    })
+    # 5B3B — cancellation, release and cached totals are one conditional
+    # write on the exact row and revision read above.
+    cancelled = await _update_lifecycle(
+        db,
+        current_user["id"],
+        commitment_id,
+        {
+            "state": "cancelled",
+            "status": "cancelled",
+            "cancelled_at": now,
+            "next_review_date": None,
+            "remaining_amount": Decimal128(Decimal(0)),
+            "released_amount": Decimal128(released),
+            "unused_reservation": Decimal128(released),
+        },
+        allocation_id=alloc_id,
+        expected_revision=_commitment_revision(c),
+        allowed_states=(state,),
+    )
+    if not cancelled:
+        raise HTTPException(status_code=409, detail=_COMMITMENT_CONFLICT_DETAIL)
+    if released > 0:
+        await _audit(
+            db, current_user["id"], "resource_allocation", alloc_id, "reservation_released",
+            source="manual", new_value={"released": _quantize_out(released)},
+        )
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "cancelled",
         source="manual",
@@ -2761,7 +2832,7 @@ async def postpone_commitment(
     # Post-reservation lifecycle write — allocation is the sole owner. The
     # ledger-only ``date`` and ``status`` fields are updated in the same call
     # so the reservation row stays coherent.
-    await _update_lifecycle(db, current_user["id"], commitment_id, {
+    if not await _update_lifecycle(db, current_user["id"], commitment_id, {
         # Postpone returns to Reserved; a partial keeps its payment progress.
         "state": "partial" if current_state == "partial" else "reserved",
         "status": "reserved",
@@ -2769,7 +2840,10 @@ async def postpone_commitment(
         "date": body.new_due_date,
         "postpone_count": (c.get("postpone_count") or 0) + 1,
         "next_review_date": _add_days(_today_iso(), REVIEW_INTERVAL_DAYS),
-    })
+    }, allocation_id=c["resource_allocation_id"],
+        expected_revision=_commitment_revision(c),
+        allowed_states=(current_state,)):
+        raise HTTPException(status_code=409, detail=_COMMITMENT_CONFLICT_DETAIL)
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "postponed",
         source="manual",
@@ -2792,10 +2866,13 @@ async def keep_active_commitment(commitment_id: str, current_user: dict = Depend
     _require(c.get("state") == "expired", "Keep-active applies only to Expired commitments")
     now = _now()
     # Post-reservation write — target the allocation exclusively.
-    await _update_lifecycle(db, current_user["id"], commitment_id, {
+    if not await _update_lifecycle(db, current_user["id"], commitment_id, {
         "last_reviewed_at": now,
         "next_review_date": _add_days(_today_iso(), REVIEW_INTERVAL_DAYS),
-    })
+    }, allocation_id=c["resource_allocation_id"],
+        expected_revision=_commitment_revision(c),
+        allowed_states=(c.get("state"),)):
+        raise HTTPException(status_code=409, detail=_COMMITMENT_CONFLICT_DETAIL)
     await _audit(
         db, current_user["id"], "financial_commitment", commitment_id, "kept_active",
         source="manual", new_value={"state": "expired"},
@@ -2823,10 +2900,13 @@ async def review_commitment(
         )
         now = _now()
         # Post-reservation write — allocation is the sole owner.
-        await _update_lifecycle(db, current_user["id"], commitment_id, {
+        if not await _update_lifecycle(db, current_user["id"], commitment_id, {
             "last_reviewed_at": now,
             "next_review_date": _add_days(_today_iso(), REVIEW_INTERVAL_DAYS),
-        })
+        }, allocation_id=c["resource_allocation_id"],
+            expected_revision=_commitment_revision(c),
+            allowed_states=(c.get("state"),)):
+            raise HTTPException(status_code=409, detail=_COMMITMENT_CONFLICT_DETAIL)
         await _audit(
             db, current_user["id"], "financial_commitment", commitment_id, "reviewed",
             source="manual", new_value={"decision": "keep"},
@@ -3670,14 +3750,15 @@ async def create_allocation(
                 },
             },
         )
-        # Propagate lifecycle to targets — recompute paid/received
-        # state for commitments and expected incomes touched by this
-        # allocation.
-        await _apply_allocation_effects(
-            db, current_user["id"],
-            target_type=body.target_type, target_id=body.target_id,
-            currency=ev.get("currency") or "",
-        )
+    # Propagate lifecycle to targets — recompute paid/received state for
+    # commitments and expected incomes touched by this allocation. 5B3B:
+    # runs even when ``created`` is False so an idempotent retry repairs a
+    # projection that previously lost every comparison-and-set attempt.
+    await _apply_allocation_effects(
+        db, current_user["id"],
+        target_type=body.target_type, target_id=body.target_id,
+        currency=ev.get("currency") or "",
+    )
     fresh = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     return _project_event(fresh or ev)
 
@@ -3770,97 +3851,124 @@ async def _apply_allocation_effects(
         db, user_id, target_type, target_id, currency,
     )
     if target_type == "commitment":
-        c = await _read_commitment_by_id(db, user_id, target_id, repair_pending=False)
-        if not c:
-            return
-        planned = _decimal_from_stored(c.get("amount"))
-        if planned < 0:
-            planned = Decimal(0)
-        paid = total if total > 0 else Decimal(0)
-        remaining = planned - paid if planned - paid > 0 else Decimal(0)
-        consumed = paid if paid <= planned else planned
-        overrun = paid - planned if paid > planned else Decimal(0)
-
-        current_state = c.get("state")
-        due_date = c.get("due_date") or ""
-        if current_state == "cancelled":
-            # 5B3A — cancelled is terminal. Recalculation refreshes the
-            # payment totals but never reopens the commitment.
-            released = planned - consumed if planned - consumed > 0 else Decimal(0)
-            await _update_lifecycle(db, user_id, target_id, {
-                "state": "cancelled",
-                "status": "cancelled",
-                "paid_amount": Decimal128(paid),
-                "remaining_amount": Decimal128(Decimal(0)),
-                "consumed_amount": Decimal128(consumed),
-                "released_amount": Decimal128(released),
-                "completed_at": None,
-                "actual_amount": Decimal128(paid) if paid > 0 else None,
-                "variance": Decimal128(planned - paid) if paid > 0 else None,
-                "unused_reservation": Decimal128(released),
-                "overrun_amount": Decimal128(overrun),
-            })
-            return
-        if paid == 0:
-            new_state = "expired" if due_date and due_date < _today_iso() else "reserved"
-            updates: dict = {
-                "state": new_state,
-                "status": "reserved",
-                "paid_amount": Decimal128(paid),
-                "remaining_amount": Decimal128(planned),
-                "consumed_amount": Decimal128(Decimal(0)),
-                "released_amount": Decimal128(Decimal(0)),
-                "completed_at": None,
-                "actual_amount": None,
-                "variance": None,
-                "unused_reservation": None,
-                "overrun_amount": Decimal128(Decimal(0)),
-            }
-        elif paid < planned:
-            new_state = "partial"
-            updates = {
-                "state": new_state,
-                "status": "reserved",
-                "paid_amount": Decimal128(paid),
-                "remaining_amount": Decimal128(remaining),
-                "consumed_amount": Decimal128(consumed),
-                "released_amount": Decimal128(Decimal(0)),
-                "completed_at": None,
-                "actual_amount": Decimal128(paid),
-                "variance": Decimal128(planned - paid),
-                "unused_reservation": None,
-                "overrun_amount": Decimal128(Decimal(0)),
-            }
-        else:  # paid >= planned
-            new_state = "completed"
-            updates = {
-                "state": new_state,
-                "status": "consumed",
-                "paid_amount": Decimal128(paid),
-                "remaining_amount": Decimal128(Decimal(0)),
-                "consumed_amount": Decimal128(planned),
-                "released_amount": Decimal128(Decimal(0)),
-                "actual_amount": Decimal128(paid),
-                "variance": Decimal128(planned - paid),
-                "unused_reservation": Decimal128(Decimal(0)),
-                "overrun_amount": Decimal128(overrun),
-            }
-            # Only set completed_at when it is missing so re-runs
-            # don't rewrite the historical timestamp.
-            if not c.get("completed_at"):
-                updates["completed_at"] = _now()
-        await _update_lifecycle(db, user_id, target_id, updates)
-        if write_audit and new_state != current_state:
-            await _audit(
-                db, user_id, "financial_commitment", target_id,
-                "completed" if new_state == "completed"
-                else ("reopened" if current_state == "completed" else "updated"),
-                source="manual",
-                new_value={"state": new_state, "paid_amount": _quantize_out(paid),
-                           "remaining_amount": _quantize_out(remaining),
-                           "consumed_amount": _quantize_out(consumed),
-                           "overrun_amount": _quantize_out(overrun)},
+        # 5B3B — optimistic concurrency. Every attempt re-aggregates and
+        # re-reads, then writes only if the row is still at the revision
+        # and state it read. A losing attempt writes nothing (no audit).
+        for _attempt in range(_COMMITMENT_PROJECTION_MAX_RETRIES):
+            total = await _aggregate_allocations_for_target(
+                db, user_id, target_type, target_id, currency,
             )
+            c = await _read_commitment_by_id(
+                db,
+                user_id,
+                target_id,
+                repair_pending=False,
+            )
+            if not c:
+                return
+            planned = _decimal_from_stored(c.get("amount"))
+            if planned < 0:
+                planned = Decimal(0)
+            paid = total if total > 0 else Decimal(0)
+            remaining = planned - paid if planned - paid > 0 else Decimal(0)
+            consumed = paid if paid <= planned else planned
+            overrun = paid - planned if paid > planned else Decimal(0)
+
+            current_state = c.get("state")
+            due_date = c.get("due_date") or ""
+            if current_state == "cancelled":
+                # 5B3A — cancelled is terminal. Recalculation refreshes the
+                # payment totals but never reopens the commitment.
+                released = planned - consumed if planned - consumed > 0 else Decimal(0)
+                new_state = "cancelled"
+                updates: dict = {
+                    "state": "cancelled",
+                    "status": "cancelled",
+                    "paid_amount": Decimal128(paid),
+                    "remaining_amount": Decimal128(Decimal(0)),
+                    "consumed_amount": Decimal128(consumed),
+                    "released_amount": Decimal128(released),
+                    "completed_at": None,
+                    "actual_amount": Decimal128(paid) if paid > 0 else None,
+                    "variance": Decimal128(planned - paid) if paid > 0 else None,
+                    "unused_reservation": Decimal128(released),
+                    "overrun_amount": Decimal128(overrun),
+                }
+            elif paid == 0:
+                new_state = "expired" if due_date and due_date < _today_iso() else "reserved"
+                updates = {
+                    "state": new_state,
+                    "status": "reserved",
+                    "paid_amount": Decimal128(paid),
+                    "remaining_amount": Decimal128(planned),
+                    "consumed_amount": Decimal128(Decimal(0)),
+                    "released_amount": Decimal128(Decimal(0)),
+                    "completed_at": None,
+                    "actual_amount": None,
+                    "variance": None,
+                    "unused_reservation": None,
+                    "overrun_amount": Decimal128(Decimal(0)),
+                }
+            elif paid < planned:
+                new_state = "partial"
+                updates = {
+                    "state": new_state,
+                    "status": "reserved",
+                    "paid_amount": Decimal128(paid),
+                    "remaining_amount": Decimal128(remaining),
+                    "consumed_amount": Decimal128(consumed),
+                    "released_amount": Decimal128(Decimal(0)),
+                    "completed_at": None,
+                    "actual_amount": Decimal128(paid),
+                    "variance": Decimal128(planned - paid),
+                    "unused_reservation": None,
+                    "overrun_amount": Decimal128(Decimal(0)),
+                }
+            else:  # paid >= planned
+                new_state = "completed"
+                updates = {
+                    "state": new_state,
+                    "status": "consumed",
+                    "paid_amount": Decimal128(paid),
+                    "remaining_amount": Decimal128(Decimal(0)),
+                    "consumed_amount": Decimal128(planned),
+                    "released_amount": Decimal128(Decimal(0)),
+                    "actual_amount": Decimal128(paid),
+                    "variance": Decimal128(planned - paid),
+                    "unused_reservation": Decimal128(Decimal(0)),
+                    "overrun_amount": Decimal128(overrun),
+                }
+                # Only set completed_at when it is missing so re-runs
+                # don't rewrite the historical timestamp.
+                if not c.get("completed_at"):
+                    updates["completed_at"] = _now()
+            written = await _update_lifecycle(
+                db,
+                user_id,
+                target_id,
+                updates,
+                allocation_id=c["resource_allocation_id"],
+                expected_revision=_commitment_revision(c),
+                allowed_states=(current_state,),
+            )
+            if not written:
+                continue
+            if write_audit and new_state != current_state:
+                await _audit(
+                    db, user_id, "financial_commitment", target_id,
+                    "completed" if new_state == "completed"
+                    else ("reopened" if current_state == "completed" else "updated"),
+                    source="manual",
+                    new_value={"state": new_state, "paid_amount": _quantize_out(paid),
+                               "remaining_amount": _quantize_out(remaining),
+                               "consumed_amount": _quantize_out(consumed),
+                               "overrun_amount": _quantize_out(overrun)},
+                )
+            return
+        raise HTTPException(
+            status_code=409,
+            detail=_COMMITMENT_CONFLICT_DETAIL,
+        )
     else:  # expected_income
         d = await db.expected_incomes.find_one({"id": target_id, "user_id": user_id}, {"_id": 0})
         if not d:
@@ -4156,7 +4264,10 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
         {"user_id": user_id, "resource_type": "money",
          "financial_commitment_id": {"$ne": None},
          "state": "reserved", "due_date": {"$lt": today}},
-        {"$set": {"state": "expired", "updated_at": _now(), "fc_mirrored_at": _now()}},
+        {
+            "$set": {"state": "expired", "updated_at": _now(), "fc_mirrored_at": _now()},
+            "$inc": {"commitment_revision": 1},
+        },
     )
 
     position = await _current_position(db, user_id)
@@ -4526,6 +4637,7 @@ async def backfill_fc_into_allocations(database) -> int:
             "last_reviewed_at": doc.get("last_reviewed_at"),
             "next_review_date": doc.get("next_review_date"),
             "source": doc.get("source") or "manual",
+            "commitment_revision": 0,
             "created_at": doc.get("created_at") or now,
             "updated_at": now,
         })
