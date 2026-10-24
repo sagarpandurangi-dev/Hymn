@@ -8,7 +8,7 @@ from pathlib import Path
 
 # Guard: shared validator must approve os.environ before we construct
 # any Mongo or HTTP client. See tests/test_planning.py for rationale.
-sys.path.insert(0, str(Path("/app/backend").resolve()))
+sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "backend")))
 from test_environment import TestEnvironmentError, validate  # noqa: E402
 try:
     _ENV = validate(os.environ)

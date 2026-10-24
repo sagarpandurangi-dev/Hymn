@@ -35,7 +35,7 @@ from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = Path("/app")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 _TARGETS = [
     _REPO_ROOT / "tests" / "test_planning.py",
     _REPO_ROOT / "tests" / "test_planning_approval.py",

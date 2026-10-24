@@ -8,7 +8,7 @@ Skips the LLM entirely so we can verify:
 import asyncio, hashlib, json, os, sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path("/app/backend").resolve()))
+sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "backend")))
 from test_environment import TestEnvironmentError, validate  # noqa: E402
 try:
     _ENV = validate(os.environ)
@@ -45,7 +45,7 @@ async def run():
         pid_proj = r.json()["id"]
 
     # Compute snapshot hash the same way the engine does.
-    sys.path.insert(0, "/app/backend")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
     from planning_engine import _read_snapshot, _snapshot_hash
 
     snap = await _read_snapshot(mdb, uid, "project", pid_proj)

@@ -85,9 +85,14 @@ def _ev(**kw):
         "direction": "outflow",
         "account_id": None,
         "lifecycle_status": "awaiting_reconciliation",
+        "confirmation_status": "confirmed",
         "created_at": "2026-06-02T09:00:00+00:00",
     }
     d.update(kw)
+    # The service now times events by ``occurred_at`` (Correction 3);
+    # these fixtures were written against ``created_at``.
+    d.setdefault("occurred_at", d["created_at"])
+    d.setdefault("occurred_at_precision", "exact")
     return d
 
 
@@ -286,16 +291,14 @@ def test_currency_mismatch_between_accounts_isolated(money_service):
     acct_eur["currency"] = "EUR"
     # An event mis-linked to a USD account (currency stamped as EUR)
     # cannot happen because create_event / create_checkin refuse this,
-    # but if it *did* the pure helper still sums by account_id — the
-    # aggregator groups by currency using the ACCOUNT's currency, so a
-    # bogus event never contaminates a different currency's totals.
+    # but if it *did* the helper refuses to apply it to the account
+    # (currency must match), so it never contaminates any totals.
     events = [
         _ev(account_id="acct-a", currency="EUR", amount=Decimal("10"),
             direction="outflow", created_at="2026-06-02T09:00Z"),
     ]
     rows = money_service.summarise_effective_balances([ACCT_A, acct_eur], events)
     totals = money_service.sum_liquid_effective_by_currency(rows)
-    # ACCT_A is USD; the (bogus, would-have-been-rejected) event still
-    # only affects that ONE account's row.
-    assert totals["USD"] == Decimal("990")
+    # ACCT_A is USD; the bogus EUR event is ignored entirely.
+    assert totals["USD"] == Decimal("1000")
     assert totals["EUR"] == Decimal("1000")

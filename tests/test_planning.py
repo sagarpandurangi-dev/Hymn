@@ -15,7 +15,7 @@ from pathlib import Path
 # test-environment validator has approved the current os.environ.
 # `load_dotenv` is intentionally NOT used — the runner must export the
 # variables so a stray backend/.env can't silently satisfy the checks.
-sys.path.insert(0, str(Path("/app/backend").resolve()))
+sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "backend")))
 from test_environment import TestEnvironmentError, validate  # noqa: E402
 try:
     _ENV = validate(os.environ)
