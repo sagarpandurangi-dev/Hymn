@@ -100,6 +100,12 @@ APPLIED_LIFECYCLE_STATUSES = frozenset({
     LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
 })
 
+# 5B2: direct-payment posting lifecycle. These are NOT financial-event
+# lifecycle values and must never be added to ``LIFECYCLE_STATUSES``.
+DIRECT_PAYMENT_POSTING_VERSION = 1
+DIRECT_PAYMENT_POSTING_PENDING = "pending_projection"
+DIRECT_PAYMENT_POSTING_COMPLETE = "complete"
+
 # Reserved reasons the backend derives (not user-visible states):
 _OVERDUE_STATES = {"reserved", "expired"}
 
@@ -552,6 +558,16 @@ async def _load_allocatable_event(db, user_id: str, event_id: str) -> dict:
             status_code=400,
             detail="Event must have a timezone-aware occurred_at before allocating",
         )
+    if (
+        ev.get("direct_payment_posting_version")
+        == DIRECT_PAYMENT_POSTING_VERSION
+        and ev.get("direct_payment_posting_state")
+        == DIRECT_PAYMENT_POSTING_PENDING
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Direct payment is still being projected; refresh and try again",
+        )
     return ev
 
 
@@ -921,6 +937,54 @@ async def _audit(
         "related_import_id": related_import_id,
         "notes": notes,
     })
+
+
+async def _audit_once(
+    db,
+    audit_id: str,
+    user_id: str,
+    record_type: str,
+    record_id: str,
+    action: str,
+    *,
+    source: str = "manual",
+    previous_value: Any = None,
+    new_value: Any = None,
+    related_checkin_id: Optional[str] = None,
+    related_task_id: Optional[str] = None,
+    related_event_id: Optional[str] = None,
+    related_import_id: Optional[str] = None,
+    notes: str = "",
+) -> None:
+    """5B2 — write an audit row with a caller-supplied deterministic ID.
+    An existing row with the same ID is never overwritten, so replays
+    of the same immutable operation fact produce exactly one audit."""
+    _require_in(source, CHANGE_SOURCES, "source")
+    _require_in(action, AUDIT_ACTIONS, "action")
+    _require_in(record_type, AUDIT_RECORD_TYPES, "record_type")
+    if not isinstance(audit_id, str) or not audit_id:
+        raise HTTPException(status_code=500, detail="Deterministic audit id is required")
+    document = {
+        "id": audit_id,
+        "user_id": user_id,
+        "record_type": record_type,
+        "record_id": record_id,
+        "action": action,
+        "timestamp": _now(),
+        "source": source,
+        "previous_value": previous_value,
+        "new_value": new_value,
+        "related_checkin_id": related_checkin_id,
+        "related_task_id": related_task_id,
+        "related_event_id": related_event_id,
+        "related_import_id": related_import_id,
+        "notes": notes,
+    }
+    await db.financial_audit.update_one(
+        {"id": audit_id, "user_id": user_id},
+        {"$setOnInsert": document},
+        upsert=True,
+    )
 
 
 @finance_router.get("/audit/{record_type}/{record_id}")
@@ -1328,6 +1392,7 @@ async def _read_all_commitments(
 ) -> List[dict]:
     """Full commitment list — every state, sourced exclusively from
     ``resource_allocations``."""
+    await _repair_pending_direct_payments(db, user_id)
     extras: dict = {"user_id": user_id}
     if currency:
         extras["currency"] = currency
@@ -1340,14 +1405,282 @@ async def _read_all_commitments(
     return await _find_commitment_allocations(db, extras)
 
 
-async def _read_commitment_by_id(db, user_id: str, commitment_id: str) -> Optional[dict]:
+async def _read_commitment_by_id(
+    db,
+    user_id: str,
+    commitment_id: str,
+    *,
+    repair_pending: bool = True,
+) -> Optional[dict]:
     """Fetch a single commitment from ``resource_allocations``. Returns None
-    if the commitment does not exist."""
+    if the commitment does not exist.
+
+    5B2: when ``repair_pending`` is True, any version-1 direct payment
+    still awaiting projection onto this commitment is finalised first.
+    Projection internals pass ``repair_pending=False`` to prevent
+    recursion."""
+    if repair_pending:
+        await _repair_pending_direct_payments(
+            db,
+            user_id,
+            commitment_id=commitment_id,
+        )
     row = await db.resource_allocations.find_one(
         {"user_id": user_id, "resource_type": "money", "financial_commitment_id": commitment_id},
         {"_id": 0},
     )
     return _alloc_to_commitment_view(row) if row else None
+
+
+def _direct_payment_audit_ids(event_id: str) -> dict:
+    return {
+        "event_created": str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"hymn:finance-audit:direct-payment:{event_id}:event-created",
+            )
+        ),
+        "allocation_created": str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"hymn:finance-audit:direct-payment:{event_id}:allocation-created",
+            )
+        ),
+        "payment_applied": str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"hymn:finance-audit:direct-payment:{event_id}:payment-applied",
+            )
+        ),
+    }
+
+
+def _direct_payment_event_is_eligible(event: Optional[dict]) -> bool:
+    return bool(
+        event
+        and event.get("direct_payment_posting_version") == DIRECT_PAYMENT_POSTING_VERSION
+        and event.get("direct_payment_posting_state") in (
+            DIRECT_PAYMENT_POSTING_PENDING,
+            DIRECT_PAYMENT_POSTING_COMPLETE,
+        )
+        and event.get("confirmation_status") == "confirmed"
+        and event.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED
+        and event.get("direction") == "outflow"
+    )
+
+
+def _direct_payment_allocations(event: dict) -> List[dict]:
+    """Active allocations on ``event`` that represent its direct
+    payment onto its own commitment."""
+    allocations = event.get("allocations")
+    if not isinstance(allocations, list):
+        return []
+    return [
+        a for a in allocations
+        if isinstance(a, dict)
+        and a.get("status") == "active"
+        and a.get("target_type") == "commitment"
+        and a.get("target_id") == event.get("commitment_id")
+        and a.get("idempotency_key") == event.get("direct_payment_idempotency_key")
+    ]
+
+
+def _direct_payment_allocation_is_valid(event: dict, allocations: List[dict]) -> bool:
+    if len(allocations) != 1:
+        return False
+    allocation = allocations[0]
+    return (
+        _decimal_from_stored(allocation.get("amount"))
+        == _decimal_from_stored(event.get("amount"))
+        and allocation.get("currency") == event.get("currency")
+    )
+
+
+async def _finalize_direct_payment_event(
+    db,
+    user_id: str,
+    event: dict,
+) -> dict:
+    """5B2 — project a version-1 direct-payment event onto its
+    commitment and write its immutable deterministic audits, then mark
+    the posting complete. Safe to re-run after any interruption."""
+    if not _direct_payment_event_is_eligible(event):
+        raise HTTPException(
+            status_code=409,
+            detail="Direct payment event is not eligible for projection",
+        )
+
+    if event.get("direct_payment_posting_state") == DIRECT_PAYMENT_POSTING_COMPLETE:
+        done = await _read_commitment_by_id(
+            db, user_id, event["commitment_id"], repair_pending=False,
+        )
+        if not done:
+            raise HTTPException(
+                status_code=500,
+                detail="Payment was recorded but commitment projection failed",
+            )
+        return done
+
+    matching_allocations = _direct_payment_allocations(event)
+    if not _direct_payment_allocation_is_valid(event, matching_allocations):
+        raise HTTPException(
+            status_code=409,
+            detail="Direct payment allocation invariant failed",
+        )
+
+    await _apply_allocation_effects(
+        db,
+        user_id,
+        target_type="commitment",
+        target_id=event["commitment_id"],
+        currency=event["currency"],
+        write_audit=False,
+    )
+    fresh = await _read_commitment_by_id(
+        db, user_id, event["commitment_id"], repair_pending=False,
+    )
+    if not fresh:
+        raise HTTPException(
+            status_code=500,
+            detail="Payment was recorded but commitment projection failed",
+        )
+
+    allocation = matching_allocations[0]
+    ids = _direct_payment_audit_ids(event["id"])
+    amount = _decimal_from_stored(event.get("amount"))
+    allocation_amount = _decimal_from_stored(allocation.get("amount"))
+
+    await _audit_once(
+        db,
+        ids["event_created"],
+        user_id,
+        "financial_event",
+        event["id"],
+        "created",
+        source="manual",
+        related_event_id=event["id"],
+        new_value={
+            "amount": _quantize_out(amount),
+            "currency": event.get("currency"),
+            "commitment_id": event.get("commitment_id"),
+            "account_id": event.get("account_id"),
+            "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
+        },
+    )
+    await _audit_once(
+        db,
+        ids["allocation_created"],
+        user_id,
+        "financial_event",
+        event["id"],
+        "updated",
+        source="manual",
+        related_event_id=event["id"],
+        new_value={
+            "allocation_created": {
+                "id": allocation["id"],
+                "target_type": "commitment",
+                "target_id": event["commitment_id"],
+                "amount": _quantize_out(allocation_amount),
+                "currency": allocation.get("currency"),
+                "idempotency_key": allocation.get("idempotency_key"),
+            }
+        },
+    )
+    await _audit_once(
+        db,
+        ids["payment_applied"],
+        user_id,
+        "financial_commitment",
+        event["commitment_id"],
+        "updated",
+        source="manual",
+        related_event_id=event["id"],
+        new_value={
+            "payment_applied": {
+                "event_id": event["id"],
+                "allocation_id": allocation["id"],
+                "amount": _quantize_out(amount),
+                "currency": event.get("currency"),
+                "account_id": event.get("account_id"),
+                "idempotency_key": event.get(
+                    "direct_payment_idempotency_key"
+                ),
+            }
+        },
+    )
+
+    changed_detail = "Direct payment changed during projection; refresh and try again"
+    current = await db.financial_events.find_one(
+        {"id": event["id"], "user_id": user_id}, {"_id": 0},
+    )
+    if (
+        not _direct_payment_event_is_eligible(current)
+        or not _direct_payment_allocation_is_valid(
+            current, _direct_payment_allocations(current),
+        )
+    ):
+        raise HTTPException(status_code=409, detail=changed_detail)
+
+    now = _now()
+    result = await db.financial_events.update_one(
+        {
+            "id": event["id"],
+            "user_id": user_id,
+            "direct_payment_posting_version": DIRECT_PAYMENT_POSTING_VERSION,
+            "direct_payment_posting_state": DIRECT_PAYMENT_POSTING_PENDING,
+            "confirmation_status": "confirmed",
+            "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
+        },
+        {
+            "$set": {
+                "direct_payment_posting_state": DIRECT_PAYMENT_POSTING_COMPLETE,
+                "direct_payment_projected_at": now,
+                "updated_at": now,
+            }
+        },
+    )
+    if result.modified_count != 1:
+        settled = await db.financial_events.find_one(
+            {"id": event["id"], "user_id": user_id}, {"_id": 0},
+        )
+        if (
+            not settled
+            or settled.get("direct_payment_posting_state")
+            != DIRECT_PAYMENT_POSTING_COMPLETE
+        ):
+            raise HTTPException(status_code=409, detail=changed_detail)
+
+    fresh = await _read_commitment_by_id(
+        db, user_id, event["commitment_id"], repair_pending=False,
+    )
+    if not fresh:
+        raise HTTPException(
+            status_code=500,
+            detail="Payment was recorded but commitment projection failed",
+        )
+    return fresh
+
+
+async def _repair_pending_direct_payments(
+    db,
+    user_id: str,
+    commitment_id: Optional[str] = None,
+) -> None:
+    """5B2 — finalise every version-1 direct payment still awaiting
+    commitment projection. Errors propagate to the caller."""
+    query: dict = {
+        "user_id": user_id,
+        "direct_payment_posting_version": DIRECT_PAYMENT_POSTING_VERSION,
+        "direct_payment_posting_state": DIRECT_PAYMENT_POSTING_PENDING,
+    }
+    if commitment_id:
+        query["commitment_id"] = commitment_id
+    pending = await db.financial_events.find(
+        query, {"_id": 0},
+    ).sort([("created_at", 1), ("id", 1)]).to_list(length=None)
+    for ev in pending:
+        await _finalize_direct_payment_event(db, user_id, ev)
 
 
 async def _consume_reservation(
@@ -2011,17 +2344,32 @@ async def record_commitment_payment(
             amount=amount_dec,
             currency=commitment_currency,
         )
+        # 5B1.1 — Only an ``active`` matching allocation represents a
+        # successful retry. A ``void`` allocation means the payment
+        # was explicitly reversed; the deterministic key cannot be
+        # silently reused to re-animate it.
+        if (
+            matching_allocation is not None
+            and matching_allocation.get("status") != "active"
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This payment allocation was reversed or is no longer active",
+            )
+        # 5B2 — a version-1 event (pending or complete) is resolved
+        # exclusively through the recoverable posting lifecycle.
+        if (
+            existing_event.get("direct_payment_posting_version")
+            == DIRECT_PAYMENT_POSTING_VERSION
+        ):
+            fresh = await _finalize_direct_payment_event(
+                db,
+                current_user["id"],
+                existing_event,
+            )
+            return _project_commitment(fresh)
         if matching_allocation is not None:
-            # 5B1.1 — Only an ``active`` matching allocation represents a
-            # successful retry. A ``void`` allocation means the payment
-            # was explicitly reversed; the deterministic key cannot be
-            # silently reused to re-animate it.
-            if matching_allocation.get("status") != "active":
-                raise HTTPException(
-                    status_code=409,
-                    detail="This payment allocation was reversed or is no longer active",
-                )
-            # Fully-landed retry: do not reapply the lifecycle gate, do
+            # Fully-landed legacy retry: do not reapply the lifecycle gate, do
             # not create another event or allocation, do not write
             # another allocation audit. Re-run allocation effects once
             # so a prior attempt that persisted the allocation but
@@ -2065,6 +2413,13 @@ async def record_commitment_payment(
             commitment_currency,
         )
 
+        first_allocation = _allocation_shape(
+            target_type="commitment",
+            target_id=commitment_id,
+            amount_stored=stored_amount,
+            currency=commitment_currency,
+            idempotency_key=idempotency_key,
+        )
         now = _now()
         payment_event = {
             "id": payment_event_id,
@@ -2084,14 +2439,19 @@ async def record_commitment_payment(
             "occurred_at": normalized_occurred_at,
             "occurred_at_precision": "exact",
             "occurred_at_offset_minutes": None,
-            "allocations": [],
+            # 5B2 — the event and its initial allocation are inserted
+            # atomically as one document; the pending posting state is
+            # the repair signal for commitment projection and audits.
+            "allocations": [first_allocation],
+            "direct_payment_posting_version": DIRECT_PAYMENT_POSTING_VERSION,
+            "direct_payment_posting_state": DIRECT_PAYMENT_POSTING_PENDING,
+            "direct_payment_idempotency_key": idempotency_key,
             "created_at": now,
             "updated_at": now,
         }
         event_inserted_by_this_request = False
         try:
             await db.financial_events.insert_one(dict(payment_event))
-            event_inserted_by_this_request = True
         except DuplicateKeyError:
             # A concurrent sibling request inserted the deterministic
             # event between our read and our insert. Re-read it and
@@ -2127,14 +2487,29 @@ async def record_commitment_payment(
                 amount=amount_dec,
                 currency=commitment_currency,
             )
+            # 5B1.1 — Only an ``active`` racing allocation qualifies as
+            # a successful retry.
+            if (
+                racing_allocation is not None
+                and racing_allocation.get("status") != "active"
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This payment allocation was reversed or is no longer active",
+                )
+            # 5B2 — a version-1 racing event is finalised through the
+            # recoverable posting lifecycle; never duplicated.
+            if (
+                racing.get("direct_payment_posting_version")
+                == DIRECT_PAYMENT_POSTING_VERSION
+            ):
+                fresh = await _finalize_direct_payment_event(
+                    db,
+                    current_user["id"],
+                    racing,
+                )
+                return _project_commitment(fresh)
             if racing_allocation is not None:
-                # 5B1.1 — Only an ``active`` racing allocation
-                # qualifies as a successful retry.
-                if racing_allocation.get("status") != "active":
-                    raise HTTPException(
-                        status_code=409,
-                        detail="This payment allocation was reversed or is no longer active",
-                    )
                 # The racing sibling fully landed this payment. Do not
                 # create another allocation or write another audit;
                 # re-apply allocation effects once (safe repair) and
@@ -2157,23 +2532,17 @@ async def record_commitment_payment(
             # existing allocation recovery path with the racing event
             # as our live payment_event.
             payment_event = racing
-
-        if event_inserted_by_this_request:
-            await _audit(
+        else:
+            # 5B2 — this request inserted a version-1 event with its
+            # allocation. Finalise projection + deterministic audits.
+            # The event is never deleted; on interruption its pending
+            # posting state drives read-through repair.
+            fresh = await _finalize_direct_payment_event(
                 db,
                 current_user["id"],
-                "financial_event",
-                payment_event_id,
-                "created",
-                source="manual",
-                new_value={
-                    "amount": _quantize_out(amount_dec),
-                    "currency": commitment_currency,
-                    "commitment_id": commitment_id,
-                    "account_id": body.account_id,
-                    "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
-                },
+                payment_event,
             )
+            return _project_commitment(fresh)
 
     allocation_persisted = False
 
@@ -2884,6 +3253,16 @@ async def reject_event(event_id: str, current_user: dict = Depends(get_current_u
                 "Resolve the dedupe candidate before rejecting."
             ),
         )
+    if (
+        ev.get("direct_payment_posting_version")
+        == DIRECT_PAYMENT_POSTING_VERSION
+        and ev.get("direct_payment_posting_state")
+        == DIRECT_PAYMENT_POSTING_PENDING
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Direct payment is still being projected; refresh and try again",
+        )
     await db.financial_events.update_one(
         {"id": event_id, "user_id": current_user["id"]},
         {"$set": {"confirmation_status": "rejected", "lifecycle_status": LIFECYCLE_STATUS_VOID}},
@@ -3288,7 +3667,13 @@ async def void_allocation(
 
 
 async def _apply_allocation_effects(
-    db, user_id: str, *, target_type: str, target_id: str, currency: str,
+    db,
+    user_id: str,
+    *,
+    target_type: str,
+    target_id: str,
+    currency: str,
+    write_audit: bool = True,
 ) -> None:
     """Derive lifecycle + cached monetary aggregates on the allocation
     target from the sum of ACTIVE allocations across every APPLIED
@@ -3306,7 +3691,7 @@ async def _apply_allocation_effects(
         db, user_id, target_type, target_id, currency,
     )
     if target_type == "commitment":
-        c = await _read_commitment_by_id(db, user_id, target_id)
+        c = await _read_commitment_by_id(db, user_id, target_id, repair_pending=False)
         if not c:
             return
         planned = _decimal_from_stored(c.get("amount"))
@@ -3368,7 +3753,7 @@ async def _apply_allocation_effects(
             if not c.get("completed_at"):
                 updates["completed_at"] = _now()
         await _update_lifecycle(db, target_id, updates)
-        if new_state != current_state:
+        if write_audit and new_state != current_state:
             await _audit(
                 db, user_id, "financial_commitment", target_id,
                 "completed" if new_state == "completed"
@@ -3408,7 +3793,7 @@ async def _apply_allocation_effects(
             {"id": target_id, "user_id": user_id},
             {"$set": updates},
         )
-        if totals_changed:
+        if write_audit and totals_changed:
             await _audit(
                 db, user_id, "expected_income", target_id, "updated",
                 source="manual",
