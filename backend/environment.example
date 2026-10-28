@@ -32,3 +32,8 @@ CORS_ORIGINS=
 # ---- LLM / integrations (optional) --------------------------------------
 # Fill in only if the corresponding integration is enabled locally.
 EMERGENT_LLM_KEY=
+# Brain-dump inbox (Claude API). Without it, dumps are still saved and
+# show up as "unsorted" until sorting is retried.
+ANTHROPIC_API_KEY=
+# Optional override; defaults to claude-opus-5-5.
+HYMN_ASSISTANT_MODEL=

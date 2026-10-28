@@ -2837,6 +2837,7 @@ from finance_manager import (
 from finance_advanced import advanced_router as finance_advanced_router, ensure_finance_advanced_indexes  # noqa: E402
 from planning_engine import planning_router, ensure_planning_indexes  # noqa: E402
 from planning_space import planning_space_router  # noqa: E402
+from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
 import goal_merge  # noqa: F401,E402  (registers merge endpoints on planning_router)
 
 api_router.include_router(portfolio_router)
@@ -2844,6 +2845,7 @@ api_router.include_router(finance_router)
 api_router.include_router(finance_advanced_router)
 api_router.include_router(planning_router)
 api_router.include_router(planning_space_router)
+api_router.include_router(inbox_router)
 app.include_router(api_router)
 
 # Auth is a bearer header, never a cookie, so credentialed CORS is not
@@ -2876,6 +2878,7 @@ async def startup_indexes():
     await ensure_finance_indexes(db)
     await ensure_finance_advanced_indexes(db)
     await ensure_planning_indexes(db)
+    await ensure_inbox_indexes(db)
     try:
         touched = await backfill_fc_into_allocations(db)
         if touched:
