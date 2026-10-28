@@ -22,6 +22,7 @@ export default function EditTaskScreen() {
           assigned_to_type: (t as any).assigned_to_type || "self",
           assigned_to_name: (t as any).assigned_to_name || "",
           assigned_to_phone: (t as any).assigned_to_phone || "",
+          commitment_type: (t as any).commitment_type || "postponable",
         });
       } finally { setLoading(false); }
     })();

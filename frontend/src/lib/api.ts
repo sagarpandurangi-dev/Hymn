@@ -1,17 +1,82 @@
 import { getToken } from "./tokenStorage";
-import type {
-  IntentAnalysis,
-  IntentAnalyzePayload,
-  SavedIntent,
-} from "./intents";
-import type {
-  ReconciliationSuggestion,
-  UnplannedResolutionResult,
-} from "./reconciliation";
 
 const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
 
 export type ApiError = { status: number; message: string };
+
+// Correction 4B — allocation idempotency key generator.
+//
+// Produces a non-secret identifier that is stable within a single
+// submission attempt but reliably unique across sessions and rapid
+// retries. Combines wall clock, an in-memory counter that survives
+// hot reload for the current bundle, and Math.random() so callers
+// never need a dependency to guarantee uniqueness.
+//
+// Layout: `alloc-<base36 timestamp>-<base36 counter>-<base36 random>`
+// Length is comfortably inside the backend's 16..128 window.
+let __allocIdemCounter = 0;
+export function createAllocationIdempotencyKey(): string {
+  __allocIdemCounter = (__allocIdemCounter + 1) >>> 0;
+  const ts = Date.now().toString(36);
+  const counter = __allocIdemCounter.toString(36).padStart(4, "0");
+  const rand = Math.floor(Math.random() * 0xFFFFFFFF).toString(36).padStart(6, "0");
+  const rand2 = Math.floor(Math.random() * 0xFFFFFFFF).toString(36).padStart(6, "0");
+  return `alloc-${ts}-${counter}-${rand}${rand2}`;
+}
+
+/** Recurrence cadence vocabulary — shared with `backend/recurrence.py`. */
+export type RecurrenceCadence =
+  | "daily"
+  | "alternate_day"
+  | "weekly"
+  | "fortnightly"
+  | "monthly"
+  | "quarterly"
+  | "half_yearly"
+  | "yearly";
+
+/** Extended cadence enum for goal-level check-in scheduling. Adds `manual`. */
+export type CheckinCadence = RecurrenceCadence | "manual" | "";
+
+/**
+ * Task recurrence configuration. Matches the backend `TaskRecurrenceSpec`
+ * one-to-one. `series_id` is server-owned — clients read it, never set it.
+ */
+export type RecurrenceSpec = {
+  cadence: RecurrenceCadence;
+  anchor_date: string;                       // YYYY-MM-DD
+  end_type?: "never" | "until" | "count";
+  end_date?: string | null;                  // when end_type === "until"
+  occurrences_remaining?: number | null;     // when end_type === "count"
+  series_id?: string | null;
+  pre_generate_count?: number;               // 0..12 upfront materialisation
+};
+
+/**
+ * Behavioural calibration profile returned by `GET /api/finance/calibration`.
+ * Mirrors `backend/calibration.py::compute_profile` one-to-one so the UI can
+ * render it without extra reshaping.
+ */
+export type CalibrationBucket = {
+  value: string;
+  count: number;
+  vindicated: number;
+  regretted: number;
+  vindicated_ratio: number | null;
+  softens: boolean;
+};
+
+export type CalibrationProfile = {
+  total: number;
+  by_classification: Record<string, number>;
+  by_priority: CalibrationBucket[];
+  by_domain: CalibrationBucket[];
+  by_currency: CalibrationBucket[];
+  outcomes: { vindicated: number; regretted: number; pending: number };
+  trend: { last_90d: number; last_180d: number; last_365d: number };
+  soften_min_count: number;
+  soften_min_ratio: number;
+};
 
 function _stringifyDetail(d: any): string {
   if (!d) return "Request failed";
@@ -61,15 +126,202 @@ export type PostCreationDecompositionPreference =
 export type UserResponse = {
   id: string;
   email: string;
-  display_name?: string | null;
+  name?: string | null;
   portfolio_setup_completed_at?: string | null;
   portfolio_reporting_currency?: string | null;
   post_creation_decomposition_preference?: PostCreationDecompositionPreference;
 };
 
+/**
+ * Batch 2B9 — Editable draft Plan → Phase → Milestone → Task → Required
+ * Check-in hierarchy shared with the backend `planning_engine.py`.
+ */
+export type PlanningRequiredCheckinDraft = {
+  id: string;
+  title: string;
+  prompt: string;
+  cadence: "once" | "daily" | "weekly" | "monthly" | "quarterly";
+};
+
+export type PlanningTaskDraft = {
+  id: string;
+  title: string;
+  description?: string | null;
+  due_date?: string | null;
+  priority: "low" | "medium" | "high";
+  required_checkins: PlanningRequiredCheckinDraft[];
+};
+
+export type PlanningMilestoneDraft = {
+  id: string;
+  title: string;
+  description?: string | null;
+  target_date?: string | null;
+  tasks: PlanningTaskDraft[];
+};
+
+export type PlanningPhaseDraft = {
+  id: string;
+  title: string;
+  description?: string | null;
+  milestones: PlanningMilestoneDraft[];
+};
+
+export type PlanningPlanDraft = {
+  id: string;
+  title: string;
+  phases: PlanningPhaseDraft[];
+};
+
+export type PlanningDraftHierarchyResponse = {
+  conversation_id: string;
+  message_id: string;
+  proposal_revision: number;
+  plan: PlanningPlanDraft;
+};
+
+export type PlanningHierarchyEntityType =
+  | "plan"
+  | "phase"
+  | "milestone"
+  | "task"
+  | "required_checkin";
+
+export type PlanningHierarchyOperationRequest = {
+  operation_id: string;
+  expected_revision: number;
+  action: "add" | "update" | "delete" | "move" | "duplicate";
+  entity_type: PlanningHierarchyEntityType;
+  entity_id?: string | null;
+  parent_id?: string | null;
+  position?: number | null;
+  values?: Record<string, unknown> | null;
+};
+
+/**
+ * Batch 2B9.1 — shape of the message rows exposed on the conversation
+ * returned by ``POST /planning/conversations/{cid}/materialize``. Extra
+ * message fields are ignored here; the editor only needs to look up the
+ * materialized message by id and read its summary.
+ */
+export type PlanningMaterializedMessage = {
+  id: string;
+  materialized_at?: string | null;
+  materialized_summary?: string | null;
+  materialization_state?: string | null;
+};
+
+export type PlanningMaterializeResponse = {
+  conversation: {
+    messages: PlanningMaterializedMessage[];
+    [key: string]: unknown;
+  };
+  result: Record<string, unknown>;
+};
+
+/**
+ * RFC 4122 version-4 UUID generator. Dependency-free — combines Math.random
+ * with the standard v4 bit patterns. This id is used solely for backend
+ * idempotency of draft hierarchy operations; it is not a security token.
+ */
+export function createPlanningOperationId(): string {
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) {
+    bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0"));
+  return (
+    hex.slice(0, 4).join("") +
+    "-" +
+    hex.slice(4, 6).join("") +
+    "-" +
+    hex.slice(6, 8).join("") +
+    "-" +
+    hex.slice(8, 10).join("") +
+    "-" +
+    hex.slice(10, 16).join("")
+  );
+}
+
+export type PlanningSpaceMoneyRow = {
+  liquid_effective: string;
+  reserved: string;
+  available_unreserved: string;
+};
+
+export type PlanningSpaceTimeCapacity = {
+  week_start_date: string;
+  total_minutes: number;
+  committed_minutes: number;
+  available_minutes: number;
+  overlapping_minutes: number;
+  baseline_committed_minutes: number;
+  reserved_minutes: number;
+  capacity_basis: "recorded_commitments_and_active_reservations";
+  is_estimate: boolean;
+};
+
+export type PlanningSpaceMoneyCapacity = {
+  by_currency: Record<string, PlanningSpaceMoneyRow>;
+  pending_events: unknown[];
+};
+
+export type PlanningSpacePlanSummary = {
+  id: string;
+  title: string;
+  status: string;
+  created_at: string;
+};
+
+export type PlanningSpaceTarget = {
+  target_type: "goal" | "project";
+  target_id: string;
+  title: string;
+  status: string;
+  deadline: string;
+  commitment_type: "postponable" | "exclusive";
+  plans: PlanningSpacePlanSummary[];
+  open_task_count: number;
+  overdue_task_count: number;
+  due_this_week_task_count: number;
+  active_plan_required_checkin_count: number;
+};
+
+export type PlanningSpaceWorkload = {
+  open_task_count: number;
+  overdue_task_count: number;
+  due_this_week_task_count: number;
+};
+
+export type PlanningSpacePortfolioTotals = {
+  active_goal_count: number;
+  paused_goal_count: number;
+  active_project_count: number;
+  paused_project_count: number;
+  plan_count: number;
+  open_task_count: number;
+  overdue_task_count: number;
+  due_this_week_task_count: number;
+  active_plan_required_checkin_count: number;
+};
+
+export type PlanningSpaceResponse = {
+  as_of: string;
+  week_start_date: string;
+  capacity: {
+    time: PlanningSpaceTimeCapacity;
+    money: PlanningSpaceMoneyCapacity;
+  };
+  targets: PlanningSpaceTarget[];
+  unscoped_workload: PlanningSpaceWorkload;
+  portfolio_totals: PlanningSpacePortfolioTotals;
+};
+
 export const api = {
   signup: (payload: {
-    display_name: string;
+    name: string;
     email: string;
     password: string;
     security_question: string;
@@ -81,14 +333,14 @@ export const api = {
 
   me: () => request<UserResponse>("/auth/me", { auth: true }),
 
-  updateMe: (payload: { display_name: string }) =>
-    request<UserResponse>("/auth/me", {
+  logout: () => request<{ detail: string }>("/auth/logout", { method: "POST", auth: true }),
+
+  updateProfile: (name: string) =>
+    request<UserResponse>("/auth/profile", {
       method: "PATCH",
-      body: payload,
+      body: { name },
       auth: true,
     }),
-
-  logout: () => request<{ detail: string }>("/auth/logout", { method: "POST", auth: true }),
 
   updatePostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) =>
     request<UserResponse>("/auth/preferences/post-creation-decomposition", {
@@ -103,27 +355,6 @@ export const api = {
   forgotPassword: (payload: { email: string; security_answer: string; new_password: string }) =>
     request<{ detail: string }>("/auth/forgot-password", { method: "POST", body: payload }),
 
-  analyzeIntent: (payload: IntentAnalyzePayload) =>
-    request<IntentAnalysis>("/intents/analyze", {
-      method: "POST",
-      body: payload,
-      auth: true,
-    }),
-  confirmIntent: (
-    payload: IntentAnalyzePayload & {
-      selected_option_id: string;
-      idempotency_key: string;
-    },
-  ) =>
-    request<SavedIntent>("/intents/confirm", {
-      method: "POST",
-      body: payload,
-      auth: true,
-    }),
-  listIntents: () => request<SavedIntent[]>("/intents", { auth: true }),
-  getIntent: (id: string) =>
-    request<SavedIntent>(`/intents/${encodeURIComponent(id)}`, { auth: true }),
-
   listDomains: () =>
     request<{ id: string; name: string; is_default: boolean; created_at: string }[]>("/domains", { auth: true }),
   createDomain: (name: string) =>
@@ -137,14 +368,14 @@ export const api = {
     request<
       { id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence: string; created_at: string; updated_at: string }[]
     >("/goals", { auth: true }),
-  createGoal: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence?: string }) =>
+  createGoal: (payload: { title: string; domain_id: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence?: string; checkin_anchor_date?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>("/goals", { method: "POST", body: payload, auth: true }),
   getGoal: (id: string) =>
     request<{ id: string; title: string; domain_id: string; domain_name: string; target_outcome: string; deadline: string; status: string; notes: string; checkin_cadence: string; created_at: string; updated_at: string; expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number }>(
       `/goals/${id}`,
       { auth: true },
     ),
-  updateGoal: (id: string, payload: { title?: string; domain_id?: string; target_outcome?: string; deadline?: string; status?: string; notes?: string; checkin_cadence?: string }) =>
+  updateGoal: (id: string, payload: { title?: string; domain_id?: string; target_outcome?: string; deadline?: string; status?: string; notes?: string; checkin_cadence?: string; checkin_anchor_date?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>(`/goals/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteGoal: (id: string) =>
     request<{ detail: string }>(`/goals/${id}`, { method: "DELETE", auth: true }),
@@ -169,36 +400,43 @@ export const api = {
     request<
       { id: string; title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string }[]
     >("/projects", { auth: true }),
-  createProject: (payload: { title: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string }) =>
+  createProject: (payload: { title: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>("/projects", { method: "POST", body: payload, auth: true }),
   getProject: (id: string) =>
     request<{ id: string; title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string }>(
       `/projects/${id}`,
       { auth: true },
     ),
-  updateProject: (id: string, payload: { title?: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string }) =>
+  updateProject: (id: string, payload: { title?: string; description?: string; status?: string; start_date?: string; target_end_date?: string; notes?: string; commitment_type?: "postponable" | "exclusive" }) =>
     request<{ id: string }>(`/projects/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteProject: (id: string) =>
     request<{ detail: string }>(`/projects/${id}`, { method: "DELETE", auth: true }),
 
-  listTasks: (params?: { goalId?: string; includeCompleted?: boolean }) => {
+  listTasks: (params?: { goalId?: string; projectId?: string; includeCompleted?: boolean }) => {
     const parts: string[] = [];
     if (params?.goalId) parts.push(`goal_id=${encodeURIComponent(params.goalId)}`);
+    if (params?.projectId) parts.push(`project_id=${encodeURIComponent(params.projectId)}`);
     if (params?.includeCompleted === false) parts.push("include_completed=false");
     const qs = parts.length ? `?${parts.join("&")}` : "";
     return request<
-      { id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; component_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }[]
+      { id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }[]
     >(`/tasks${qs}`, { auth: true });
   },
-  createTask: (payload: { title: string; due_date?: string; priority?: string; status?: string; notes?: string; origin: string; expected_outcome_id?: string | null; project_id?: string | null }) =>
+  createTask: (payload: { title: string; due_date?: string; priority?: string; status?: string; notes?: string; origin: string; expected_outcome_id?: string | null; project_id?: string | null; commitment_type?: "postponable" | "exclusive"; recurrence?: RecurrenceSpec | null }) =>
     request<{ id: string }>("/tasks", { method: "POST", body: payload, auth: true }),
   getTask: (id: string) =>
-    request<{ id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number }>(
+    request<{ id: string; title: string; due_date: string; priority: string; status: string; notes: string; origin: string; expected_outcome_id: string | null; project_id: string | null; deferred_until: string | null; original_due_date: string | null; defer_count: number; recurrence: RecurrenceSpec | null; series_id: string | null; occurrence_index: number }>(
       `/tasks/${id}`,
       { auth: true },
     ),
-  updateTask: (id: string, payload: { title?: string; due_date?: string; priority?: string; status?: string; notes?: string }) =>
+  updateTask: (id: string, payload: { title?: string; due_date?: string; priority?: string; status?: string; notes?: string; commitment_type?: "postponable" | "exclusive"; recurrence?: RecurrenceSpec | null; set_recurrence?: boolean }) =>
     request<{ id: string }>(`/tasks/${id}`, { method: "PUT", body: payload, auth: true }),
+  setTaskRecurrence: (id: string, payload: RecurrenceSpec) =>
+    request<any>(`/tasks/${id}/recurrence`, { method: "POST", body: payload, auth: true }),
+  clearTaskRecurrence: (id: string) =>
+    request<any>(`/tasks/${id}/recurrence`, { method: "DELETE", auth: true }),
+  generateTaskOccurrences: (id: string, count: number) =>
+    request<any[]>(`/tasks/${id}/recurrence/generate`, { method: "POST", body: { count }, auth: true }),
   deferTask: (id: string, deferred_until: string) =>
     request<{ id: string; deferred_until: string | null; defer_count: number }>(
       `/tasks/${id}/defer`, { method: "POST", body: { deferred_until }, auth: true },
@@ -206,13 +444,14 @@ export const api = {
   deleteTask: (id: string) =>
     request<{ detail: string }>(`/tasks/${id}`, { method: "DELETE", auth: true }),
 
-  listCheckins: (params?: { goalId?: string; q?: string }) => {
+  listCheckins: (params?: { goalId?: string; projectId?: string; q?: string }) => {
     const bits: string[] = [];
     if (params?.goalId) bits.push(`goal_id=${encodeURIComponent(params.goalId)}`);
+    if (params?.projectId) bits.push(`project_id=${encodeURIComponent(params.projectId)}`);
     if (params?.q && params.q.trim()) bits.push(`q=${encodeURIComponent(params.q.trim())}`);
     const qs = bits.length ? `?${bits.join("&")}` : "";
     return request<
-      { id: string; type: string; title: string; date: string; time: string; notes: string; attachment: string; expected_outcome_id: string | null; goal_id: string | null; project_id: string | null; task_id: string | null; component_id: string | null; follow_up_task_id: string | null; money_spent: string | null; money_currency: string | null }[]
+      { id: string; type: string; title: string; date: string; time: string; notes: string; attachment: string; expected_outcome_id: string | null; goal_id: string | null; project_id: string | null; task_id: string | null; follow_up_task_id: string | null; money_spent: string | null; money_currency: string | null }[]
     >(`/checkins${qs}`, { auth: true });
   },
   getSpending: (date: string) =>
@@ -260,7 +499,7 @@ export const api = {
   // ---------- Portfolio: financial_accounts ----------
   listFinancialAccounts: () =>
     request<
-      { id: string; user_id: string; account_type: string; name: string; currency: string; current_value: string; liquidity_type: string; fixed_or_flexible: string; notes: string; created_at: string; updated_at: string }[]
+      { id: string; user_id: string; account_type: string; name: string; currency: string; current_value: string; balance_as_of: string; liquidity_type: string; fixed_or_flexible: string; notes: string; created_at: string; updated_at: string }[]
     >("/portfolio/financial-accounts", { auth: true }),
   createFinancialAccount: (payload: { account_type: string; name: string; currency: string; current_value: string | number; liquidity_type: string; fixed_or_flexible: string; notes?: string }) =>
     request<{ id: string }>("/portfolio/financial-accounts", { method: "POST", body: payload, auth: true }),
@@ -300,7 +539,7 @@ export const api = {
     request<{ id: string }>("/checkins", { method: "POST", body: payload, auth: true }),
   getCheckin: (id: string) =>
     request<any>(`/checkins/${id}`, { auth: true }),
-  updateCheckin: (id: string, payload: { title?: string; date?: string; time?: string; notes?: string; attachment?: string }) =>
+  updateCheckin: (id: string, payload: { title?: string; date?: string; time?: string; notes?: string; attachment?: string; money_spent?: string | null; money_currency?: string | null; account_id?: string | null; occurred_at?: string | null }) =>
     request<{ id: string }>(`/checkins/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteCheckin: (id: string) =>
     request<{ detail: string }>(`/checkins/${id}`, { method: "DELETE", auth: true }),
@@ -312,71 +551,14 @@ export const api = {
     ),
 
   listLearningJourneys: () =>
+    // Deprecated: use listGoals + filter by domain_name === "Knowledge".
     request<
       { id: string; goal_id: string; journey_type: string; has_stages: boolean; title: string; notes: string; deadline: string; status: string; checkin_cadence: string; domain_id: string; domain_name: string; expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number; created_at: string; updated_at: string }[]
-    >("/knowledge/journeys", { auth: true }),
-
-  getLearningJourney: (id: string) =>
-    request<
-      { id: string; goal_id: string; journey_type: string; has_stages: boolean; title: string; notes: string; deadline: string; status: string; checkin_cadence: string; domain_id: string; domain_name: string; expected_outcomes_total: number; expected_outcomes_completed: number; completion_pct: number; created_at: string; updated_at: string }
-    >(`/knowledge/journeys/${id}`, { auth: true }),
-
-  updateLearningJourney: (id: string, payload: { journey_type?: string; has_stages?: boolean }) =>
-    request<any>(`/knowledge/journeys/${id}`, { method: "PUT", body: payload, auth: true }),
-
-  deleteLearningJourney: (id: string) =>
-    request<{ detail: string }>(`/knowledge/journeys/${id}`, { method: "DELETE", auth: true }),
-
-  createLearningJourney: (payload: {
-    journey_type: "professional_qualification" | "skill" | "course" | "subject" | "book" | "custom";
-    title: string;
-    has_stages: boolean;
-    stages: { name: string }[];
-    why: string;
-    target_completion_date: string;
-    first_outcome: { title: string; target_value?: string; unit?: string; outcome_type?: string };
-    first_task: { title: string; due_date?: string; priority?: string };
-    checkin_cadence: "daily" | "weekly" | "monthly" | "manual";
-  }) =>
-    request<{ id: string; goal_id: string; journey_type: string; has_stages: boolean; title: string; deadline: string; status: string; checkin_cadence: string }>(
-      "/knowledge/journeys",
-      { method: "POST", body: payload, auth: true },
+    >("/goals", { auth: true }).then((goals: any[]) =>
+      goals
+        .filter((g) => (g.domain_name || "").toLowerCase() === "knowledge")
+        .map((g) => ({ ...g, goal_id: g.id, has_stages: false })),
     ),
-
-  // ---------- Stages ----------
-  listStages: (journeyId: string) =>
-    request<{ id: string; journey_id: string; name: string; sequence: number }[]>(
-      `/knowledge/journeys/${journeyId}/stages`,
-      { auth: true },
-    ),
-  createStage: (payload: { journey_id: string; name: string }) =>
-    request<{ id: string; journey_id: string; name: string; sequence: number }>(
-      "/knowledge/stages",
-      { method: "POST", body: payload, auth: true },
-    ),
-  updateStage: (id: string, payload: { name?: string }) =>
-    request<any>(`/knowledge/stages/${id}`, { method: "PUT", body: payload, auth: true }),
-  deleteStage: (id: string) =>
-    request<{ detail: string }>(`/knowledge/stages/${id}`, { method: "DELETE", auth: true }),
-  moveStage: (id: string, direction: "up" | "down") =>
-    request<{ detail: string }>(`/knowledge/stages/${id}/move?direction=${direction}`, { method: "POST", auth: true }),
-
-  // ---------- Components ----------
-  listComponents: (journeyId: string) =>
-    request<
-      { id: string; journey_id: string; stage_id: string | null; parent_component_id: string | null; name: string; type: string; sequence: number; status: string; progress: number; notes: string }[]
-    >(`/knowledge/journeys/${journeyId}/components`, { auth: true }),
-  createComponent: (payload: { journey_id: string; stage_id?: string | null; parent_component_id?: string | null; name: string; type?: string; status?: string; progress?: number; notes?: string }) =>
-    request<{ id: string; journey_id: string; stage_id: string | null; parent_component_id: string | null; name: string; type: string; sequence: number; status: string; progress: number; notes: string }>(
-      "/knowledge/components",
-      { method: "POST", body: payload, auth: true },
-    ),
-  updateComponent: (id: string, payload: { name?: string; type?: string; status?: string; progress?: number; notes?: string }) =>
-    request<any>(`/knowledge/components/${id}`, { method: "PUT", body: payload, auth: true }),
-  deleteComponent: (id: string) =>
-    request<{ detail: string }>(`/knowledge/components/${id}`, { method: "DELETE", auth: true }),
-  moveComponent: (id: string, direction: "up" | "down") =>
-    request<{ detail: string }>(`/knowledge/components/${id}/move?direction=${direction}`, { method: "POST", auth: true }),
 
   // ============================================================================
   // FINANCE ENGINE
@@ -385,11 +567,7 @@ export const api = {
   getFinancePosition: () => request<any>("/finance/position", { auth: true }),
   getFinanceMonthly: (month: string, currency: string) =>
     request<any>(`/finance/monthly?month=${encodeURIComponent(month)}&currency=${encodeURIComponent(currency)}`, { auth: true }),
-  getFinanceReserved: () => request<any>("/finance/reserved", { auth: true }),
-  getFinanceAvailableLiquidity: () => request<any>("/finance/available-liquidity", { auth: true }),
   getFinanceForecast: () => request<any>("/finance/forecast", { auth: true }),
-  runFinanceScenario: (payload: { currency: string; additional_monthly_expense?: string | number; additional_monthly_income?: string | number; additional_reservation?: string | number; reservation_due_month?: string }) =>
-    request<any>("/finance/scenarios", { method: "POST", body: payload, auth: true }),
 
   listFinancialCommitments: (params?: { state?: string; currency?: string; include_terminal?: boolean }) => {
     const parts: string[] = [];
@@ -411,16 +589,40 @@ export const api = {
     request<any>(`/finance/commitments/${id}`, { method: "PUT", body: payload, auth: true }),
   reserveFinancialCommitment: (id: string) =>
     request<any>(`/finance/commitments/${id}/reserve`, { method: "POST", auth: true }),
-  completeFinancialCommitment: (id: string, payload: { actual_amount?: string | number; actual_event_id?: string; event_date?: string }) =>
+  completeFinancialCommitment: (id: string, payload: { actual_amount?: string | number; actual_event_id?: string; event_date?: string; account_id?: string; occurred_at?: string }) =>
     request<any>(`/finance/commitments/${id}/complete`, { method: "POST", body: payload, auth: true }),
+  recordFinancialCommitmentPayment: (
+    id: string,
+    payload: {
+      amount: string | number;
+      account_id: string;
+      occurred_at: string;
+      event_date: string;
+      idempotency_key: string;
+    },
+  ) =>
+    request<any>(
+      `/finance/commitments/${id}/payments`,
+      {
+        method: "POST",
+        body: payload,
+        auth: true,
+      },
+    ),
   cancelFinancialCommitment: (id: string) =>
     request<any>(`/finance/commitments/${id}/cancel`, { method: "POST", auth: true }),
   postponeFinancialCommitment: (id: string, new_due_date: string) =>
     request<any>(`/finance/commitments/${id}/postpone`, { method: "POST", body: { new_due_date }, auth: true }),
   keepActiveFinancialCommitment: (id: string) =>
     request<any>(`/finance/commitments/${id}/keep-active`, { method: "POST", auth: true }),
-  reviewFinancialCommitment: (id: string, payload: { decision: "keep" | "complete" | "cancel" | "postpone"; new_due_date?: string; actual_amount?: string | number; actual_event_id?: string }) =>
+  reviewFinancialCommitment: (id: string, payload: { decision: "keep" | "complete" | "cancel" | "postpone"; new_due_date?: string; actual_amount?: string | number; actual_event_id?: string; account_id?: string; occurred_at?: string }) =>
     request<any>(`/finance/commitments/${id}/review`, { method: "POST", body: payload, auth: true }),
+  // Correction 2: narrow endpoint to fix an unapplied event's
+  // account/time so it flows into the money service. Correction 3
+  // adds optional precision + device-timezone offset fields so the
+  // frontend never has to invent a noon/midnight time.
+  patchEventAssignment: (id: string, payload: { account_id?: string | null; occurred_at?: string | null; event_date?: string; occurred_at_precision?: "exact" | "date_only"; occurred_at_offset_minutes?: number | null }) =>
+    request<any>(`/finance/events/${id}/assignment`, { method: "PATCH", body: payload, auth: true }),
   getTaskLinkedCommitment: (taskId: string) =>
     request<any>(`/finance/task-linked-commitment/${taskId}`, { auth: true }),
   getCommitmentsDueForReview: () =>
@@ -441,6 +643,16 @@ export const api = {
   rejectFinancialEvent: (id: string) =>
     request<any>(`/finance/events/${id}/reject`, { method: "POST", auth: true }),
 
+  // Correction 3 — allocation CRUD. Allocations classify slices of a
+  // single financial event to commitments / expected incomes. They
+  // never move the account balance.
+  createAllocation: (eventId: string, payload: { target_type: "commitment" | "expected_income"; target_id: string; amount: string | number; idempotency_key: string }) =>
+    request<any>(`/finance/events/${eventId}/allocations`, { method: "POST", body: payload, auth: true }),
+  updateAllocation: (eventId: string, allocationId: string, payload: { amount: string | number }) =>
+    request<any>(`/finance/events/${eventId}/allocations/${allocationId}`, { method: "PATCH", body: payload, auth: true }),
+  voidAllocation: (eventId: string, allocationId: string) =>
+    request<any>(`/finance/events/${eventId}/allocations/${allocationId}/void`, { method: "POST", auth: true }),
+
   listDedupeCandidates: () => request<any[]>("/finance/dedupe-candidates", { auth: true }),
   resolveDedupe: (candidateId: string, resolution: "same" | "different", canonical_event_id?: string) =>
     request<any>(`/finance/dedupe-candidates/${candidateId}/resolve`, { method: "POST", body: { resolution, canonical_event_id }, auth: true }),
@@ -450,24 +662,18 @@ export const api = {
 
   // -- Finance Advanced (§15–§26) --
   getTwinForecasts: () => request<any>("/finance/forecasts", { auth: true }),
-  reconciliationSuggestions: () =>
-    request<ReconciliationSuggestion[]>("/finance/reconciliation/suggestions", {
-      auth: true,
-    }),
+  reconciliationSuggestions: () => request<any[]>("/finance/reconciliation/suggestions", { auth: true }),
   reconcileConfirm: (eventId: string, payload: { commitment_id: string; actual_amount_override?: string | number }) =>
     request<any>(`/finance/reconciliation/${eventId}/confirm`, { method: "POST", body: payload, auth: true }),
   reconcileReject: (eventId: string) =>
-    request<UnplannedResolutionResult>(
-      `/finance/reconciliation/${eventId}/reject`,
-      { method: "POST", auth: true },
-    ),
+    request<any>(`/finance/reconciliation/${eventId}/reject`, { method: "POST", auth: true }),
 
   listExpectedIncome: () => request<any[]>("/finance/expected-income", { auth: true }),
   createExpectedIncome: (payload: { title: string; amount: string | number; currency: string; expected_date: string; classification: "confirmed" | "expected"; description?: string }) =>
     request<any>("/finance/expected-income", { method: "POST", body: payload, auth: true }),
   confirmExpectedInclusion: (id: string, include_in_forecast: boolean) =>
     request<any>(`/finance/expected-income/${id}/confirm-inclusion`, { method: "POST", body: { include_in_forecast }, auth: true }),
-  markExpectedReceived: (id: string, payload?: { event_id?: string; actual_amount?: string | number; event_date?: string }) =>
+  markExpectedReceived: (id: string, payload?: { event_id?: string; actual_amount?: string | number; event_date?: string; account_id?: string; occurred_at?: string }) =>
     request<any>(`/finance/expected-income/${id}/received`, { method: "POST", body: payload || {}, auth: true }),
   deleteExpectedIncome: (id: string) =>
     request<{ detail: string }>(`/finance/expected-income/${id}`, { method: "DELETE", auth: true }),
@@ -475,7 +681,12 @@ export const api = {
   runDecisionAssessment: (payload: { amount: string | number; currency: string; due_date: string; priority: string }) =>
     request<any>("/finance/decision-assessment", { method: "POST", body: payload, auth: true }),
   recordOverride: (payload: any) => request<any>("/finance/overrides", { method: "POST", body: payload, auth: true }),
-  listOverrides: () => request<any[]>("/finance/overrides", { auth: true }),
+  setOverrideOutcome: (id: string, outcome: "vindicated" | "regretted" | "pending", notes?: string) =>
+    request<{ ok: boolean; outcome: string }>(
+      `/finance/overrides/${id}/outcome`,
+      { method: "POST", body: { outcome, notes }, auth: true },
+    ),
+  getCalibration: () => request<CalibrationProfile>("/finance/calibration", { auth: true }),
 
   rebalanceCandidates: (currency: string, exclude_id?: string) =>
     request<any[]>(`/finance/rebalance-candidates?currency=${encodeURIComponent(currency)}${exclude_id ? `&exclude_id=${encodeURIComponent(exclude_id)}` : ""}`, { auth: true }),
@@ -493,37 +704,62 @@ export const api = {
   evaluateScenario: (id: string) =>
     request<any>(`/finance/scenarios/detail/${id}/evaluate`, { method: "POST", auth: true }),
 
-  sharedExpenseIOwe: (payload: { total_amount: string | number; currency: string; other_paid_by: string; my_share: string | number; description?: string; due_date: string; priority?: string; create_task?: boolean }) =>
-    request<any>("/finance/shared-expenses/i-owe", { method: "POST", body: payload, auth: true }),
-  sharedExpenseIPaid: (payload: { total_amount: string | number; currency: string; participants: string[]; event_date: string; description?: string; prepare_repayment_message?: boolean }) =>
-    request<any>("/finance/shared-expenses/i-paid", { method: "POST", body: payload, auth: true }),
-
-  // -- Planning Engine --
-  planningAnalyze: (payload: { target_type: "goal" | "project" | "journey"; target_id: string }) =>
-    request<any>("/planning/analyze", { method: "POST", body: payload, auth: true }),
-  planningGetProposal: (id: string) =>
-    request<any>(`/planning/proposals/${id}`, { auth: true }),
-  planningListProposals: (target_type?: string, target_id?: string) => {
-    const params = new URLSearchParams();
-    if (target_type) params.append("target_type", target_type);
-    if (target_id) params.append("target_id", target_id);
-    const qs = params.toString() ? `?${params.toString()}` : "";
-    return request<any[]>(`/planning/proposals${qs}`, { auth: true });
+  getPlanningSpace: (weekStartDate?: string) => {
+    const query = weekStartDate
+      ? `?week_start_date=${encodeURIComponent(weekStartDate)}`
+      : "";
+    return request<PlanningSpaceResponse>(
+      `/planning-space/current${query}`,
+      { auth: true },
+    );
   },
-  planningConfirm: (
-    id: string,
-    confirmations: { field: string; action: "confirm" | "edit" | "reject" | "mark_unknown"; value?: any; note?: string }[],
-  ) => request<any>(`/planning/proposals/${id}/confirm`, { method: "POST", body: { confirmations }, auth: true }),
-  planningGenerate: (id: string) =>
-    request<any>(`/planning/proposals/${id}/generate`, { method: "POST", auth: true }),
-  planningSelectTradeoff: (id: string, tradeoff_id: string) =>
-    request<any>(`/planning/proposals/${id}/select-tradeoff`, { method: "POST", body: { tradeoff_id }, auth: true }),
-  planningApprove: (id: string) =>
-    request<any>(`/planning/proposals/${id}/approve`, { method: "POST", auth: true }),
-  planningReject: (id: string) =>
-    request<any>(`/planning/proposals/${id}/reject`, { method: "POST", auth: true }),
-  planningPause: (id: string, future_allocations: "retain" | "reduce" | "release") =>
-    request<any>(`/planning/proposals/${id}/pause`, { method: "POST", body: { future_allocations }, auth: true }),
-  planningReassess: (payload: { target_type: "goal" | "project" | "journey"; target_id: string }) =>
-    request<any>("/planning/reassess", { method: "POST", body: payload, auth: true }),
+
+  // -- Planning Engine (Conversational) --
+  planningGetConversation: (target_type: "goal" | "project", target_id: string) =>
+    request<any>(`/planning/${target_type}/${target_id}/conversation`, { auth: true }),
+  planningSendMessage: (target_type: "goal" | "project", target_id: string, content: string) =>
+    request<any>(`/planning/${target_type}/${target_id}/messages`, {
+      method: "POST", body: { content }, auth: true,
+    }),
+  planningReset: (target_type: "goal" | "project", target_id: string) =>
+    request<any>(`/planning/${target_type}/${target_id}/reset`, { method: "POST", auth: true }),
+  planningMaterialize: (
+    conversation_id: string,
+    message_id: string,
+    expected_proposal_revision?: number,
+  ) => {
+    const body: { message_id: string; expected_proposal_revision?: number } = { message_id };
+    if (typeof expected_proposal_revision === "number") {
+      body.expected_proposal_revision = expected_proposal_revision;
+    }
+    return request<PlanningMaterializeResponse>(`/planning/conversations/${conversation_id}/materialize`, {
+      method: "POST", body, auth: true,
+    });
+  },
+  planningGetDraftHierarchy: (conversation_id: string, message_id: string) =>
+    request<PlanningDraftHierarchyResponse>(
+      `/planning/conversations/${conversation_id}/proposals/${message_id}/hierarchy`,
+      { auth: true },
+    ),
+  planningApplyDraftHierarchyOperation: (
+    conversation_id: string,
+    message_id: string,
+    operation: PlanningHierarchyOperationRequest,
+  ) =>
+    request<PlanningDraftHierarchyResponse & { operation_id: string }>(
+      `/planning/conversations/${conversation_id}/proposals/${message_id}/hierarchy/operations`,
+      { method: "POST", body: operation, auth: true },
+    ),
+
+  // -- Goal Merge Wizard (manual) --
+  mergePreview: (goal_ids: string[]) =>
+    request<any>("/planning/merge/preview", { method: "POST", body: { goal_ids }, auth: true }),
+  mergeApply: (payload: {
+    goal_ids: string[];
+    survivor_id: string;
+    outcome_rules: { outcome_id: string; action: "keep" | "nest" | "delete"; parent_outcome_id?: string | null }[];
+    delete_duplicate_ids?: string[];
+    tradeoffs?: { kind: "goal" | "project" | "task"; id: string; action: "postpone" | "cancel"; new_due_date?: string }[];
+  }) =>
+    request<any>("/planning/merge/apply", { method: "POST", body: payload, auth: true }),
 };

@@ -1,0 +1,32 @@
+name: Backend tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      # emergentintegrations is only published on Emergent's private index;
+      # the backend imports it lazily, so the offline suites don't need it.
+      - name: Install dependencies
+        run: |
+          grep -v '^emergentintegrations' requirements.txt > /tmp/requirements-ci.txt
+          pip install -r /tmp/requirements-ci.txt -r requirements-dev.txt
+      - name: Safety tests
+        run: python -m pytest safety_tests
+      - name: Unit tests
+        run: python -m pytest unit_tests

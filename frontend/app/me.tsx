@@ -1,32 +1,24 @@
-import {
-  ActivityIndicator,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
-import { useState } from "react";
+import Ionicons from "@react-native-vector-icons/ionicons";
+import { useEffect, useState } from "react";
 import { useRouter } from "expo-router";
 import { useAuth } from "@/src/lib/AuthContext";
-import {
-  displayNameInitials,
-  displayNameValidationError,
-  normalizeDisplayName,
-} from "@/src/lib/profile";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
 export default function MeScreen() {
   const router = useRouter();
-  const { user, signOut, updateDisplayName } = useAuth();
+  const { user, signOut, updateName } = useAuth();
   const [busy, setBusy] = useState(false);
-  const [editingName, setEditingName] = useState(false);
-  const [nameValue, setNameValue] = useState(user?.display_name || "");
-  const [nameError, setNameError] = useState<string | null>(null);
-  const initials = displayNameInitials(user?.display_name);
+  const [nameInput, setNameInput] = useState(user?.name || "");
+  const [saving, setSaving] = useState(false);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Keep the input in sync when the auth-provided user hydrates.
+    setNameInput(user?.name || "");
+  }, [user?.name]);
 
   const onLogout = async () => {
     setBusy(true);
@@ -37,22 +29,23 @@ export default function MeScreen() {
     }
   };
 
-  const saveName = async () => {
-    const validationError = displayNameValidationError(nameValue);
-    if (validationError) {
-      setNameError(validationError);
+  const onSaveName = async () => {
+    if (saving) return;
+    setSuccessMsg(null);
+    setErrorMsg(null);
+    const trimmed = (nameInput || "").trim();
+    if (!trimmed) {
+      setErrorMsg("Enter your name.");
       return;
     }
-    setBusy(true);
-    setNameError(null);
+    setSaving(true);
     try {
-      const updated = await updateDisplayName(normalizeDisplayName(nameValue));
-      setNameValue(updated.display_name || "");
-      setEditingName(false);
-    } catch (error: any) {
-      setNameError(error?.message || "Hymn could not save your name.");
+      await updateName(trimmed);
+      setSuccessMsg("Name updated");
+    } catch (e: any) {
+      setErrorMsg(e?.message || "Could not update name");
     } finally {
-      setBusy(false);
+      setSaving(false);
     }
   };
 
@@ -69,76 +62,38 @@ export default function MeScreen() {
       <ScrollView contentContainerStyle={styles.scroll}>
         <View style={styles.profile}>
           <View style={styles.avatar}>
-            {initials ? (
-              <Text style={styles.avatarText}>{initials}</Text>
-            ) : (
-              <Ionicons name="person" size={32} color={colors.onBrandPrimary} />
-            )}
+            <Ionicons name="person" size={32} color={colors.onBrandPrimary} />
           </View>
-          {editingName ? (
-            <View style={styles.nameEditor}>
-              <Text style={styles.fieldLabel}>Your name</Text>
-              <TextInput
-                value={nameValue}
-                onChangeText={setNameValue}
-                style={styles.nameInput}
-                placeholder="How should Hymn address you?"
-                placeholderTextColor={colors.onSurfaceTertiary}
-                autoCapitalize="words"
-                autoFocus
-                maxLength={80}
-                editable={!busy}
-                testID="me-name-input"
-              />
-              {nameError ? <Text style={styles.errorText}>{nameError}</Text> : null}
-              <View style={styles.nameActions}>
-                <Pressable
-                  onPress={saveName}
-                  disabled={busy}
-                  style={[styles.saveNameButton, busy && styles.disabled]}
-                  testID="me-name-save"
-                >
-                  {busy ? (
-                    <ActivityIndicator color={colors.onBrandPrimary} />
-                  ) : (
-                    <Text style={styles.saveNameText}>Save name</Text>
-                  )}
-                </Pressable>
-                <Pressable
-                  onPress={() => {
-                    setNameValue(user?.display_name || "");
-                    setNameError(null);
-                    setEditingName(false);
-                  }}
-                  disabled={busy}
-                  style={styles.cancelNameButton}
-                >
-                  <Text style={styles.cancelNameText}>Cancel</Text>
-                </Pressable>
-              </View>
-            </View>
+          {user?.name ? (
+            <Text style={styles.nameLabel} testID="me-name">{user.name}</Text>
           ) : (
-            <>
-              <Text style={styles.displayName} testID="me-display-name">
-                {user?.display_name || "Your profile"}
-              </Text>
-              <Pressable
-                onPress={() => {
-                  setNameValue(user?.display_name || "");
-                  setEditingName(true);
-                }}
-                testID={user?.display_name ? "me-edit-name" : "me-add-name"}
-              >
-                <Text style={styles.nameLink}>
-                  {user?.display_name ? "Edit your name" : "Add your name"}
-                </Text>
-              </Pressable>
-            </>
+            <Text style={styles.nameLabelMuted} testID="me-name-placeholder">Add your name</Text>
           )}
-          <View style={styles.emailBlock}>
-            <Text style={styles.fieldLabel}>Email</Text>
-            <Text style={styles.email} testID="me-email">{user?.email || ""}</Text>
-          </View>
+          <Text style={styles.email} testID="me-email">{user?.email || ""}</Text>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.editorLabel}>Name</Text>
+          <TextInput
+            style={styles.input}
+            value={nameInput}
+            onChangeText={(v) => { setNameInput(v); setSuccessMsg(null); setErrorMsg(null); }}
+            placeholder="Your name"
+            placeholderTextColor={colors.onSurfaceTertiary}
+            autoCapitalize="words"
+            autoCorrect={false}
+            testID="me-name-input"
+          />
+          {successMsg ? <Text style={styles.success} testID="me-name-success">{successMsg}</Text> : null}
+          {errorMsg ? <Text style={styles.errorText} testID="me-name-error">{errorMsg}</Text> : null}
+          <Pressable
+            style={[styles.saveButton, saving && styles.saveButtonDisabled]}
+            onPress={onSaveName}
+            disabled={saving}
+            testID="me-save-name"
+          >
+            {saving ? <ActivityIndicator color={colors.onBrandPrimary} /> : <Text style={styles.saveButtonText}>Save name</Text>}
+          </Pressable>
         </View>
 
         <View style={styles.section}>
@@ -225,41 +180,22 @@ const styles = StyleSheet.create({
     width: 72, height: 72, borderRadius: 36, backgroundColor: colors.brandPrimary,
     alignItems: "center", justifyContent: "center",
   },
-  avatarText: { color: colors.onBrandPrimary, fontSize: 24, fontWeight: "700" },
-  displayName: { fontSize: 22, color: colors.onSurface, fontWeight: "600" },
-  nameLink: { color: colors.brandPrimary, fontSize: 14, fontWeight: "600" },
-  nameEditor: { width: "100%", gap: spacing.sm },
-  fieldLabel: { color: colors.onSurfaceSecondary, fontSize: 12, letterSpacing: 0.4 },
-  nameInput: {
-    width: "100%",
-    backgroundColor: colors.surfaceSecondary,
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    color: colors.onSurface,
-    fontSize: 16,
+  email: { fontSize: 14, color: colors.onSurfaceSecondary },
+  nameLabel: { fontSize: 20, color: colors.onSurface, fontWeight: "600" },
+  nameLabelMuted: { fontSize: 18, color: colors.onSurfaceTertiary, fontWeight: "500" },
+  editorLabel: { fontSize: 12, color: colors.onSurfaceSecondary, letterSpacing: 0.5, marginBottom: spacing.xs },
+  input: {
+    backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm,
+    paddingHorizontal: spacing.lg, paddingVertical: spacing.md, fontSize: 16, color: colors.onSurface,
   },
-  nameActions: { flexDirection: "row", gap: spacing.sm },
-  saveNameButton: {
-    flex: 1,
-    alignItems: "center",
-    backgroundColor: colors.brandPrimary,
-    borderRadius: radius.pill,
-    paddingVertical: spacing.md,
+  success: { color: colors.brandPrimary, fontSize: 13, marginTop: spacing.sm },
+  errorText: { color: colors.error, fontSize: 13, marginTop: spacing.sm },
+  saveButton: {
+    backgroundColor: colors.onSurface, paddingVertical: spacing.md, borderRadius: radius.pill,
+    alignItems: "center", marginTop: spacing.md,
   },
-  saveNameText: { color: colors.onBrandPrimary, fontWeight: "600" },
-  cancelNameButton: {
-    flex: 1,
-    alignItems: "center",
-    backgroundColor: colors.surfaceSecondary,
-    borderRadius: radius.pill,
-    paddingVertical: spacing.md,
-  },
-  cancelNameText: { color: colors.onSurface, fontWeight: "600" },
-  disabled: { opacity: 0.55 },
-  errorText: { color: colors.error, fontSize: 13 },
-  emailBlock: { alignItems: "center", gap: spacing.xs, marginTop: spacing.sm },
-  email: { fontSize: 16, color: colors.onSurface, fontWeight: "500" },
+  saveButtonDisabled: { opacity: 0.5 },
+  saveButtonText: { color: colors.onSurfaceInverse, fontSize: 15, fontWeight: "600" },
   section: { paddingHorizontal: spacing.xl, marginTop: spacing.lg, gap: spacing.sm },
   row: {
     flexDirection: "row", alignItems: "center", justifyContent: "space-between",

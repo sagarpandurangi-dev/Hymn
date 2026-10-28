@@ -26,8 +26,6 @@ from typing import Any, List, Optional
 
 from bson.decimal128 import Decimal128
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from pymongo import ReturnDocument
-from pymongo.errors import DuplicateKeyError
 from pydantic import BaseModel
 
 from deps import get_current_user, get_db
@@ -56,16 +54,16 @@ from finance_manager import (
     _month_of,
     CHANGE_SOURCES,
     PRIORITIES,
+    LIFECYCLE_STATUS_AWAITING_RECON,
+    LIFECYCLE_STATUS_MATCHED,
+    LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
 )
 
 
 advanced_router = APIRouter(prefix="/finance", tags=["finance-advanced"])
 
-PENDING_RECONCILIATION_STATUSES = (
-    "awaiting_reconciliation",
-    "unmatched",  # legacy unresolved value
-)
-RESOLVED_UNPLANNED = "resolved_unplanned"
+# Behavioural calibration — profile aggregation + assessment softening.
+from calibration import calibrate_classification, compute_profile  # noqa: E402
 
 
 # ============================================================================
@@ -96,6 +94,9 @@ class ExpectedIncomeResponse(BaseModel):
     included_in_forecast: bool
     received: bool
     received_event_id: Optional[str]
+    # Correction 3 — derived aggregates.
+    received_amount: str = "0"
+    remaining_amount: str = "0"
     created_at: str
     updated_at: str
 
@@ -138,6 +139,21 @@ async def create_expected_income(body: ExpectedIncomeCreate, current_user: dict 
 def _project_expected(doc: dict) -> dict:
     d = dict(doc)
     d["amount"] = _money_from_stored(d.get("amount"))
+    # Correction 3 — surface allocation-derived aggregates.
+    if d.get("received_amount") is not None:
+        d["received_amount"] = _money_from_stored(d.get("received_amount"))
+    else:
+        d["received_amount"] = "0"
+    if d.get("remaining_amount") is not None:
+        d["remaining_amount"] = _money_from_stored(d.get("remaining_amount"))
+    else:
+        try:
+            from decimal import Decimal as _Dec
+            expected = _Dec(str(d.get("amount") or 0))
+            got = _Dec(str(d.get("received_amount") or 0))
+            d["remaining_amount"] = _quantize_out(expected - got if expected - got > 0 else _Dec(0))
+        except Exception:
+            d["remaining_amount"] = "0"
     return d
 
 
@@ -178,6 +194,13 @@ class ExpectedIncomeReceivePayload(BaseModel):
     event_id: Optional[str] = None
     actual_amount: Optional[Any] = None
     event_date: Optional[str] = None
+    # Correction 2: canonical fields for the auto-created inflow.
+    account_id: Optional[str] = None
+    occurred_at: Optional[str] = None
+    # Correction 3: when True, the auto-created event is smaller than
+    # the expected income and an allocation is written so the receipt
+    # accumulates without prematurely flipping ``received=True``.
+    partial: bool = False
 
 
 @advanced_router.post("/expected-income/{income_id}/received", response_model=ExpectedIncomeResponse)
@@ -185,22 +208,92 @@ async def mark_expected_received(
     income_id: str, body: ExpectedIncomeReceivePayload = Body(default_factory=ExpectedIncomeReceivePayload),
     current_user: dict = Depends(get_current_user),
 ):
-    """Mark expected income as received. Creates a confirmed inflow Financial
-    Event exactly once so it never doubles with the planned line."""
+    """Mark an expected income as received. Correction 3 supports both
+    full and partial receipts: partial receipts write an allocation and
+    let ``_apply_allocation_effects`` maintain ``received_amount`` and
+    ``received`` from the sum of ACTIVE allocations across every
+    APPLIED inflow event.
+
+    Rules:
+    * ``event_id``: reference an existing applied inflow event (same
+      currency, has account, tz-aware occurred_at). An allocation is
+      pushed onto the event.
+    * ``account_id`` + ``occurred_at``: auto-create an inflow event of
+      ``actual_amount`` (or the full expected amount) and push a same-
+      sized allocation onto it.
+    * All writes are conditional / idempotent.
+    """
     db = get_db()
+    from finance_manager import (  # noqa: WPS433 local imports
+        _resolve_event_account,
+        _normalise_occurred_at,
+        _allocation_shape,
+        _conditional_push_allocation,
+        _apply_allocation_effects,
+        LIFECYCLE_STATUS_AWAITING_RECON,
+    )
+    from money_service import parse_utc as _parse_utc, APPLIED_LIFECYCLE_STATUSES
+
     d = await db.expected_incomes.find_one({"id": income_id, "user_id": current_user["id"]}, {"_id": 0})
     if not d:
         raise HTTPException(status_code=404, detail="Expected income not found")
-    _require(not d.get("received"), "This expected income is already received")
+    _require(not d.get("received"), "This expected income is already fully received")
+
+    expected_amt = _decimal_from_stored(d.get("amount"))
+    auto_created_event_id: Optional[str] = None
 
     if body.event_id:
-        ev = await db.financial_events.find_one({"id": body.event_id, "user_id": current_user["id"]}, {"_id": 0})
+        ev = await db.financial_events.find_one(
+            {"id": body.event_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
         if not ev:
             raise HTTPException(status_code=404, detail="Referenced event not found")
-        _require(ev.get("currency") == d.get("currency"), "Event currency must match expected income currency")
+        # Correction 2B1: an outflow event cannot satisfy expected
+        # income. Enforce direction BEFORE any mutation-adjacent work.
+        if ev.get("direction") != "inflow":
+            raise HTTPException(
+                status_code=400,
+                detail="Only inflow events can satisfy expected income",
+            )
+        _require(ev.get("currency") == d.get("currency"),
+                 "Event currency must match expected income currency")
+        _require(ev.get("confirmation_status") == "confirmed",
+                 "Referenced event must be confirmed")
+        _require(ev.get("lifecycle_status") in APPLIED_LIFECYCLE_STATUSES,
+                 "Referenced event must be applied (has account + trustworthy occurred_at)")
+        if not ev.get("account_id"):
+            raise HTTPException(
+                status_code=400,
+                detail="Referenced event must have an asset account before receiving expected income",
+            )
+        await _resolve_event_account(db, current_user["id"], ev["account_id"], ev["currency"])
         event_id = ev["id"]
+        # Allocation amount: prefer explicit actual_amount; else the
+        # smaller of (event.amount, expected.amount) so we never over-
+        # allocate on a large deposit.
+        if body.actual_amount is not None and body.actual_amount != "":
+            alloc_amt = _decimal_from_stored(_money_to_stored(body.actual_amount, "actual_amount"))
+        else:
+            ev_amt = _decimal_from_stored(ev.get("amount"))
+            alloc_amt = ev_amt if ev_amt <= expected_amt else expected_amt
     else:
-        amt = _decimal_from_stored(d.get("amount")) if not body.actual_amount else _decimal_from_stored(_money_to_stored(body.actual_amount, "actual_amount"))
+        if not body.account_id:
+            raise HTTPException(
+                status_code=400,
+                detail="account_id is required to mark expected income received without an existing event",
+            )
+        occurred_at = _normalise_occurred_at(body.occurred_at)
+        if not occurred_at:
+            raise HTTPException(
+                status_code=400,
+                detail="occurred_at must be a timezone-aware ISO 8601 timestamp",
+            )
+        await _resolve_event_account(db, current_user["id"], body.account_id, d.get("currency") or "")
+
+        amt = (
+            expected_amt if not body.actual_amount
+            else _decimal_from_stored(_money_to_stored(body.actual_amount, "actual_amount"))
+        )
         event_id = _uuid()
         await db.financial_events.insert_one({
             "id": event_id,
@@ -215,20 +308,60 @@ async def mark_expected_received(
             "confirmation_status": "confirmed",
             "checkin_id": None,
             "commitment_id": None,
+            "account_id": body.account_id,
+            "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON,
+            "occurred_at": occurred_at,
+            "occurred_at_precision": "exact",
+            "allocations": [],
             "created_at": _now(),
         })
+        auto_created_event_id = event_id
+        alloc_amt = amt
         await _audit(
             db, current_user["id"], "financial_event", event_id, "created",
-            source="manual", new_value={"amount": _quantize_out(amt), "currency": d["currency"],
-                                         "direction": "inflow", "expected_income_id": income_id},
+            source="manual",
+            new_value={"amount": _quantize_out(amt), "currency": d["currency"],
+                       "direction": "inflow", "expected_income_id": income_id,
+                       "account_id": body.account_id, "occurred_at": occurred_at,
+                       "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
         )
 
-    await db.expected_incomes.update_one(
-        {"id": income_id}, {"$set": {"received": True, "received_event_id": event_id, "updated_at": _now()}},
+    # Push the allocation onto the parent event. Enforces the
+    # over-allocation ceiling atomically. If it fails and we just
+    # created the event, roll it back so the balance isn't credited
+    # by an event that failed to classify.
+    try:
+        allocation = _allocation_shape(
+            target_type="expected_income", target_id=income_id,
+            amount_stored=Decimal128(alloc_amt), currency=d.get("currency") or "",
+        )
+        await _conditional_push_allocation(
+            db, current_user["id"], event_id, allocation, alloc_amt,
+        )
+    except Exception:
+        if auto_created_event_id:
+            await db.financial_events.delete_one({"id": auto_created_event_id, "user_id": current_user["id"]})
+            await db.financial_audit.delete_many({
+                "record_type": "financial_event",
+                "record_id": auto_created_event_id,
+                "user_id": current_user["id"],
+            })
+        raise
+
+    # Derive received_amount / received flag from the sum of ACTIVE
+    # allocations across every APPLIED event. Also stamps the last
+    # received_event_id for legacy UI compatibility.
+    await _apply_allocation_effects(
+        db, current_user["id"],
+        target_type="expected_income", target_id=income_id,
+        currency=d.get("currency") or "",
     )
-    d["received"] = True
-    d["received_event_id"] = event_id
-    return _project_expected(d)
+    await db.expected_incomes.update_one(
+        {"id": income_id, "user_id": current_user["id"]},
+        {"$set": {"received_event_id": event_id, "updated_at": _now()}},
+    )
+    fresh = await db.expected_incomes.find_one({"id": income_id, "user_id": current_user["id"]}, {"_id": 0})
+    return _project_expected(fresh or d)
 
 
 @advanced_router.delete("/expected-income/{income_id}", status_code=200)
@@ -333,15 +466,17 @@ async def _score_matches(db, user_id: str, event: dict) -> list:
 @advanced_router.get("/reconciliation/suggestions")
 async def reconciliation_suggestions(current_user: dict = Depends(get_current_user)):
     """List confirmed unmatched events with ranked commitment candidates so
-    the client can surface the appropriate prompts (\u00a715). Never auto-completes."""
+    the client can surface the appropriate prompts (\u00a715). Never auto-completes.
+
+    Batch 2A: filters strictly on ``lifecycle_status='awaiting_reconciliation'``
+    so ``resolved_unplanned`` and ``matched`` events never resurface here.
+    """
     db = get_db()
     events = await db.financial_events.find(
-        {"user_id": current_user["id"], "confirmation_status": "confirmed",
-         "direction": "outflow", "commitment_id": None,
-         "$or": [
-             {"reconciliation_status": {"$exists": False}},
-             {"reconciliation_status": {"$in": list(PENDING_RECONCILIATION_STATUSES)}},
-         ]},
+        {"user_id": current_user["id"],
+         "direction": "outflow",
+         "commitment_id": None,
+         "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
         {"_id": 0},
     ).sort("event_date", -1).to_list(length=200)
     out = []
@@ -367,38 +502,150 @@ async def reconcile_confirm(
     event_id: str, body: ReconcileConfirmPayload,
     current_user: dict = Depends(get_current_user),
 ):
-    """User confirms an event is a match for a commitment. This completes the
-    commitment with the event as the actual (per \u00a713 rules) and marks the
-    event ``matched`` so subsequent forecasts don't double-count."""
+    """User confirms an event is a match for a commitment. This completes
+    the commitment with the event as the actual (per \u00a713 rules) and
+    marks the event ``matched`` so subsequent forecasts don't double-count.
+
+    Correction 2:
+    * validate the event has a valid ASSET account of the commitment's
+      currency AND a trustworthy tz-aware ``occurred_at`` (else 400).
+    * apply ``actual_amount_override`` INSIDE the same winning
+      conditional event transition so a losing concurrent request can
+      NEVER modify the event amount.
+    * claim the commitment via the single-completion conditional
+      transition in ``_apply_complete`` BEFORE any permanent
+      reservation release. Two different events matching the same
+      commitment cannot both succeed.
+    * event ``amount`` and commitment ``actual_amount`` always agree.
+    """
     db = get_db()
+    from money_service import parse_utc as _parse_utc  # local for cycles
+
     ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
     if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    # Correction 3: refuse to reconcile when an active dedupe candidate
+    # references this event — the user must resolve dedupe first.
+    from finance_manager import _event_has_pending_dedupe  # noqa: WPS433
+    if await _event_has_pending_dedupe(db, current_user["id"], event_id):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This event is part of an open deduplication case. "
+                "Resolve the dedupe candidate before reconciling."
+            ),
+        )
+
+    if ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED:
+        if ev.get("commitment_id") == body.commitment_id:
+            c_existing = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
+            if c_existing:
+                return {"commitment": _project_commitment(c_existing)}
+        raise HTTPException(
+            status_code=409,
+            detail="Event is already matched to a different commitment",
+        )
+
+    # Correction 2B1: enforce direction + confirmation + applied
+    # lifecycle before mutating anything.
+    from money_service import APPLIED_LIFECYCLE_STATUSES as _APPLIED  # noqa: WPS433
+    if ev.get("direction") != "outflow":
+        raise HTTPException(
+            status_code=400,
+            detail="Only outflow events can reconcile against an expense commitment",
+        )
+    if ev.get("confirmation_status") != "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail="Event must be confirmed before reconciling",
+        )
+    if ev.get("lifecycle_status") not in _APPLIED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Event lifecycle is not applied "
+                f"(current: {ev.get('lifecycle_status')})."
+            ),
+        )
+
+    if not ev.get("account_id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Assign an asset account to the event before matching a commitment",
+        )
+    if _parse_utc(ev.get("occurred_at")) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Set a timezone-aware occurred_at on the event before matching a commitment",
+        )
+    # Defence-in-depth: re-validate the account (currency + asset).
+    from finance_manager import _resolve_event_account  # noqa: WPS433
+    await _resolve_event_account(db, current_user["id"], ev.get("account_id"), ev.get("currency") or "")
+
     c = await _read_commitment_by_id(db, current_user["id"], body.commitment_id)
     if not c:
         raise HTTPException(status_code=404, detail="Commitment not found")
+    _require(c.get("currency") == ev.get("currency"),
+             "Event currency must match the commitment currency")
     _require(c.get("state") in ("reserved", "expired"),
              f"Cannot reconcile against a commitment in state '{c.get('state')}'")
 
-    # Attach event to commitment then use the shared complete path
+    # Correction 2: fold the amount override INTO the winning
+    # conditional transition on the event. The find_one_and_update
+    # requires ``lifecycle_status == awaiting_reconciliation``. If the
+    # override is set we write it in the SAME operation, so a losing
+    # concurrent request cannot mutate the event amount at all.
+    set_fields: dict = {
+        "commitment_id": c["id"],
+        "reconciliation_status": "matched",
+        "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
+    }
     if body.actual_amount_override is not None:
         stored = _money_to_stored(body.actual_amount_override, "actual_amount_override")
-        await db.financial_events.update_one({"id": event_id}, {"$set": {"amount": stored}})
-        ev["amount"] = stored
-    await db.financial_events.update_one(
-        {"id": event_id, "user_id": current_user["id"]},
-        {"$set": {
-            "commitment_id": c["id"],
-            "reconciliation_status": "matched",
-            "reconciliation_resolution": "planned_commitment",
-            "resolved_at": _now(),
-        }},
+        set_fields["amount"] = stored
+    transitioned = await db.financial_events.find_one_and_update(
+        {"id": event_id, "user_id": current_user["id"],
+         "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
+        {"$set": set_fields},
+        return_document=False,
     )
-    updated = await _apply_complete(db, current_user["id"], c, None, event_id, ev.get("event_date"))
+    if transitioned is None:
+        current_ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
+        if current_ev and current_ev.get("lifecycle_status") == LIFECYCLE_STATUS_MATCHED:
+            fresh = await _read_commitment_by_id(db, current_user["id"], current_ev.get("commitment_id") or c["id"])
+            if fresh:
+                return {"commitment": _project_commitment(fresh)}
+        raise HTTPException(
+            status_code=409,
+            detail="Event is not in awaiting_reconciliation and cannot be matched",
+        )
+
+    # We won the event transition. Now claim the commitment via the
+    # single-completion conditional update inside ``_apply_complete``.
+    # If it loses/fails, roll the event back so the transition is
+    # end-to-end consistent and no orphan lingers.
+    try:
+        updated = await _apply_complete(db, current_user["id"], c, None, event_id, ev.get("event_date"))
+    except Exception:
+        revert_fields: dict = {
+            "commitment_id": None,
+            "reconciliation_status": None,
+            "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON,
+        }
+        if body.actual_amount_override is not None:
+            revert_fields["amount"] = ev.get("amount")
+        await db.financial_events.update_one(
+            {"id": event_id, "user_id": current_user["id"]},
+            {"$set": revert_fields},
+        )
+        raise
     await _audit(
         db, current_user["id"], "financial_event", event_id, "reconciled",
         source="reconciliation",
-        new_value={"commitment_id": c["id"], "outcome": "matched"},
+        new_value={"commitment_id": c["id"], "outcome": "matched",
+                   "lifecycle_status": LIFECYCLE_STATUS_MATCHED,
+                   "amount_override_applied": body.actual_amount_override is not None},
         related_event_id=event_id,
     )
     return {"commitment": _project_commitment(updated)}
@@ -406,130 +653,73 @@ async def reconcile_confirm(
 
 @advanced_router.post("/reconciliation/{event_id}/reject")
 async def reconcile_reject(event_id: str, current_user: dict = Depends(get_current_user)):
-    """Resolve one canonical actual event as an unplanned expense.
+    """User rejects all suggested matches — the event is an unplanned actual.
 
-    ``financial_events`` is Hymn's Finance-owned actual ledger. The Check-in
-    remains the source record; this endpoint never creates another money row
-    and never chooses or mutates an asset account. The conditional update plus
-    deterministic audit id makes replays and concurrent clicks idempotent.
+    Batch 2A Correction 1:
+    * conditional DB update — permitted transition is
+      ``awaiting_reconciliation \u2192 resolved_unplanned`` only.
+    * accountless events cannot be resolved as an applied actual and
+      MUST first receive a valid asset account.
+    * concurrent duplicate requests produce exactly one transition and
+      one audit entry.
     """
     db = get_db()
-    user_id = current_user["id"]
-    resolved_at = _now()
-    eligible = {
-        "id": event_id,
-        "user_id": user_id,
-        "confirmation_status": "confirmed",
-        "direction": "outflow",
-        "commitment_id": None,
-        "$or": [
-            {"reconciliation_status": {"$exists": False}},
-            {"reconciliation_status": {"$in": list(PENDING_RECONCILIATION_STATUSES)}},
-        ],
-    }
-    ev = await db.financial_events.find_one_and_update(
-        eligible,
-        {"$set": {
-            "reconciliation_status": RESOLVED_UNPLANNED,
-            "reconciliation_resolution": "unplanned_actual_expense",
-            "resolved_at": resolved_at,
-            # Recording an actual is independent of choosing which account
-            # paid it. Account balances remain untouched until the user makes
-            # that linkage explicitly in a future flow.
-            "balance_adjustment_status": "not_applied_account_unknown",
-        }},
-        projection={"_id": 0},
-        return_document=ReturnDocument.AFTER,
-    )
-    already_resolved = False
-    if ev is None:
-        ev = await db.financial_events.find_one(
-            {"id": event_id, "user_id": user_id},
-            {"_id": 0},
-        )
-    if ev is None:
+    ev = await db.financial_events.find_one({"id": event_id, "user_id": current_user["id"]}, {"_id": 0})
+    if not ev:
         raise HTTPException(status_code=404, detail="Event not found")
-    if ev.get("reconciliation_status") == RESOLVED_UNPLANNED:
-        already_resolved = ev.get("resolved_at") != resolved_at
-    elif ev.get("reconciliation_status") == "matched" or ev.get("commitment_id"):
+
+    # Correction 3: refuse when an active dedupe case exists.
+    from finance_manager import _event_has_pending_dedupe  # noqa: WPS433
+    if await _event_has_pending_dedupe(db, current_user["id"], event_id):
         raise HTTPException(
             status_code=409,
-            detail="This expense is already matched to a planned commitment.",
-        )
-    elif ev.get("confirmation_status") != "confirmed":
-        raise HTTPException(
-            status_code=409,
-            detail="Only a confirmed financial event can be accepted as unplanned.",
-        )
-    else:
-        raise HTTPException(
-            status_code=409,
-            detail="This financial event cannot be resolved as unplanned.",
+            detail=(
+                "This event is part of an open deduplication case. "
+                "Resolve the dedupe candidate before rejecting."
+            ),
         )
 
-    # Fill the single final-resolution audit even if an earlier attempt saved
-    # the event but was interrupted before the audit write. Existing legacy
-    # audit rows remain untouched as historical evidence.
-    audit_id = str(uuid.uuid5(
-        uuid.NAMESPACE_URL,
-        f"hymn:finance:resolved-unplanned:{user_id}:{event_id}",
-    ))
-    audit_doc = {
-        "id": audit_id,
-        "user_id": user_id,
-        "record_type": "financial_event",
-        "record_id": event_id,
-        "action": "reconciled",
-        "timestamp": ev.get("resolved_at") or resolved_at,
-        "source": "reconciliation",
-        "previous_value": None,
-        "new_value": {"outcome": RESOLVED_UNPLANNED},
-        "related_checkin_id": ev.get("checkin_id"),
-        "related_task_id": None,
-        "related_event_id": event_id,
-        "related_import_id": None,
-        "notes": "Accepted as an unplanned actual expense.",
-    }
-    try:
-        await db.financial_audit.update_one(
-            {"id": audit_id, "user_id": user_id},
-            {"$setOnInsert": audit_doc},
-            upsert=True,
-        )
-    except DuplicateKeyError:  # pragma: no cover - concurrent upsert loser
-        pass
+    # Already-resolved => idempotent no-op (no extra audit).
+    if ev.get("lifecycle_status") == LIFECYCLE_STATUS_RESOLVED_UNPLANNED:
+        return {"detail": "already resolved unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED}
 
-    amount = _money_from_stored(ev.get("amount"))
-    return {
-        "detail": "Recorded as an unplanned actual expense.",
-        "resolution": RESOLVED_UNPLANNED,
-        "already_resolved": already_resolved,
-        "event": {
-            "id": ev["id"],
-            "amount": amount,
-            "currency": ev.get("currency"),
-            "checkin_id": ev.get("checkin_id"),
-            "source_reference": ev.get("source_reference"),
-            "reconciliation_status": RESOLVED_UNPLANNED,
-        },
-        "canonical_actual": {
-            "record_type": "financial_event",
-            "record_id": ev["id"],
-            "source": "checkin" if ev.get("checkin_id") else ev.get("source"),
-        },
-        "balance_adjustment": {
-            "status": "not_applied",
-            "reason": "No paying account was selected, so no account balance was changed.",
-        },
-        "refresh": {
-            "finance_summary_endpoint": "/finance/dashboard",
-            "pending_reconciliation_endpoint": "/finance/reconciliation/suggestions",
-        },
-        "navigation": {
-            "route": "/(tabs)/finance",
-            "label": "Back to Finance",
-        },
-    }
+    if not ev.get("account_id"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Assign an asset account to the event before resolving it as "
+                "an unplanned actual — accountless events cannot be applied "
+                "to the balance."
+            ),
+        )
+
+    result = await db.financial_events.find_one_and_update(
+        {"id": event_id, "user_id": current_user["id"],
+         "lifecycle_status": LIFECYCLE_STATUS_AWAITING_RECON},
+        {"$set": {
+            "reconciliation_status": "unmatched",
+            "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED,
+        }},
+        return_document=False,
+    )
+    if result is None:
+        # Another concurrent request already handled it, OR the event
+        # is not in awaiting_reconciliation.
+        current_ev = await db.financial_events.find_one({"id": event_id}, {"_id": 0})
+        if current_ev and current_ev.get("lifecycle_status") == LIFECYCLE_STATUS_RESOLVED_UNPLANNED:
+            return {"detail": "already resolved unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED}
+        raise HTTPException(
+            status_code=409,
+            detail="Event is not in awaiting_reconciliation and cannot be resolved",
+        )
+
+    await _audit(
+        db, current_user["id"], "financial_event", event_id, "reconciled",
+        source="reconciliation",
+        new_value={"outcome": "resolved_unplanned",
+                   "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED},
+    )
+    return {"detail": "resolved unplanned", "lifecycle_status": LIFECYCLE_STATUS_RESOLVED_UNPLANNED}
 
 
 # ============================================================================
@@ -543,6 +733,8 @@ async def _twin_forecasts(db, user_id: str) -> dict:
     Each per-month row carries the assumptions used (\u00a721) so the client
     can drill into confidence.
     """
+    from money_service import reservation_amount_for_commitment  # noqa: WPS433
+
     pos = await _current_position(db, user_id)
     liquid_by_cur = {c["currency"]: _decimal_from_stored(c["liquid_assets"]) for c in pos["currencies"]}
     assets_by_cur = {c["currency"]: _decimal_from_stored(c["total_assets"]) for c in pos["currencies"]}
@@ -550,7 +742,7 @@ async def _twin_forecasts(db, user_id: str) -> dict:
 
     # Reserved commitments per (currency, due_month) — read from allocation model
     reserved_docs = await _find_commitment_allocations(
-        db, {"user_id": user_id, "state": {"$in": ["reserved", "expired"]}},
+        db, {"user_id": user_id, "state": {"$in": ["reserved", "partial", "expired"]}},
     )
     # Expected income (per included_in_forecast)
     expected_docs = await db.expected_incomes.find(
@@ -629,9 +821,28 @@ async def _twin_forecasts(db, user_id: str) -> dict:
             debt_payments = _decimal_from_stored(summary["debt_payments"])
             savings = _decimal_from_stored(summary["savings"])
             investments = _decimal_from_stored(summary["investments"])
-            # Financial Commitments due this month (skip those already reconciled to an event)
-            fc_this_month = [c for c in reserved_by_month[m] if c["id"] not in reserved_ids_reconciled_this_cur]
-            fc_amount = sum((_decimal_from_stored(c.get("amount")) for c in fc_this_month), Decimal(0))
+            # Financial Commitments due this month.
+            #
+            # Correction 4A.1: partial commitments MUST remain in the
+            # forecast even when their id appears on a linked event —
+            # the linked event only covered part of the amount, and
+            # the outstanding remainder is still reserved. The legacy
+            # linked-event exclusion is preserved for reserved and
+            # expired commitments (their reconciliation via an event
+            # is what completes them).
+            fc_this_month = [
+                c for c in reserved_by_month[m]
+                if c.get("state") == "partial"
+                or c["id"] not in reserved_ids_reconciled_this_cur
+            ]
+            # Correction 4A: reservation deducted per commitment comes
+            # from the canonical helper. Never sum the stored
+            # ``amount`` here or partial commitments would either
+            # over-reserve or vanish entirely.
+            fc_amount = sum(
+                (reservation_amount_for_commitment(c) for c in fc_this_month),
+                Decimal(0),
+            )
             # Expected income (already gated by confirmation)
             exp_amount = sum((_decimal_from_stored(e.get("amount")) for e in expected_by_month[m]), Decimal(0))
             exp_confirmed = sum((_decimal_from_stored(e.get("amount")) for e in expected_by_month[m] if e.get("classification") == "confirmed"), Decimal(0))
@@ -824,8 +1035,11 @@ async def decision_assessment(
             projected_close_current = rolling
 
     # Load existing commitments to find those the proposal might displace — allocation read model.
+    from money_service import reservation_amount_for_commitment  # noqa: WPS433
     all_commit = await _find_commitment_allocations(
-        db, {"user_id": current_user["id"], "state": "reserved", "currency": body.currency},
+        db, {"user_id": current_user["id"],
+             "state": {"$in": ["reserved", "partial", "expired"]},
+             "currency": body.currency},
     )
     higher_priority_displaced = [
         _project_commitment(c) for c in all_commit
@@ -845,7 +1059,10 @@ async def decision_assessment(
             if row is None:
                 continue
             close_after = _decimal_from_stored(row["closing_liquid_money"]) - (prop_amt if due_month >= prop_month else Decimal(0))
-            if close_after < _decimal_from_stored(c.get("amount")):
+            # Correction 4A: compare against the canonical reservation
+            # (partial commitments must not compare against their
+            # original amount — they only tie up the remaining slice).
+            if close_after < reservation_amount_for_commitment(c):
                 affected.append(_project_commitment(c))
         if affected:
             classification = "warning"
@@ -869,8 +1086,40 @@ async def decision_assessment(
                 assumptions.append(a)
     confidence = liq.get("confidence", "medium")
 
+    # ------------------------------------------------------------------
+    # Behavioural calibration (§backlog): consult the user's override
+    # history to *soften* the classification when their track record
+    # shows they've been repeatedly right to proceed on similar
+    # warnings. Never escalates.
+    # ------------------------------------------------------------------
+    domain_hint = ""
+    try:
+        if body.priority in PRIORITIES:
+            pass  # (currency already available)
+        # Best-effort domain: read from any linked commitment on the account
+        # bucket the proposal falls into. Left blank when unknown.
+    except Exception:  # noqa: BLE001
+        domain_hint = ""
+    overrides = await db.override_decisions.find(
+        {"user_id": current_user["id"]}, {"_id": 0},
+    ).to_list(length=5000)
+    profile = compute_profile(overrides)
+    calibration = calibrate_classification(
+        {
+            "classification": classification,
+            "priority": body.priority,
+            "currency": body.currency,
+            "domain": domain_hint,
+        },
+        profile,
+        enabled=True,
+    )
+    effective_classification = calibration["calibrated"] if calibration["applied"] else classification
+
     return {
-        "classification": classification,
+        "classification": effective_classification,
+        "original_classification": classification,
+        "calibration": calibration,
         "projected_liquidity_by_due_date": _quantize_out(projected_liquid_at_due) if projected_liquid_at_due is not None else None,
         "projected_shortfall": (
             _quantize_out(-projected_liquid_at_due)
@@ -936,13 +1185,62 @@ async def record_override(body: OverrideRecordPayload, current_user: dict = Depe
     return {"id": doc["id"]}
 
 
-@advanced_router.get("/overrides")
-async def list_overrides(current_user: dict = Depends(get_current_user)):
+# NOTE: `GET /finance/overrides` (list) removed per finance audit — no UI
+# consumer. `POST /finance/overrides` above is still used by the commitment
+# creation flow when a user proceeds despite a warning.
+
+
+@advanced_router.get("/calibration")
+async def get_calibration(current_user: dict = Depends(get_current_user)):
+    """Return the user's behavioural calibration profile.
+
+    Aggregates every recorded override into per-axis buckets, tags the
+    ones that pass the softening threshold, and surfaces vindication /
+    regret tallies plus 90/180/365-day trend counts for the UI.
+    """
     db = get_db()
-    docs = await db.override_decisions.find(
+    overrides = await db.override_decisions.find(
         {"user_id": current_user["id"]}, {"_id": 0},
-    ).sort("decision_timestamp", -1).to_list(length=500)
-    return docs
+    ).to_list(length=5000)
+    return compute_profile(overrides)
+
+
+# ============================================================================
+# Override outcome — vindicated / regretted (§calibration learning loop)
+# ============================================================================
+class OverrideOutcomeBody(BaseModel):
+    """Payload for `POST /finance/overrides/{id}/outcome`. Idempotent."""
+    outcome: str  # "vindicated" | "regretted" | "pending"
+    notes: Optional[str] = None
+
+
+@advanced_router.post("/overrides/{override_id}/outcome")
+async def set_override_outcome(
+    override_id: str,
+    body: OverrideOutcomeBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Manually classify an override's outcome.
+
+    The commitment lifecycle already writes `vindicated` when a
+    reserved commitment completes without overrun (via the completion
+    hook in finance_manager.py). This endpoint exists so the user can
+    correct or record outcomes for legacy overrides that predate the
+    hook.
+    """
+    if body.outcome not in ("vindicated", "regretted", "pending"):
+        raise HTTPException(status_code=400, detail="outcome must be vindicated|regretted|pending")
+    db = get_db()
+    result = await db.override_decisions.update_one(
+        {"id": override_id, "user_id": current_user["id"]},
+        {"$set": {
+            "actual_outcome": body.outcome if body.outcome != "pending" else None,
+            "outcome_notes": (body.notes or "").strip() or None,
+        }},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Override not found")
+    return {"ok": True, "outcome": body.outcome}
 
 
 # ============================================================================
@@ -1212,139 +1510,10 @@ async def scenario_evaluate(scenario_id: str, current_user: dict = Depends(get_c
 
 
 # ============================================================================
-# 17 \u2014 Shared expense helper
+# NOTE: Shared-expenses helpers (POST /finance/shared-expenses/i-owe and
+# POST /finance/shared-expenses/i-paid) were removed per finance audit —
+# no UI consumer. Re-introduce with a fresh UX design if needed.
 # ============================================================================
-
-class SharedExpenseIOwe(BaseModel):
-    total_amount: Any
-    currency: str
-    other_paid_by: str   # display name of who paid
-    my_share: Any
-    description: Optional[str] = ""
-    due_date: str
-    priority: str = "medium"
-    create_task: bool = True
-
-
-@advanced_router.post("/shared-expenses/i-owe")
-async def shared_expense_i_owe(body: SharedExpenseIOwe, current_user: dict = Depends(get_current_user)):
-    """When someone else paid and the user owes a share (§17). Creates a
-    Reserved Financial Commitment for the user's share plus a repay Task.
-    Every write targets ``resource_allocations`` exclusively —
-    ``financial_commitments`` is never touched."""
-    db = get_db()
-    _require_currency(body.currency, "currency")
-    _require_date_str(body.due_date, "due_date")
-    _require_in(body.priority, PRIORITIES, "priority")
-    now = _now()
-    share_stored = _money_to_stored(body.my_share, "my_share")
-    commitment_id = _uuid()
-    task_id = _uuid() if body.create_task else None
-    doc = {
-        "id": commitment_id,
-        "user_id": current_user["id"],
-        "title": f"Repay {body.other_paid_by}",
-        "description": (body.description or "").strip(),
-        "amount": share_stored,
-        "currency": body.currency,
-        "due_date": body.due_date,
-        "original_due_date": body.due_date,
-        "priority": body.priority,
-        "domain_id": None, "goal_id": None, "project_id": None,
-        "task_id": task_id,
-        "source": "shared_expense",
-    }
-    # Insert as Reserved directly — §17 requires the amount be reserved
-    # immediately when another person paid.
-    alloc_id = await _insert_commitment_allocation(
-        db, current_user["id"], commitment_id,
-        fc_state="reserved", alloc_status="reserved", doc=doc,
-    )
-    if task_id:
-        await db.tasks.insert_one({
-            "id": task_id, "user_id": current_user["id"],
-            "title": f"Repay {body.other_paid_by}",
-            "notes": f"Shared expense repayment linked to commitment {commitment_id}",
-            "priority": body.priority, "status": "todo", "due_date": body.due_date,
-            "goal_id": None, "project_id": None, "expected_outcome_id": None, "domain_id": None,
-            "financial_commitment_id": commitment_id,
-            "created_at": now, "updated_at": now,
-        })
-    await _audit(
-        db, current_user["id"], "financial_commitment", commitment_id, "created",
-        source="manual",
-        new_value={"kind": "shared_expense_i_owe", "amount": _money_from_stored(share_stored),
-                   "currency": body.currency, "paid_by": body.other_paid_by, "task_id": task_id,
-                   "allocation_id": alloc_id},
-    )
-    return {"commitment_id": commitment_id, "task_id": task_id}
-
-
-class SharedExpenseIPaid(BaseModel):
-    total_amount: Any
-    currency: str
-    participants: List[str]  # display names — the payer is the current user
-    event_date: str
-    description: Optional[str] = ""
-    prepare_repayment_message: bool = False
-
-
-@advanced_router.post("/shared-expenses/i-paid")
-async def shared_expense_i_paid(body: SharedExpenseIPaid, current_user: dict = Depends(get_current_user)):
-    """User paid a shared expense. Creates one outflow Actual Financial Event
-    for the total and returns per-person expected inflow lines (\u00a717).
-    Does NOT increase cash for owed amounts until repayment is confirmed."""
-    db = get_db()
-    _require_currency(body.currency, "currency")
-    _require_date_str(body.event_date, "event_date")
-    _require(len(body.participants) > 0, "at least one other participant required")
-    total_stored = _money_to_stored(body.total_amount, "total_amount")
-    total_dec = _decimal_from_stored(total_stored)
-    share = (total_dec / (len(body.participants) + 1)).quantize(Decimal("0.01"))
-    # 1. Outflow event for the total the user paid
-    ev_id = _uuid()
-    await db.financial_events.insert_one({
-        "id": ev_id, "user_id": current_user["id"],
-        "amount": total_stored, "currency": body.currency,
-        "direction": "outflow", "event_date": body.event_date,
-        "description": (body.description or "Shared expense").strip(),
-        "source": "manual", "source_reference": None,
-        "confirmation_status": "confirmed",
-        "checkin_id": None, "commitment_id": None,
-        "created_at": _now(),
-    })
-    # 2. Per-participant expected inflow ledger \u2014 stored in expected_incomes
-    #    with classification "expected" and included_in_forecast=false. The user
-    #    must confirm inclusion or mark received.
-    lines = []
-    for name in body.participants:
-        income_id = _uuid()
-        await db.expected_incomes.insert_one({
-            "id": income_id, "user_id": current_user["id"],
-            "title": f"Repayment from {name}",
-            "description": (body.description or "").strip(),
-            "amount": Decimal128(share),
-            "currency": body.currency,
-            "expected_date": body.event_date,
-            "classification": "expected",
-            "included_in_forecast": False,
-            "received": False, "received_event_id": None,
-            "created_at": _now(), "updated_at": _now(),
-        })
-        lines.append({"participant": name, "amount": _quantize_out(share), "expected_income_id": income_id})
-
-    result = {
-        "outflow_event_id": ev_id,
-        "per_participant_amount": _quantize_out(share),
-        "expected_inflow_lines": lines,
-    }
-    if body.prepare_repayment_message:
-        # NEVER auto-send. Return a draft the user can share externally.
-        message = "Hey! Splitting the shared expense:\n" + "\n".join(
-            f"- {l['participant']}: {body.currency} {l['amount']}" for l in lines
-        )
-        result["draft_repayment_message"] = message
-    return result
 
 
 # ============================================================================

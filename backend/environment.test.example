@@ -1,0 +1,31 @@
+# Backend environment for the integration test suite — SAFE PLACEHOLDERS ONLY.
+#
+# Copy this file to `backend/.env.test` (or export the variables directly)
+# before running `pytest backend/tests`. The guard in `backend/conftest.py`
+# delegates to `backend/test_environment.py::validate` and will refuse to
+# collect tests unless every value below satisfies its constraints.
+#
+# Constraints enforced by the shared validator:
+#   * HYMN_RUNTIME_MODE must equal "test"
+#   * DB_NAME must equal "hymn_test"
+#   * MONGO_URL scheme must be exactly "mongodb"
+#     and its hostname exactly "localhost" or "127.0.0.1"
+#   * EXPO_PUBLIC_BACKEND_URL scheme must be "http" or "https"
+#     and its hostname exactly "localhost" or "127.0.0.1"
+# Remote MongoDB hosts, mongodb+srv / Atlas URLs, public preview URLs,
+# 0.0.0.0, private-network IPs, wildcard hosts, and lookalike hostnames
+# are all refused.
+
+HYMN_RUNTIME_MODE=test
+DB_NAME=hymn_test
+
+# Loopback MongoDB — never point at a shared or production instance.
+MONGO_URL=mongodb://127.0.0.1:27017
+
+# Loopback backend — port must match the local uvicorn process.
+EXPO_PUBLIC_BACKEND_URL=http://localhost:8001
+
+# Clearly test-only JWT secret. The string prefix "test-only-" makes any
+# accidental leak into preview/production trivial to spot in code review.
+# The backend refuses to boot with this value in non-test modes.
+JWT_SECRET=test-only-jwt-secret-do-not-use-elsewhere

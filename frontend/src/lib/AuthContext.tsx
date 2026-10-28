@@ -1,28 +1,55 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { api, type UserResponse } from "./api";
+import { api } from "./api";
 import { clearToken, getToken, saveToken } from "./tokenStorage";
+
+const AUTH_STARTUP_TIMEOUT_MS = 10_000;
+const AUTH_STARTUP_TIMEOUT_CODE = "AUTH_STARTUP_TIMEOUT";
+const AUTH_STARTUP_ERROR_MESSAGE =
+  "Hymn could not verify your session. Check your connection and try again.";
+
+function withAuthStartupTimeout<T>(operation: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(AUTH_STARTUP_TIMEOUT_CODE));
+    }, AUTH_STARTUP_TIMEOUT_MS);
+
+    operation.then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeoutId);
+        reject(error);
+      },
+    );
+  });
+}
 
 export type PostCreationDecompositionPreference =
   | "always_ask"
   | "always_decompose"
   | "always_skip";
 
-export type User = UserResponse;
+export type User = {
+  id: string;
+  email: string;
+  name?: string | null;
+  portfolio_setup_completed_at?: string | null;
+  portfolio_reporting_currency?: string | null;
+  post_creation_decomposition_preference?: PostCreationDecompositionPreference;
+};
 
 type AuthState = {
   user: User | null;
   loading: boolean;
+  startupError: string | null;
+  retryStartup: () => Promise<void>;
   signIn: (email: string, password: string) => Promise<void>;
-  signUp: (
-    displayName: string,
-    email: string,
-    password: string,
-    securityQuestion: string,
-    securityAnswer: string,
-  ) => Promise<void>;
+  signUp: (name: string, email: string, password: string, securityQuestion: string, securityAnswer: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshUser: () => Promise<void>;
-  updateDisplayName: (displayName: string) => Promise<User>;
+  updateName: (name: string) => Promise<User>;
   setPostCreationDecompositionPreference: (preference: PostCreationDecompositionPreference) => Promise<User>;
 };
 
@@ -31,25 +58,49 @@ const AuthContext = createContext<AuthState | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [startupError, setStartupError] = useState<string | null>(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const token = await getToken();
-        if (!token) {
-          setUser(null);
-          return;
-        }
-        const me = await api.me();
-        setUser(me);
-      } catch {
+  const hydrateAuth = useCallback(async () => {
+    setLoading(true);
+    setStartupError(null);
+
+    try {
+      const hydratedUser = await withAuthStartupTimeout(
+        (async () => {
+          const token = await getToken();
+
+          if (!token) {
+            return null;
+          }
+
+          return api.me();
+        })(),
+      );
+
+      setUser(hydratedUser);
+    } catch (error: unknown) {
+      const status =
+        error &&
+        typeof error === "object" &&
+        "status" in error
+          ? (error as { status?: unknown }).status
+          : null;
+
+      if (status === 401 || status === 403) {
         await clearToken();
         setUser(null);
-      } finally {
-        setLoading(false);
+        return;
       }
-    })();
+
+      setStartupError(AUTH_STARTUP_ERROR_MESSAGE);
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void hydrateAuth();
+  }, [hydrateAuth]);
 
   const signIn = useCallback(async (email: string, password: string) => {
     const res = await api.login({ email, password });
@@ -58,15 +109,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const signUp = useCallback(
-    async (
-      displayName: string,
-      email: string,
-      password: string,
-      securityQuestion: string,
-      securityAnswer: string,
-    ) => {
+    async (name: string, email: string, password: string, securityQuestion: string, securityAnswer: string) => {
       const res = await api.signup({
-        display_name: displayName,
+        name,
         email,
         password,
         security_question: securityQuestion,
@@ -97,8 +142,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, []);
 
-  const updateDisplayName = useCallback(async (displayName: string): Promise<User> => {
-    const updated = await api.updateMe({ display_name: displayName });
+  const updateName = useCallback(async (name: string): Promise<User> => {
+    const updated = await api.updateProfile(name);
     setUser(updated);
     return updated;
   }, []);
@@ -113,16 +158,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   return (
-    <AuthContext.Provider value={{
-      user,
-      loading,
-      signIn,
-      signUp,
-      signOut,
-      refreshUser,
-      updateDisplayName,
-      setPostCreationDecompositionPreference,
-    }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        loading,
+        startupError,
+        retryStartup: hydrateAuth,
+        signIn,
+        signUp,
+        signOut,
+        refreshUser,
+        updateName,
+        setPostCreationDecompositionPreference,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

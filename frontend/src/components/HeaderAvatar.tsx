@@ -1,8 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "@/src/lib/AuthContext";
-import { displayNameInitials } from "@/src/lib/profile";
 import { colors } from "@/src/lib/theme";
 
 type Props = { testID?: string };
@@ -10,7 +8,7 @@ type Props = { testID?: string };
 export default function HeaderAvatar({ testID = "header-avatar" }: Props) {
   const router = useRouter();
   const { user } = useAuth();
-  const initials = displayNameInitials(user?.display_name);
+  const initial = ((user?.name?.trim() || user?.email || "?").charAt(0) || "?").toUpperCase();
 
   return (
     <Pressable
@@ -22,11 +20,7 @@ export default function HeaderAvatar({ testID = "header-avatar" }: Props) {
       accessibilityRole="button"
     >
       <View style={styles.circle}>
-        {initials ? (
-          <Text style={styles.text}>{initials}</Text>
-        ) : (
-          <Ionicons name="person" size={17} color={colors.onBrandPrimary} />
-        )}
+        <Text style={styles.text}>{initial}</Text>
       </View>
     </Pressable>
   );

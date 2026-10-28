@@ -5,18 +5,26 @@ Skips the LLM entirely so we can verify:
 - Idempotency via plan_action_log prevents duplicate on re-run.
 - Rollback on partial failure.
 """
-import asyncio, os, sys, httpx, hashlib, json
+import asyncio, hashlib, json, os, sys
 from pathlib import Path
-from motor.motor_asyncio import AsyncIOMotorClient
-from dotenv import load_dotenv
-ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT / "backend" / ".env.test")
 
-BASE = "http://localhost:8001/api"
+sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "backend")))
+from test_environment import TestEnvironmentError, validate  # noqa: E402
+try:
+    _ENV = validate(os.environ)
+except TestEnvironmentError as _exc:
+    raise SystemExit(f"[hymn-test-guard] {_exc}")
+
+import httpx  # noqa: E402
+from motor.motor_asyncio import AsyncIOMotorClient  # noqa: E402
+
+BASE = f"{_ENV.backend_url}/api"
+MONGO_URL = _ENV.mongo_url
+DB_NAME = _ENV.db_name
 
 
 async def run():
-    mdb = AsyncIOMotorClient(os.environ["MONGO_URL"])[os.environ["DB_NAME"]]
+    mdb = AsyncIOMotorClient(MONGO_URL)[DB_NAME]
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(f"{BASE}/auth/login", json={
             "email": "test@hymn.app", "password": "TestPass123!"})
@@ -37,7 +45,7 @@ async def run():
         pid_proj = r.json()["id"]
 
     # Compute snapshot hash the same way the engine does.
-    sys.path.insert(0, str(ROOT / "backend"))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
     from planning_engine import _read_snapshot, _snapshot_hash
 
     snap = await _read_snapshot(mdb, uid, "project", pid_proj)

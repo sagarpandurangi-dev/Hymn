@@ -12,7 +12,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
@@ -89,13 +89,16 @@ export default function TimelineScreen() {
   const [debounced, setDebounced] = useState("");
   const [searching, setSearching] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeTermRef = useRef("");
+  const skippedInitialSearchEffect = useRef(false);
 
   // The server-side filter is already user-scoped (user_id filter is applied
   // before any $regex match), so a search request will never surface another
   // user's check-ins even if the query string is wide open.
   const load = useCallback(async (opts?: { silent?: boolean; term?: string }) => {
     if (!opts?.silent) setError(null);
-    const currentTerm = opts?.term !== undefined ? opts.term : debounced;
+    const currentTerm =
+      opts?.term !== undefined ? opts.term : activeTermRef.current;
     try {
       if (currentTerm) setSearching(true);
       const items = await api.listCheckins(currentTerm ? { q: currentTerm } : undefined);
@@ -106,7 +109,7 @@ export default function TimelineScreen() {
       setLoading(false);
       setSearching(false);
     }
-  }, [debounced]);
+  }, []);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -120,10 +123,14 @@ export default function TimelineScreen() {
   }, [query]);
 
   useEffect(() => {
-    // On first render `debounced` starts as "" — that matches the initial
-    // useFocusEffect load and just re-fetches the full list. Subsequent
-    // changes correspond to real user typing.
-    load({ silent: true, term: debounced });
+    activeTermRef.current = debounced;
+
+    if (!skippedInitialSearchEffect.current) {
+      skippedInitialSearchEffect.current = true;
+      return;
+    }
+
+    void load({ silent: true, term: debounced });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debounced]);
 

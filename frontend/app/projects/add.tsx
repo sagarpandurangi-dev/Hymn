@@ -7,13 +7,14 @@ import { colors, PROJECT_STATUSES, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
 import { usePostCreationDecomposition } from "@/src/lib/usePostCreationDecomposition";
+import CommitmentTypeToggle from "@/src/components/CommitmentTypeToggle";
 
 type Props = {
-  initial?: { title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string } | null;
+  initial?: { title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string; commitment_type?: "postponable" | "exclusive" } | null;
   headerTitle: string;
   submitLabel: string;
   testIDPrefix: string;
-  onSubmit: (payload: { title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string }) => Promise<void>;
+  onSubmit: (payload: { title: string; description: string; status: string; start_date: string; target_end_date: string; notes: string; commitment_type: "postponable" | "exclusive" }) => Promise<void>;
 };
 
 export function ProjectForm({ initial, headerTitle, submitLabel, testIDPrefix, onSubmit }: Props) {
@@ -24,6 +25,7 @@ export function ProjectForm({ initial, headerTitle, submitLabel, testIDPrefix, o
   const [startDate, setStartDate] = useState(initial?.start_date || "");
   const [targetEnd, setTargetEnd] = useState(initial?.target_end_date || "");
   const [notes, setNotes] = useState(initial?.notes || "");
+  const [commitmentType, setCommitmentType] = useState<"postponable" | "exclusive">(initial?.commitment_type || "postponable");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,7 +34,7 @@ export function ProjectForm({ initial, headerTitle, submitLabel, testIDPrefix, o
     if (!title.trim()) { setError("Title is required."); return; }
     setBusy(true);
     try {
-      await onSubmit({ title: title.trim(), description: description.trim(), status, start_date: startDate.trim(), target_end_date: targetEnd.trim(), notes: notes.trim() });
+      await onSubmit({ title: title.trim(), description: description.trim(), status, start_date: startDate.trim(), target_end_date: targetEnd.trim(), notes: notes.trim(), commitment_type: commitmentType });
     } catch (e: any) { setError(e?.message || "Could not save"); }
     finally { setBusy(false); }
   };
@@ -74,6 +76,9 @@ export function ProjectForm({ initial, headerTitle, submitLabel, testIDPrefix, o
               <DateTimeField mode="date" value={targetEnd} onChange={setTargetEnd} placeholder="Choose date" clearable testID={`${testIDPrefix}-end-input`} />
             </View>
           </View>
+
+          <Text style={s.label}>Commitment</Text>
+          <CommitmentTypeToggle value={commitmentType} onChange={setCommitmentType} testID={`${testIDPrefix}-commitment`} />
 
           <Text style={s.label}>Notes</Text>
           <TextInput style={s.notes} value={notes} onChangeText={setNotes} multiline textAlignVertical="top" testID={`${testIDPrefix}-notes-input`} />

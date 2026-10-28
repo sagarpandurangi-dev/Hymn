@@ -16,7 +16,7 @@ export default function EditProjectScreen() {
     (async () => {
       try {
         const p = await api.getProject(id!);
-        setInitial({ title: p.title, description: p.description, status: p.status, start_date: p.start_date, target_end_date: p.target_end_date, notes: p.notes });
+        setInitial({ title: p.title, description: p.description, status: p.status, start_date: p.start_date, target_end_date: p.target_end_date, notes: p.notes, commitment_type: (p as any).commitment_type || "postponable" });
       } finally { setLoading(false); }
     })();
   }, [id]);

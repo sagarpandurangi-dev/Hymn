@@ -1,14 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
-import { api } from "@/src/lib/api";
-import { colors, radius, spacing } from "@/src/lib/theme";
+import Ionicons from "@react-native-vector-icons/ionicons";
+import { api, createAllocationIdempotencyKey } from "@/src/lib/api";
 import DateTimeField from "@/src/components/DateTimeField";
 import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
+import AccountPickerModal from "@/src/components/AccountPickerModal";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
 import { CURRENCY_LABEL } from "@/src/lib/portfolio/constants";
+import { FoldAmount, FoldCard, FoldPill, FoldRow, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
 import { dateLabel, formatMoney } from "@/src/lib/finance/format";
+import { toLocalTimezoneIso } from "@/src/lib/finance/occurredAt";
 
 export default function ExpectedIncome() {
   const [rows, setRows] = useState<any[]>([]);
@@ -24,6 +27,24 @@ export default function ExpectedIncome() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmSheet, setConfirmSheet] = useState<any | null>(null);
+  // Correction 2: mark-received now requires an asset account +
+  // occurred_at. State kept for the receive sheet.
+  const [receiveTarget, setReceiveTarget] = useState<any | null>(null);
+  const [receiveAccountId, setReceiveAccountId] = useState<string | null>(null);
+  const [receiveAccountLabel, setReceiveAccountLabel] = useState<string>("Choose account");
+  const [receiveAccountPickerOpen, setReceiveAccountPickerOpen] = useState(false);
+  const [receiveDate, setReceiveDate] = useState<string>("");
+  const [receiveMode, setReceiveMode] = useState<"full" | "partial">("full");
+  const [receivePartialAmount, setReceivePartialAmount] = useState<string>("");
+  // Correction 3: partial-receipt via allocations on an existing
+  // APPLIED inflow event.
+  const [allocateSheet, setAllocateSheet] = useState<any | null>(null);
+  const [allocateEvents, setAllocateEvents] = useState<any[]>([]);
+  const [allocateSelectedEventId, setAllocateSelectedEventId] = useState<string | null>(null);
+  const [allocateAmount, setAllocateAmount] = useState<string>("");
+  // Correction 4B — same idempotency contract as commitments/[id].
+  const allocateIdemKeyRef = useRef<string | null>(null);
+  const [allocateBusy, setAllocateBusy] = useState(false);
 
   const load = useCallback(async () => { setLoading(true); try { setRows(await api.listExpectedIncome()); } catch { /* ignore */ } setLoading(false); }, []);
   useEffect(() => { load(); }, [load]);
@@ -36,7 +57,6 @@ export default function ExpectedIncome() {
     setSaving(true);
     try {
       const created = await api.createExpectedIncome({ title: title.trim(), amount, currency, expected_date: expectedDate, classification, description: description.trim() });
-      // §22 — when Expected, gate inclusion behind a second confirmation.
       if (classification === "expected") setConfirmSheet(created);
       setAddOpen(false);
       setTitle(""); setAmount(""); setExpectedDate(""); setClassification("expected"); setDescription("");
@@ -49,97 +69,326 @@ export default function ExpectedIncome() {
     try { await api.confirmExpectedInclusion(confirmSheet.id, include); setConfirmSheet(null); load(); } catch (e: any) { Alert.alert("Error", e?.message || ""); }
   };
 
-  const markReceived = async (id: string) => {
-    try { await api.markExpectedReceived(id, {}); load(); } catch (e: any) { Alert.alert("Error", e?.message || ""); }
+  const markReceived = (row: any) => {
+    // Correction 2: open a small sheet to collect account + occurred_at.
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, "0");
+    const dd = String(today.getDate()).padStart(2, "0");
+    setReceiveTarget(row);
+    setReceiveAccountId(null);
+    setReceiveAccountLabel("Choose account");
+    setReceiveDate(`${yyyy}-${mm}-${dd}`);
+  };
+
+  const submitReceived = async () => {
+    if (!receiveTarget || !receiveAccountId || !receiveDate) return;
+    try {
+      const occ = toLocalTimezoneIso(receiveDate, "12:00");
+      if (!occ) throw new Error("Invalid date");
+      const payload: any = {
+        account_id: receiveAccountId,
+        occurred_at: occ,
+        event_date: receiveDate,
+      };
+      if (receiveMode === "partial" && receivePartialAmount) {
+        payload.actual_amount = receivePartialAmount;
+        payload.partial = true;
+      }
+      await api.markExpectedReceived(receiveTarget.id, payload);
+      setReceiveTarget(null);
+      setReceiveMode("full");
+      setReceivePartialAmount("");
+      load();
+    } catch (e: any) {
+      Alert.alert("Error", e?.message || "");
+    }
+  };
+
+  // Correction 3 — link an existing APPLIED inflow event to this
+  // expected income via an allocation.
+  const openAllocate = async (row: any) => {
+    // Correction 4B — fresh journey resets the idempotency key.
+    allocateIdemKeyRef.current = null;
+    setAllocateSheet(row);
+    setAllocateSelectedEventId(null);
+    setAllocateAmount("");
+    try {
+      const evs = await api.listFinancialEvents({ currency: row.currency, confirmation_status: "confirmed", limit: 200 });
+      const eligible = (evs || []).filter((e: any) => {
+        if (e.direction !== "inflow") return false;
+        if (e.currency !== row.currency) return false;
+        if (!["awaiting_reconciliation", "matched", "resolved_unplanned"].includes(e.lifecycle_status)) return false;
+        const unalloc = parseFloat(e.unallocated_amount || "0");
+        return isFinite(unalloc) && unalloc > 0;
+      });
+      setAllocateEvents(eligible);
+    } catch { setAllocateEvents([]); }
+  };
+  const closeAllocateSheet = () => {
+    allocateIdemKeyRef.current = null;
+    setAllocateSheet(null);
+  };
+  const submitAllocate = async () => {
+    if (!allocateSheet || !allocateSelectedEventId || !allocateAmount) return;
+    if (allocateBusy) return;
+    setAllocateBusy(true);
+    try {
+      // Correction 4B — mint the key on first submit, reuse verbatim
+      // on retry so the backend recognises it as the same submission.
+      if (!allocateIdemKeyRef.current) {
+        allocateIdemKeyRef.current = createAllocationIdempotencyKey();
+      }
+      await api.createAllocation(allocateSelectedEventId, {
+        target_type: "expected_income",
+        target_id: allocateSheet.id,
+        amount: allocateAmount,
+        idempotency_key: allocateIdemKeyRef.current,
+      });
+      allocateIdemKeyRef.current = null;
+      setAllocateSheet(null);
+      load();
+    } catch (e: any) {
+      // Preserve the key so an unchanged retry stays safe.
+      Alert.alert("Error", e?.message || "");
+    } finally {
+      setAllocateBusy(false);
+    }
   };
   const remove = async (id: string) => { try { await api.deleteExpectedIncome(id); load(); } catch (e: any) { Alert.alert("Error", e?.message || ""); } };
 
   return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}>
-      <FinanceHeader title="Expected income" subtitle="One-time future income" right={<Pressable onPress={() => setAddOpen(true)} hitSlop={12} testID="ei-add"><Ionicons name="add" size={22} color={colors.onSurface} /></Pressable>} />
-      {loading ? <ActivityIndicator style={{ marginTop: spacing.xxxl }} /> : (
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader
+        title="Expected income"
+        subtitle="One-time future income"
+        right={
+          <Pressable onPress={() => setAddOpen(true)} hitSlop={12} testID="ei-add" style={styles.iconBtn}>
+            <Ionicons name="add" size={20} color={financeColors.ink} />
+          </Pressable>
+        }
+      />
+      {loading ? <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} /> : (
         <ScrollView contentContainerStyle={styles.scroll}>
-          <Text style={styles.note}>It is prudent to add future expenses when planned, but to treat future income cautiously until it has been earned or confirmed.</Text>
-          {rows.length === 0 && <Text style={styles.empty}>No expected income yet.</Text>}
-          {rows.map((r) => (
-            <View key={r.id} style={styles.row}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.title}>{r.title}</Text>
-                <Text style={styles.meta}>{r.currency} {formatMoney(r.amount)} · {dateLabel(r.expected_date)} · {r.classification} {r.included_in_forecast ? "· in forecast" : "· excluded"} {r.received ? "· RECEIVED" : ""}</Text>
-              </View>
-              {!r.received && <Pressable onPress={() => markReceived(r.id)} style={styles.smallBtn} testID={`ei-received-${r.id}`}><Text style={styles.smallBtnText}>Mark received</Text></Pressable>}
-              <Pressable onPress={() => remove(r.id)} hitSlop={12} testID={`ei-remove-${r.id}`}><Ionicons name="trash-outline" size={16} color={colors.error} /></Pressable>
-            </View>
-          ))}
+          <Text style={styles.note}>Add future expenses when planned. Treat future income cautiously until earned or confirmed.</Text>
+          {rows.length === 0 ? (
+            <FoldCard><Text style={styles.empty}>No expected income yet.</Text></FoldCard>
+          ) : (
+            <FoldCard>
+              {rows.map((r, idx) => (
+                <FoldRow
+                  key={r.id}
+                  first={idx === 0}
+                  label={
+                    <View style={{ flexDirection: "row", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      <Text style={[financeType.rowLabel, { maxWidth: 180 }]} numberOfLines={1}>{r.title}</Text>
+                      <FoldPill label={r.classification} tone={r.classification === "confirmed" ? "ok" : "neutral"} size="xs" />
+                      {r.received ? <FoldPill label="Received" tone="ok" size="xs" /> :
+                        parseFloat(r.received_amount || "0") > 0 ? <FoldPill label="Partial" tone="warn" size="xs" /> : null}
+                      {!r.received && r.included_in_forecast ? <FoldPill label="In forecast" tone="info" size="xs" /> : null}
+                    </View>
+                  }
+                  meta={
+                    parseFloat(r.received_amount || "0") > 0 && !r.received
+                      ? `${dateLabel(r.expected_date)} · ${r.currency} ${formatMoney(r.received_amount)} of ${formatMoney(r.amount)} received`
+                      : `${dateLabel(r.expected_date)}`
+                  }
+                  right={
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: financeSpace.sm }}>
+                      <FoldAmount currency={r.currency} value={formatMoney(r.amount)} tone="positive" />
+                      {!r.received ? (
+                        <>
+                          <Pressable onPress={() => markReceived(r)} style={styles.smallBtn} testID={`ei-received-${r.id}`}>
+                            <Text style={styles.smallBtnText}>Received</Text>
+                          </Pressable>
+                          <Pressable onPress={() => openAllocate(r)} style={[styles.smallBtn, { backgroundColor: financeColors.pillInk }]} testID={`ei-link-${r.id}`}>
+                            <Text style={styles.smallBtnText}>Link event</Text>
+                          </Pressable>
+                        </>
+                      ) : null}
+                      <Pressable onPress={() => remove(r.id)} hitSlop={12} testID={`ei-remove-${r.id}`} style={styles.iconTrash}>
+                        <Ionicons name="trash-outline" size={14} color={financeColors.danger} />
+                      </Pressable>
+                    </View>
+                  }
+                />
+              ))}
+            </FoldCard>
+          )}
         </ScrollView>
       )}
 
       <Modal visible={addOpen} animationType="slide" transparent onRequestClose={() => setAddOpen(false)}>
         <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.sheetCard}>
-            <View style={styles.sheetHead}><Text style={styles.sheetTitle}>Add expected income</Text><Pressable onPress={() => setAddOpen(false)} hitSlop={12}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable></View>
-            <Text style={styles.label}>Title</Text><TextInput style={styles.input} value={title} onChangeText={setTitle} testID="ei-title" />
-            <View style={{ flexDirection: "row", gap: spacing.md }}>
-              <View style={{ flex: 1 }}><Text style={styles.label}>Amount</Text><TextInput style={styles.input} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" testID="ei-amount" /></View>
-              <View style={{ flex: 1 }}><Text style={styles.label}>Currency</Text><Pressable style={styles.input} onPress={() => setPickerOpen(true)} testID="ei-currency"><Text style={{ color: colors.onSurface }}>{CURRENCY_LABEL(currency)}</Text></Pressable></View>
+            <View style={styles.sheetHead}>
+              <Text style={styles.sheetTitle}>Add expected income</Text>
+              <Pressable onPress={() => setAddOpen(false)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
-            <Text style={styles.label}>Expected date</Text><DateTimeField mode="date" value={expectedDate} onChange={setExpectedDate} testID="ei-date" />
-            <Text style={styles.label}>Classification</Text>
-            <View style={{ flexDirection: "row", gap: spacing.sm }}>
+            <Text style={styles.label}>TITLE</Text>
+            <TextInput style={styles.input} value={title} onChangeText={setTitle} testID="ei-title" />
+            <View style={{ flexDirection: "row", gap: financeSpace.md }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>AMOUNT</Text>
+                <TextInput style={styles.input} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" testID="ei-amount" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.label}>CURRENCY</Text>
+                <Pressable style={styles.input} onPress={() => setPickerOpen(true)} testID="ei-currency">
+                  <Text style={{ color: financeColors.ink }}>{CURRENCY_LABEL(currency)}</Text>
+                </Pressable>
+              </View>
+            </View>
+            <Text style={styles.label}>EXPECTED DATE</Text>
+            <DateTimeField mode="date" value={expectedDate} onChange={setExpectedDate} testID="ei-date" />
+            <Text style={styles.label}>CLASSIFICATION</Text>
+            <View style={{ flexDirection: "row", gap: financeSpace.sm }}>
               {["confirmed", "expected"].map((c) => (
-                <Pressable key={c} onPress={() => setClassification(c as any)} style={[styles.chip, classification === c && styles.chipSel]} testID={`ei-class-${c}`}><Text style={[styles.chipText, classification === c && styles.chipTextSel]}>{c}</Text></Pressable>
+                <Pressable key={c} onPress={() => setClassification(c as any)} style={[styles.chip, classification === c && styles.chipSel]} testID={`ei-class-${c}`}>
+                  <Text style={[styles.chipText, classification === c && styles.chipTextSel]}>{c}</Text>
+                </Pressable>
               ))}
             </View>
-            <Text style={styles.label}>Description (optional)</Text><TextInput style={styles.input} value={description} onChangeText={setDescription} multiline testID="ei-desc" />
+            <Text style={styles.label}>DESCRIPTION (OPTIONAL)</Text>
+            <TextInput style={styles.input} value={description} onChangeText={setDescription} multiline testID="ei-desc" />
             {error ? <Text style={styles.error}>{error}</Text> : null}
-            <Pressable style={[styles.primary, saving && { opacity: 0.5 }]} disabled={saving} onPress={save} testID="ei-save"><Text style={styles.primaryText}>Save</Text></Pressable>
+            <Pressable style={[styles.primary, saving && { opacity: 0.5 }]} disabled={saving} onPress={save} testID="ei-save">
+              <Text style={styles.primaryText}>Save</Text>
+            </Pressable>
           </View>
         </KeyboardAvoidingView>
       </Modal>
 
       <CurrencyPickerModal visible={pickerOpen} selected={currency} onSelect={setCurrency} onClose={() => setPickerOpen(false)} />
 
-      {/* §22 second confirmation gate for Expected income */}
       <Modal visible={!!confirmSheet} animationType="slide" transparent onRequestClose={() => setConfirmSheet(null)}>
         <View style={styles.sheetWrap}>
           <View style={styles.sheetCard}>
             <Text style={styles.sheetTitle}>Include in forecast?</Text>
-            <Text style={styles.sheetBody}>It is prudent to add future expenses when planned, but to treat future income cautiously until it has been earned or confirmed. Do you want to include this Expected income in your 12-month forecast? Months materially dependent on Expected income will show Low confidence.</Text>
-            <View style={{ flexDirection: "row", gap: spacing.sm }}>
+            <Text style={styles.sheetBody}>Treat future income cautiously until it is earned or confirmed. Include this Expected income in the 12-month forecast? Months materially dependent on Expected income will show Low confidence.</Text>
+            <View style={{ flexDirection: "row", gap: financeSpace.sm, marginTop: financeSpace.md }}>
               <Pressable style={styles.primary} onPress={() => confirmInclude(true)} testID="ei-include"><Text style={styles.primaryText}>Yes, include</Text></Pressable>
-              <Pressable style={styles.secondary} onPress={() => confirmInclude(false)} testID="ei-exclude"><Text style={styles.secondaryText}>No, keep excluded</Text></Pressable>
+              <Pressable style={styles.secondary} onPress={() => confirmInclude(false)} testID="ei-exclude"><Text style={styles.secondaryText}>Keep excluded</Text></Pressable>
             </View>
           </View>
         </View>
+      </Modal>
+
+      <Modal visible={!!receiveTarget} animationType="slide" transparent onRequestClose={() => setReceiveTarget(null)}>
+        <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={styles.sheetCard}>
+            <View style={styles.sheetHead}>
+              <Text style={styles.sheetTitle}>Mark received</Text>
+              <Pressable onPress={() => setReceiveTarget(null)} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
+            </View>
+            <Text style={styles.sheetBody}>Which asset account did this land in?</Text>
+            <Text style={styles.label}>RECEIVING ACCOUNT</Text>
+            <Pressable style={styles.input} onPress={() => setReceiveAccountPickerOpen(true)} testID="ei-receive-account">
+              <Text style={{ color: receiveAccountId ? financeColors.ink : financeColors.inkFaint }}>{receiveAccountLabel}</Text>
+            </Pressable>
+            <Text style={styles.label}>RECEIVED ON</Text>
+            <DateTimeField mode="date" value={receiveDate} onChange={setReceiveDate} testID="ei-receive-date" />
+            <Text style={styles.label}>AMOUNT</Text>
+            <View style={{ flexDirection: "row", gap: financeSpace.sm }}>
+              {(["full", "partial"] as const).map((m) => (
+                <Pressable key={m} onPress={() => setReceiveMode(m)} style={[styles.chip, receiveMode === m && styles.chipSel]} testID={`ei-receive-mode-${m}`}>
+                  <Text style={[styles.chipText, receiveMode === m && styles.chipTextSel]}>{m === "full" ? "Full amount" : "Partial"}</Text>
+                </Pressable>
+              ))}
+            </View>
+            {receiveMode === "partial" ? (
+              <>
+                <Text style={[styles.label, { marginTop: financeSpace.sm }]}>PARTIAL AMOUNT ({receiveTarget?.currency || currency})</Text>
+                <TextInput style={styles.input} value={receivePartialAmount} onChangeText={setReceivePartialAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} testID="ei-receive-partial" />
+              </>
+            ) : null}
+            <Pressable style={[styles.primary, (!receiveAccountId || !receiveDate || (receiveMode === "partial" && !receivePartialAmount)) && { opacity: 0.5 }]} disabled={!receiveAccountId || !receiveDate || (receiveMode === "partial" && !receivePartialAmount)} onPress={submitReceived} testID="ei-receive-submit">
+              <Text style={styles.primaryText}>Confirm received</Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <AccountPickerModal
+        visible={receiveAccountPickerOpen}
+        currency={receiveTarget?.currency || currency}
+        selectedId={receiveAccountId}
+        onSelect={async (id) => {
+          setReceiveAccountId(id);
+          if (!id) { setReceiveAccountLabel("Assign later"); return; }
+          try {
+            const rows = await api.listFinancialAccounts();
+            const m = rows.find((r) => r.id === id);
+            setReceiveAccountLabel(m ? `${m.name} (${m.currency})` : "Account selected");
+          } catch { setReceiveAccountLabel("Account selected"); }
+        }}
+        onClose={() => setReceiveAccountPickerOpen(false)}
+      />
+
+      <Modal visible={!!allocateSheet} animationType="slide" transparent onRequestClose={closeAllocateSheet}>
+        <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+          <View style={styles.sheetCard}>
+            <View style={styles.sheetHead}>
+              <Text style={styles.sheetTitle}>Link received event</Text>
+              <Pressable onPress={closeAllocateSheet} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
+            </View>
+            <Text style={styles.sheetBody}>Pick an existing inflow event to classify against this expected income. Allocations only classify money — they never move an account balance.</Text>
+            <Text style={styles.label}>EVENT</Text>
+            {allocateEvents.length === 0 ? (
+              <Text style={{ fontSize: 12, color: financeColors.inkFaint, marginTop: 4 }}>No confirmed {allocateSheet?.currency} inflow events with unallocated amount right now.</Text>
+            ) : (
+              <ScrollView style={{ maxHeight: 220 }}>
+                {allocateEvents.map((e) => (
+                  <Pressable
+                    key={e.id}
+                    onPress={() => { allocateIdemKeyRef.current = null; setAllocateSelectedEventId(e.id); }}
+                    style={[styles.eventRow, allocateSelectedEventId === e.id && styles.eventRowSel]}
+                    testID={`ei-allocate-event-${e.id}`}
+                  >
+                    <Text style={styles.eventPrimary} numberOfLines={1}>{e.description || "Untitled event"}</Text>
+                    <Text style={styles.eventMeta}>{dateLabel(e.event_date)} · {allocateSheet?.currency} {formatMoney(e.amount)} · unallocated {formatMoney(e.unallocated_amount || "0")}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )}
+            <Text style={styles.label}>AMOUNT ({allocateSheet?.currency})</Text>
+            <TextInput style={styles.input} value={allocateAmount} onChangeText={(v) => { allocateIdemKeyRef.current = null; setAllocateAmount(v); }} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} testID="ei-allocate-amount" />
+            <Pressable style={[styles.primary, (!allocateSelectedEventId || !allocateAmount || allocateBusy) && { opacity: 0.5 }]} disabled={!allocateSelectedEventId || !allocateAmount || allocateBusy} onPress={submitAllocate} testID="ei-allocate-submit">
+              <Text style={styles.primaryText}>{allocateBusy ? "Saving…" : "Apply to this expected income"}</Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.surface },
-  scroll: { padding: spacing.xl, gap: spacing.md, paddingBottom: spacing.xxxl },
-  note: { fontSize: 12, color: colors.onSurfaceSecondary, fontStyle: "italic", padding: spacing.md, backgroundColor: colors.brandTertiary, borderRadius: radius.sm, lineHeight: 18 },
-  empty: { fontSize: 13, color: colors.onSurfaceSecondary, fontStyle: "italic", padding: spacing.xl, textAlign: "center" },
-  row: { flexDirection: "row", alignItems: "center", gap: spacing.sm, padding: spacing.md, backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm },
-  title: { fontSize: 14, color: colors.onSurface, fontWeight: "600" },
-  meta: { fontSize: 11, color: colors.onSurfaceSecondary, marginTop: 2 },
-  smallBtn: { paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.pill, backgroundColor: colors.brandPrimary },
-  smallBtnText: { color: colors.onBrandPrimary, fontSize: 11, fontWeight: "700" },
-  sheetWrap: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
-  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, padding: spacing.xl, paddingBottom: spacing.xxxl, gap: spacing.sm },
+  scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
+  note: { fontSize: 12, color: financeColors.inkMuted, fontStyle: "italic", lineHeight: 17, paddingHorizontal: 2 },
+  empty: { fontSize: 13, color: financeColors.inkMuted, padding: financeSpace.xl, textAlign: "center", fontStyle: "italic" },
+  iconBtn: { width: 32, height: 32, alignItems: "center", justifyContent: "center" },
+  smallBtn: { paddingHorizontal: financeSpace.md, paddingVertical: 5, borderRadius: financeRadius.pill, backgroundColor: financeColors.accent },
+  smallBtnText: { color: "#FFFFFF", fontSize: 10.5, fontWeight: "700", letterSpacing: 0.4 },
+  iconTrash: { padding: 4 },
+  sheetWrap: { flex: 1, backgroundColor: "rgba(20,20,18,0.4)", justifyContent: "flex-end" },
+  sheetCard: { backgroundColor: financeColors.page, borderTopLeftRadius: financeRadius.lg, borderTopRightRadius: financeRadius.lg, padding: financeSpace.xl, paddingBottom: financeSpace.xxxl, gap: financeSpace.sm },
   sheetHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  sheetTitle: { fontSize: 16, fontWeight: "700", color: colors.onSurface },
-  sheetBody: { fontSize: 13, color: colors.onSurfaceSecondary, lineHeight: 18 },
-  label: { fontSize: 12, color: colors.onSurfaceSecondary, letterSpacing: 0.5, marginTop: spacing.sm },
-  input: { backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md, fontSize: 15, color: colors.onSurface },
-  chip: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.pill, backgroundColor: colors.brandTertiary },
-  chipSel: { backgroundColor: colors.brandPrimary },
-  chipText: { fontSize: 13, color: colors.onBrandTertiary },
-  chipTextSel: { color: colors.onBrandPrimary, fontWeight: "600" },
-  error: { color: colors.error, fontSize: 13, marginTop: spacing.sm },
-  primary: { backgroundColor: colors.onSurface, paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, alignItems: "center", flex: 1, marginTop: spacing.md },
-  primaryText: { color: colors.onSurfaceInverse, fontSize: 14, fontWeight: "700" },
-  secondary: { paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, alignItems: "center", flex: 1, marginTop: spacing.md },
-  secondaryText: { color: colors.onSurface, fontSize: 14, fontWeight: "600" },
+  sheetTitle: { ...financeType.screenTitle, fontSize: 18 } as any,
+  sheetBody: { ...financeType.body, color: financeColors.inkMuted, marginTop: 4 } as any,
+  label: { ...financeType.sectionLabel, marginTop: financeSpace.sm } as any,
+  input: { backgroundColor: "#FFFFFF", borderRadius: financeRadius.sm, paddingHorizontal: financeSpace.lg, paddingVertical: financeSpace.md, fontSize: 15, color: financeColors.ink, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  chip: { paddingHorizontal: financeSpace.md, paddingVertical: financeSpace.sm, borderRadius: financeRadius.pill, backgroundColor: "#FFFFFF", borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  chipSel: { backgroundColor: financeColors.ink, borderColor: financeColors.ink },
+  chipText: { fontSize: 12.5, color: financeColors.ink, fontWeight: "600" },
+  chipTextSel: { color: "#FBFBF6" },
+  error: { color: financeColors.danger, fontSize: 12.5, marginTop: financeSpace.sm },
+  primary: { backgroundColor: financeColors.ink, paddingVertical: financeSpace.md, borderRadius: financeRadius.pill, alignItems: "center", flex: 1, marginTop: financeSpace.md },
+  primaryText: { color: "#FBFBF6", fontSize: 13, fontWeight: "700", letterSpacing: 0.4 },
+  secondary: { paddingVertical: financeSpace.md, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, alignItems: "center", flex: 1, marginTop: financeSpace.md },
+  secondaryText: { color: financeColors.ink, fontSize: 13, fontWeight: "600" },
+  eventRow: { paddingHorizontal: financeSpace.md, paddingVertical: financeSpace.sm, borderRadius: financeRadius.sm, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, backgroundColor: "#FFFFFF", marginBottom: financeSpace.xs },
+  eventRowSel: { borderColor: financeColors.ink, backgroundColor: financeColors.pillBg },
+  eventPrimary: { fontSize: 13, color: financeColors.ink, fontWeight: "600" },
+  eventMeta: { fontSize: 11, color: financeColors.inkMuted, marginTop: 2 },
 });

@@ -11,12 +11,6 @@ export const formatMoney = (value: string | number | null | undefined): string =
   return fracPart ? `${withThousands}.${fracPart}` : withThousands;
 };
 
-export const formatSignedMoney = (value: string | number | null | undefined): string => {
-  if (value === null || value === undefined) return "0";
-  const s = typeof value === "number" ? String(value) : value;
-  return s.startsWith("-") ? formatMoney(s) : formatMoney(s);
-};
-
 /** Human-readable month label (e.g. "Jul 2026") from YYYY-MM. */
 export const monthLabel = (m: string): string => {
   if (!m || m.length !== 7) return m;
@@ -35,15 +29,6 @@ export const dateLabel = (d: string): string => {
   return `${parseInt(dd, 10)} ${names[idx]} ${y}`;
 };
 
-export const priorityColor = (p: string): string => {
-  switch (p) {
-    case "critical": return "#c62828";
-    case "high": return "#e57c00";
-    case "medium": return "#6a6a6a";
-    default: return "#8a8a8a";
-  }
-};
-
 export const stateLabel = (s: string): string => {
   switch (s) {
     case "draft": return "Draft";
@@ -52,17 +37,6 @@ export const stateLabel = (s: string): string => {
     case "cancelled": return "Cancelled";
     case "expired": return "Expired";
     default: return s;
-  }
-};
-
-export const stateColor = (s: string): string => {
-  switch (s) {
-    case "draft": return "#8a8a8a";
-    case "reserved": return "#1c73c1";
-    case "completed": return "#2e7d32";
-    case "cancelled": return "#8a8a8a";
-    case "expired": return "#c62828";
-    default: return "#6a6a6a";
   }
 };
 
