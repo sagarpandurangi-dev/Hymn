@@ -33,7 +33,6 @@ def _uniq() -> str:
 def user():
     email = _uniq()
     r = requests.post(f"{API}/auth/signup", json={
-        "display_name": "Test User",
         "email": email, "password": "TestPass123!",
         "security_question": "?", "security_answer": "a",
     })
@@ -586,7 +585,6 @@ class TestRegressions:
     def test_user_isolation(self, user):
         other_email = _uniq()
         r = requests.post(f"{API}/auth/signup", json={
-            "display_name": "Other User",
             "email": other_email, "password": "TestPass123!",
             "security_question": "?", "security_answer": "a",
         })

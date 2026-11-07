@@ -7,7 +7,7 @@ import {
   type DecompositionChoice,
 } from "@/src/components/PostCreationDecompositionModal";
 
-export type PlanningTargetType = "goal" | "project" | "journey";
+export type PlanningTargetType = "goal" | "project";
 
 export type HandleCreatedArgs = {
   targetType: PlanningTargetType;

@@ -1,8 +1,8 @@
-import { useCallback, useState } from "react";
+import React, { useCallback, useState } from "react";
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
@@ -73,7 +73,7 @@ function Card({
 }: {
   testID: string;
   title: string;
-  icon: keyof typeof Ionicons.glyphMap;
+  icon: React.ComponentProps<typeof Ionicons>["name"];
   empty: string;
   onPress: () => void;
   children?: React.ReactNode;
@@ -180,29 +180,18 @@ export default function TodayScreen() {
           <HeaderAvatar />
         </View>
 
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Tell Hymn what you want to do"
-          onPress={() => router.push("/intents")}
-          style={({ pressed }) => [
-            styles.intentEntry,
-            pressed && styles.intentEntryPressed,
-          ]}
-          testID="universal-intent-entry"
-        >
-          <View style={styles.intentEntryIcon}>
-            <Ionicons name="sparkles-outline" size={22} color={colors.brandPrimary} />
-          </View>
-          <View style={styles.intentEntryCopy}>
-            <Text style={styles.intentEntryTitle}>I want to…</Text>
-            <Text style={styles.intentEntryBody}>
-              Turn a decision into a clear, reviewable plan.
-            </Text>
-          </View>
-          <Ionicons name="arrow-forward" size={20} color={colors.brandPrimary} />
-        </Pressable>
-
         <View style={styles.stack}>
+          <Card
+            testID="card-planning-space"
+            title="Planning"
+            icon="map-outline"
+            empty=""
+            onPress={() => router.push("/(tabs)/planning-space")}
+          >
+            <Text style={styles.cardEmpty}>
+              See your goals, projects, workload, time and money capacity together.
+            </Text>
+          </Card>
           <Card
             testID="card-check-ins"
             title="Required Check-ins"
@@ -326,32 +315,6 @@ const styles = StyleSheet.create({
   hello: { fontSize: 14, color: colors.onSurfaceSecondary, letterSpacing: 0.5 },
   subhead: { fontFamily: fonts.displayBold, fontSize: 36, color: colors.onSurface, fontWeight: "700", marginTop: spacing.xs, marginBottom: spacing.xl },
   headerRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: spacing.md },
-  intentEntry: {
-    backgroundColor: colors.brandTertiary,
-    borderRadius: radius.md,
-    padding: spacing.lg,
-    marginBottom: spacing.lg,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.md,
-  },
-  intentEntryPressed: { opacity: 0.82 },
-  intentEntryIcon: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.surface,
-  },
-  intentEntryCopy: { flex: 1, gap: spacing.xs },
-  intentEntryTitle: {
-    fontFamily: fonts.displayBold,
-    fontSize: 20,
-    color: colors.onSurface,
-    fontWeight: "700",
-  },
-  intentEntryBody: { fontSize: 13, color: colors.onSurfaceSecondary, lineHeight: 18 },
   stack: { gap: spacing.lg },
   card: {
     backgroundColor: colors.surfaceSecondary,

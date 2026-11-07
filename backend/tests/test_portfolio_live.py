@@ -17,7 +17,7 @@ import pytest
 import requests
 
 
-# Backend URL from frontend env (public endpoint) — never localhost.
+# Backend URL is enforced to loopback by backend/conftest.py's test guard.
 BASE_URL = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 API = f"{BASE_URL}/api"
 
@@ -28,7 +28,6 @@ def _signup() -> tuple[str, dict]:
     suffix = uuid.uuid4().hex[:10]
     email = f"TEST_pm_{suffix}@example.com"
     payload = {
-        "display_name": "Test User",
         "email": email,
         "password": "TestPass123!",
         "security_question": "Color?",

@@ -41,7 +41,7 @@ function runPreinstall() {
   let pkg;
   try {
     pkg = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "package.json"), "utf8"));
-  } catch (_error) {
+  } catch (e) {
     process.exit(0);
   }
 

@@ -1,15 +1,55 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { api } from "@/src/lib/api";
-import { colors, radius, spacing } from "@/src/lib/theme";
+import { api, createAllocationIdempotencyKey } from "@/src/lib/api";
 import DateTimeField from "@/src/components/DateTimeField";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
-import { dateLabel, formatMoney, stateColor, stateLabel } from "@/src/lib/finance/format";
+import AccountPickerModal from "@/src/components/AccountPickerModal";
+import { FoldAmount, FoldCard, FoldHero, FoldPill, FoldRow, FoldSectionHeader, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeRadius, financeSpace, financeType } from "@/src/lib/finance/theme";
+import { dateLabel, formatMoney } from "@/src/lib/finance/format";
 
-type Action = "complete" | "cancel" | "postpone" | "keep-active" | null;
+type Action = "complete" | "cancel" | "postpone" | "keep-active" | "allocate" | "payment" | null;
+
+// 5B1 — The direct-payment journey must preserve the complete immutable
+// submission across retries, not merely the idempotency key. Rebuilding
+// ``occurred_at`` / ``event_date`` on every attempt reused the same key
+// with different payment parameters and triggered the backend's
+// mismatch rejection. Capturing the whole submission makes a retry
+// byte-identical.
+type PendingPaymentSubmission = {
+  idempotencyKey: string;
+  amount: string;
+  accountId: string;
+  occurredAt: string;
+  eventDate: string;
+};
+
+// Correction 2: build a device-local, timezone-aware ISO 8601 timestamp
+// so the backend can normalise it to UTC without ever silently
+// interpreting a naive wall-clock string as UTC.
+function nowLocalIso(): string {
+  const now = new Date();
+  const pad = (n: number, w = 2) => String(n).padStart(w, "0");
+  const off = -now.getTimezoneOffset(); // minutes east of UTC
+  const sign = off >= 0 ? "+" : "-";
+  const oh = pad(Math.floor(Math.abs(off) / 60));
+  const om = pad(Math.abs(off) % 60);
+  return (
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+    `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}` +
+    `${sign}${oh}:${om}`
+  );
+}
+
+const STATE_TONE: Record<string, "neutral" | "info" | "ok" | "err" | "warn"> = {
+  draft: "neutral", reserved: "info", partial: "warn", completed: "ok", cancelled: "neutral", expired: "err",
+};
+const STATE_LABEL: Record<string, string> = {
+  draft: "Draft", reserved: "Reserved", partial: "Partial", completed: "Completed", cancelled: "Cancelled", expired: "Expired",
+};
 
 export default function CommitmentDetail() {
   const router = useRouter();
@@ -21,6 +61,35 @@ export default function CommitmentDetail() {
   const [action, setAction] = useState<Action>(null);
   const [actualAmount, setActualAmount] = useState<string>("");
   const [newDue, setNewDue] = useState<string>("");
+  // Correction 2: completion also needs a paying asset account +
+  // explicit occurred_at. State kept alongside the action modal.
+  const [accountId, setAccountId] = useState<string | null>(null);
+  const [accountLabel, setAccountLabel] = useState<string>("Choose account");
+  const [accountPickerOpen, setAccountPickerOpen] = useState(false);
+  // Correction 3 — partial payment via allocations on an existing
+  // APPLIED event. The picker below lists confirmed outflow events
+  // of the same currency that still have unallocated amount left.
+  const [eligibleEvents, setEligibleEvents] = useState<any[]>([]);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [allocateAmount, setAllocateAmount] = useState<string>("");
+  // Correction 4B — one idempotency key per allocation submission.
+  // Generated when the user first taps "Apply". Reused verbatim on
+  // retry (network error, timeout) so the backend recognises the
+  // retry and does not create a duplicate allocation. Cleared on
+  // success, close, event change, amount change, and fresh journey.
+  //
+  // 5B1 — ``allocateIdemKeyRef`` is now EXCLUSIVELY used by the existing-
+  // event allocation journey. The direct-payment journey has its own
+  // ref that preserves the complete immutable submission across retries.
+  const allocateIdemKeyRef = useRef<string | null>(null);
+  const pendingPaymentRef = useRef<PendingPaymentSubmission | null>(null);
+
+  // Clear the pending direct-payment submission when the loaded
+  // commitment changes — a different commitment is a different
+  // payment and must not inherit the previous payment's identity.
+  useEffect(() => {
+    pendingPaymentRef.current = null;
+  }, [id]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -29,6 +98,23 @@ export default function CommitmentDetail() {
       setC(doc);
       const trail = await api.getFinancialAudit("financial_commitment", id).catch(() => ({ entries: [] }));
       setAudit(trail?.entries || []);
+      // Correction 3 — load candidate events for the "record partial
+      // payment" flow. We only surface confirmed events whose
+      // lifecycle is applied and whose currency matches the
+      // commitment. The backend refuses any allocation that would
+      // over-allocate the parent event.
+      try {
+        const evs = await api.listFinancialEvents({ currency: doc.currency, confirmation_status: "confirmed", limit: 200 });
+        const cur = doc.currency;
+        const eligible = (evs || []).filter((e: any) => {
+          if (e.direction !== "outflow") return false;
+          if (e.currency !== cur) return false;
+          if (!["awaiting_reconciliation", "matched", "resolved_unplanned"].includes(e.lifecycle_status)) return false;
+          const unalloc = parseFloat(e.unallocated_amount || "0");
+          return isFinite(unalloc) && unalloc > 0;
+        });
+        setEligibleEvents(eligible);
+      } catch { /* non-fatal */ }
     } catch (e: any) {
       Alert.alert("Error", e?.message || "Could not load commitment");
     }
@@ -43,7 +129,15 @@ export default function CommitmentDetail() {
     try {
       if (a === "complete") {
         if (!actualAmount) { Alert.alert("Actual amount required", "Please enter the amount actually spent."); setBusy(false); return; }
-        await api.completeFinancialCommitment(c.id, { actual_amount: actualAmount });
+        if (!accountId) { Alert.alert("Account required", "Pick the asset account this money came out of."); setBusy(false); return; }
+        // Correction 2: send actual_amount + account_id + explicit
+        // timezone-aware occurred_at. The backend refuses missing/
+        // naive occurred_at when auto-creating the completion event.
+        await api.completeFinancialCommitment(c.id, {
+          actual_amount: actualAmount,
+          account_id: accountId,
+          occurred_at: nowLocalIso(),
+        });
       } else if (a === "cancel") {
         await api.cancelFinancialCommitment(c.id);
       } else if (a === "postpone") {
@@ -51,10 +145,56 @@ export default function CommitmentDetail() {
         await api.postponeFinancialCommitment(c.id, newDue);
       } else if (a === "keep-active") {
         await api.keepActiveFinancialCommitment(c.id);
+      } else if (a === "allocate") {
+        if (!selectedEventId) { Alert.alert("Pick an event", "Choose an existing spending event to allocate from."); setBusy(false); return; }
+        if (!allocateAmount) { Alert.alert("Amount required", "Enter how much of the event to apply to this commitment."); setBusy(false); return; }
+        // Correction 4B — mint one key on first submit, reuse it on
+        // retry so the backend can dedupe an accidental double-tap
+        // or a network retry.
+        if (!allocateIdemKeyRef.current) {
+          allocateIdemKeyRef.current = createAllocationIdempotencyKey();
+        }
+        await api.createAllocation(selectedEventId, {
+          target_type: "commitment",
+          target_id: c.id,
+          amount: allocateAmount,
+          idempotency_key: allocateIdemKeyRef.current,
+        });
+        // Only clear on success — an error must preserve the key.
+        allocateIdemKeyRef.current = null;
+      } else if (a === "payment") {
+        if (!actualAmount) { Alert.alert("Amount required", "Enter the amount you just paid."); setBusy(false); return; }
+        if (!accountId) { Alert.alert("Account required", "Pick the account this money came out of."); setBusy(false); return; }
+        // 5B1 — Preserve the COMPLETE immutable submission across
+        // retries, not just the idempotency key. ``nowLocalIso()`` is
+        // called exactly once at first attempt; every subsequent retry
+        // replays the stored amount / account / occurredAt / eventDate
+        // verbatim so the backend recognises the deterministic event
+        // instead of rejecting a key reused with different parameters.
+        if (!pendingPaymentRef.current) {
+          const occurredAt = nowLocalIso();
+          pendingPaymentRef.current = {
+            idempotencyKey: createAllocationIdempotencyKey(),
+            amount: actualAmount,
+            accountId,
+            occurredAt,
+            eventDate: occurredAt.slice(0, 10),
+          };
+        }
+        const submission = pendingPaymentRef.current;
+        await api.recordFinancialCommitmentPayment(c.id, {
+          amount: submission.amount,
+          account_id: submission.accountId,
+          occurred_at: submission.occurredAt,
+          event_date: submission.eventDate,
+          idempotency_key: submission.idempotencyKey,
+        });
+        // Only cleared on success. The catch path must leave the ref
+        // intact so a retry sends an identical payload.
+        pendingPaymentRef.current = null;
       }
-      setAction(null);
-      setActualAmount("");
-      setNewDue("");
+      setAction(null); setActualAmount(""); setNewDue(""); setAccountId(null); setAccountLabel("Choose account");
+      setSelectedEventId(null); setAllocateAmount("");
       await load();
     } catch (e: any) {
       Alert.alert("Action failed", e?.message || "");
@@ -69,143 +209,279 @@ export default function CommitmentDetail() {
   };
 
   if (loading || !c) return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}><FinanceHeader title="Financial Commitment" /><ActivityIndicator style={{ marginTop: spacing.xxxl }} /></SafeAreaView>
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader title="Commitment" />
+      <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} />
+    </SafeAreaView>
   );
 
   const canComplete = c.state === "reserved" || c.state === "expired";
-  const canCancel = c.state === "draft" || c.state === "reserved" || c.state === "expired";
-  const canPostpone = c.state === "reserved" || c.state === "expired";
+  const canCancel = c.state === "draft" || c.state === "reserved" || c.state === "expired" || c.state === "partial";
+  const canPostpone = c.state === "reserved" || c.state === "expired" || c.state === "partial";
   const canReserve = c.state === "draft";
   const canKeepActive = c.state === "expired";
+  // Record payment is always available on an active commitment. The
+  // backend creates a single canonical Financial Event + allocation per
+  // tap, so the user never has to pre-record the transaction elsewhere.
+  const canPayment = ["reserved", "expired", "partial"].includes(c.state);
+  // Use existing transaction remains available only when at least one
+  // eligible already-recorded outflow event exists.
+  const canAllocate = ["reserved", "expired", "partial"].includes(c.state) && eligibleEvents.length > 0;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}>
-      <FinanceHeader title="Financial Commitment" subtitle={c.title} />
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader title="Commitment" subtitle={c.title} />
       <ScrollView contentContainerStyle={styles.scroll}>
-        <View style={styles.headerCard}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-            <View style={[styles.chip, { backgroundColor: stateColor(c.state) }]}><Text style={styles.chipText}>{stateLabel(c.state)}</Text></View>
-            {c.is_overdue && <View style={[styles.chip, { backgroundColor: colors.error }]}><Text style={styles.chipText}>OVERDUE</Text></View>}
-          </View>
-          <Text style={styles.title}>{c.title}</Text>
-          {c.description ? <Text style={styles.desc}>{c.description}</Text> : null}
-          <Text style={styles.big}>{c.currency} {formatMoney(c.amount)}</Text>
-          <Text style={styles.meta}>Due {dateLabel(c.due_date)} · priority {c.priority}</Text>
-          {c.original_due_date !== c.due_date && <Text style={styles.meta}>Original due: {dateLabel(c.original_due_date)} · postponed {c.postpone_count}x</Text>}
-          {c.task_id && (
-            <Pressable style={styles.linkRow} onPress={() => router.push(`/tasks/${c.task_id}`)}>
-              <Ionicons name="link-outline" size={14} color={colors.brandPrimary} />
-              <Text style={styles.linkText}>View linked task</Text>
-            </Pressable>
-          )}
+        <View style={styles.pillRow}>
+          <FoldPill label={STATE_LABEL[c.state] || c.state} tone={STATE_TONE[c.state] || "neutral"} />
+          {c.is_overdue ? <FoldPill label="Overdue" tone="err" /> : null}
         </View>
 
-        {c.state === "completed" && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Completion</Text>
-            <Row label="Actual amount" val={`${c.currency} ${formatMoney(c.actual_amount)}`} />
-            <Row label="Variance" val={`${c.currency} ${formatMoney(c.variance)}`} />
-            <Row label="Unused reservation returned" val={`${c.currency} ${formatMoney(c.unused_reservation)}`} />
-            <Row label="Overrun" val={`${c.currency} ${formatMoney(c.overrun_amount)}`} />
-            <Row label="Completed at" val={c.completed_at?.slice(0, 10) || ""} />
+        <Text style={styles.title}>{c.title}</Text>
+        {c.description ? <Text style={styles.desc}>{c.description}</Text> : null}
+
+        <FoldHero currency={c.currency} amount={formatMoney(c.amount)} size="xl" caption={`Due ${dateLabel(c.due_date)} · ${c.priority} priority`} />
+        {c.original_due_date && c.original_due_date !== c.due_date ? (
+          <Text style={styles.meta}>Original due {dateLabel(c.original_due_date)} · postponed {c.postpone_count}×</Text>
+        ) : null}
+
+        {/* Payment progress — the backend-owned paid / remaining
+            aggregates are always shown for any active or completed
+            commitment so the user can see how far along a multi-payment
+            commitment is before deciding whether to add another
+            payment. Both values originate from the commitment projection
+            and are never recomputed in the frontend. */}
+        {["reserved", "expired", "partial", "completed"].includes(c.state)
+          || (c.state === "cancelled" && parseFloat(c.paid_amount || "0") > 0) ? (
+          <View>
+            <FoldSectionHeader label="Payment progress" />
+            <FoldCard>
+              <FoldRow first label="Paid" right={<FoldAmount currency={c.currency} value={formatMoney(c.paid_amount)} tone="positive" />} />
+              <FoldRow label="Remaining" right={<FoldAmount currency={c.currency} value={formatMoney(c.remaining_amount)} tone={parseFloat(c.remaining_amount || "0") > 0 ? "muted" : "positive"} />} />
+            </FoldCard>
           </View>
-        )}
+        ) : null}
+
+        {c.task_id ? (
+          <FoldCard>
+            <Pressable style={styles.linkRow} onPress={() => router.push(`/tasks/${c.task_id}`)}>
+              <Ionicons name="link-outline" size={14} color={financeColors.accent} />
+              <Text style={styles.linkText}>View linked task</Text>
+              <Ionicons name="chevron-forward" size={14} color={financeColors.inkFaint} style={{ marginLeft: "auto" }} />
+            </Pressable>
+          </FoldCard>
+        ) : null}
+
+        {c.state === "completed" ? (
+          <View>
+            <FoldSectionHeader label="Completion" />
+            <FoldCard>
+              <FoldRow first label="Actual amount" right={<FoldAmount currency={c.currency} value={formatMoney(c.actual_amount)} />} />
+              <FoldRow label="Variance" right={<FoldAmount currency={c.currency} value={formatMoney(c.variance)} />} />
+              <FoldRow label="Unused reservation returned" right={<FoldAmount currency={c.currency} value={formatMoney(c.unused_reservation)} tone="positive" />} />
+              <FoldRow label="Overrun" right={<FoldAmount currency={c.currency} value={formatMoney(c.overrun_amount)} tone={c.overrun_amount && Number(c.overrun_amount) > 0 ? "negative" : "muted"} />} />
+              <FoldRow label="Completed at" right={<Text style={financeType.amount as any}>{c.completed_at?.slice(0, 10) || ""}</Text>} />
+            </FoldCard>
+          </View>
+        ) : null}
 
         <View style={styles.actionsRow}>
-          {canReserve && <Pressable style={styles.primary} disabled={busy} onPress={reserve} testID="fc-reserve"><Text style={styles.primaryText}>Reserve now</Text></Pressable>}
-          {canComplete && <Pressable style={styles.primary} disabled={busy} onPress={() => setAction("complete")} testID="fc-complete-open"><Text style={styles.primaryText}>Complete</Text></Pressable>}
-          {canPostpone && <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("postpone")} testID="fc-postpone-open"><Text style={styles.secondaryText}>Postpone</Text></Pressable>}
-          {canKeepActive && <Pressable style={styles.secondary} disabled={busy} onPress={() => run("keep-active")} testID="fc-keep-active"><Text style={styles.secondaryText}>Keep active</Text></Pressable>}
-          {canCancel && <Pressable style={styles.danger} disabled={busy} onPress={() => setAction("cancel")} testID="fc-cancel-open"><Text style={styles.dangerText}>Cancel</Text></Pressable>}
+          {canReserve ? <Pressable style={styles.primary} disabled={busy} onPress={reserve} testID="fc-reserve"><Text style={styles.primaryText}>Reserve now</Text></Pressable> : null}
+          {canComplete ? <Pressable style={styles.primary} disabled={busy} onPress={() => setAction("complete")} testID="fc-complete-open"><Text style={styles.primaryText}>Complete</Text></Pressable> : null}
+          {canPayment ? <Pressable style={styles.secondary} disabled={busy} onPress={() => { pendingPaymentRef.current = null; setActualAmount(""); setAccountId(null); setAccountLabel("Choose account"); setAction("payment"); }} testID="fc-payment-open"><Text style={styles.secondaryText}>Record payment</Text></Pressable> : null}
+          {canAllocate ? <Pressable style={styles.secondary} disabled={busy} onPress={() => { allocateIdemKeyRef.current = null; setSelectedEventId(null); setAllocateAmount(""); setAction("allocate"); }} testID="fc-allocate-open"><Text style={styles.secondaryText}>Use existing transaction</Text></Pressable> : null}
+          {canPostpone ? <Pressable style={styles.secondary} disabled={busy} onPress={() => setAction("postpone")} testID="fc-postpone-open"><Text style={styles.secondaryText}>Postpone</Text></Pressable> : null}
+          {canKeepActive ? <Pressable style={styles.secondary} disabled={busy} onPress={() => run("keep-active")} testID="fc-keep-active"><Text style={styles.secondaryText}>Keep active</Text></Pressable> : null}
+          {canCancel ? <Pressable style={styles.danger} disabled={busy} onPress={() => setAction("cancel")} testID="fc-cancel-open"><Text style={styles.dangerText}>Cancel</Text></Pressable> : null}
         </View>
 
-        <View style={styles.section}>
-          <Pressable onPress={() => router.push(`/finance/audit/financial_commitment/${c.id}`)}>
-            <Text style={styles.sectionTitle}>Audit trail · tap for full history</Text>
-          </Pressable>
-          {audit.slice(0, 6).map((e) => (
-            <View key={e.id} style={styles.auditRow}>
-              <Text style={styles.auditAction}>{e.action}</Text>
-              <Text style={styles.auditMeta}>{e.timestamp?.slice(0, 16).replace("T", " ")} · {e.source}</Text>
-            </View>
-          ))}
-          {audit.length === 0 && <Text style={styles.empty}>No history yet.</Text>}
+        <View>
+          <FoldSectionHeader
+            label="Audit trail"
+            action={{ label: "Full history", onPress: () => router.push(`/finance/audit/financial_commitment/${c.id}`) }}
+          />
+          {audit.length === 0 ? (
+            <FoldCard><Text style={styles.empty}>No history yet.</Text></FoldCard>
+          ) : (
+            <FoldCard>
+              {audit.slice(0, 6).map((e, idx) => (
+                <FoldRow
+                  key={e.id}
+                  first={idx === 0}
+                  label={e.action}
+                  meta={`${e.timestamp?.slice(0, 16).replace("T", " ")} · ${e.source}`}
+                />
+              ))}
+            </FoldCard>
+          )}
         </View>
       </ScrollView>
 
-      <Modal visible={!!action} animationType="slide" transparent onRequestClose={() => setAction(null)}>
+      <Modal visible={!!action} animationType="slide" transparent onRequestClose={() => { allocateIdemKeyRef.current = null; pendingPaymentRef.current = null; setAction(null); }}>
         <KeyboardAvoidingView style={styles.sheetWrap} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <View style={styles.sheetCard}>
             <View style={styles.sheetHead}>
-              <Text style={styles.sheetTitle}>{action === "complete" ? "Complete" : action === "cancel" ? "Cancel" : action === "postpone" ? "Postpone" : ""}</Text>
-              <Pressable onPress={() => setAction(null)} hitSlop={12}><Ionicons name="close" size={22} color={colors.onSurface} /></Pressable>
+              <Text style={styles.sheetTitle}>{action === "complete" ? "Complete" : action === "cancel" ? "Cancel" : action === "postpone" ? "Postpone" : action === "payment" ? "Record payment" : action === "allocate" ? "Use existing transaction" : ""}</Text>
+              <Pressable onPress={() => { allocateIdemKeyRef.current = null; pendingPaymentRef.current = null; setAction(null); }} hitSlop={12}><Ionicons name="close" size={20} color={financeColors.ink} /></Pressable>
             </View>
-            {action === "complete" && (
+            {action === "complete" ? (
               <>
-                <Text style={styles.sheetBody}>Completing records the actual spend, consumes the amount spent, releases any unused reserved money to the available pool, recalculates your forecasts and preserves full history.</Text>
-                <Text style={styles.label}>Actual amount ({c.currency})</Text>
-                <TextInput value={actualAmount} onChangeText={setActualAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={colors.onSurfaceTertiary} style={styles.input} testID="fc-actual-amount" />
-                <Pressable style={[styles.primary, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("complete")} testID="fc-complete-submit"><Text style={styles.primaryText}>Confirm completion</Text></Pressable>
+                <Text style={styles.sheetBody}>Completing records the actual spend, consumes the amount spent, releases any unused reserved money to the available pool, recalculates forecasts and preserves full history.</Text>
+                <Text style={styles.label}>ACTUAL AMOUNT ({c.currency})</Text>
+                <TextInput value={actualAmount} onChangeText={setActualAmount} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} style={styles.input} testID="fc-actual-amount" />
+                <Text style={styles.label}>PAYING ACCOUNT</Text>
+                <Pressable onPress={() => setAccountPickerOpen(true)} style={styles.input} testID="fc-account-select">
+                  <Text style={{ color: accountId ? financeColors.ink : financeColors.inkFaint, fontSize: 15 }}>{accountLabel}</Text>
+                </Pressable>
+                {!accountId ? (
+                  <Text style={{ fontSize: 12, color: financeColors.inkFaint, marginTop: 4 }}>
+                    Pick the {c.currency} asset account this money came out of. Completion is disabled until an eligible account is chosen.
+                  </Text>
+                ) : null}
+                <Pressable style={[styles.primary, (busy || !accountId || !actualAmount) && { opacity: 0.5 }]} disabled={busy || !accountId || !actualAmount} onPress={() => run("complete")} testID="fc-complete-submit">
+                  <Text style={styles.primaryText}>Confirm completion</Text>
+                </Pressable>
               </>
-            )}
-            {action === "cancel" && (
+            ) : null}
+            {action === "cancel" ? (
               <>
-                <Text style={styles.sheetBody}>Cancelling releases the full reservation and returns it to the available pool. Future forecast impact will be removed. History remains. The linked task, if any, stays active — cancel it separately if needed.</Text>
-                <Pressable style={[styles.danger, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("cancel")} testID="fc-cancel-submit"><Text style={styles.dangerText}>Confirm cancel</Text></Pressable>
+                <Text style={styles.sheetBody}>Cancelling releases any money still reserved for this commitment. Payments already recorded remain in your financial history and are not counted twice. The linked task, if any, stays active — cancel it separately if needed.</Text>
+                <Pressable style={[styles.danger, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("cancel")} testID="fc-cancel-submit">
+                  <Text style={styles.dangerText}>Confirm cancel</Text>
+                </Pressable>
               </>
-            )}
-            {action === "postpone" && (
+            ) : null}
+            {action === "postpone" ? (
               <>
                 <Text style={styles.sheetBody}>Postponing keeps the reservation and moves the due date. Affected forecast months will be recalculated. The original due date remains in the audit trail.</Text>
-                <Text style={styles.label}>New due date</Text>
+                <Text style={styles.label}>NEW DUE DATE</Text>
                 <DateTimeField mode="date" value={newDue} onChange={setNewDue} testID="fc-postpone-date" />
-                <Pressable style={[styles.primary, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("postpone")} testID="fc-postpone-submit"><Text style={styles.primaryText}>Confirm postpone</Text></Pressable>
+                <Pressable style={[styles.primary, busy && { opacity: 0.5 }]} disabled={busy} onPress={() => run("postpone")} testID="fc-postpone-submit">
+                  <Text style={styles.primaryText}>Confirm postpone</Text>
+                </Pressable>
               </>
-            )}
+            ) : null}
+            {action === "payment" ? (
+              <>
+                <Text style={styles.sheetBody}>Record money that has just left one of your accounts. Hymn will count it once, apply it to this commitment, and update the paid and remaining amounts.</Text>
+                <Text style={styles.label}>AMOUNT ({c.currency})</Text>
+                <TextInput
+                  value={actualAmount}
+                  onChangeText={(v) => { pendingPaymentRef.current = null; setActualAmount(v); }}
+                  keyboardType="decimal-pad"
+                  placeholder="0.00"
+                  placeholderTextColor={financeColors.inkFaint}
+                  style={styles.input}
+                  testID="fc-payment-amount"
+                />
+                <Text style={styles.label}>PAYING ACCOUNT</Text>
+                <Pressable
+                  onPress={() => { setAccountPickerOpen(true); }}
+                  style={styles.input}
+                  testID="fc-payment-account"
+                >
+                  <Text style={{ color: accountId ? financeColors.ink : financeColors.inkFaint, fontSize: 15 }}>{accountLabel}</Text>
+                </Pressable>
+                <Text style={{ fontSize: 12, color: financeColors.inkFaint, marginTop: 4 }}>
+                  This payment will be recorded at the current time. To use an earlier transaction, choose “Use existing transaction” instead.
+                </Text>
+                <Pressable
+                  style={[styles.primary, (busy || !actualAmount || !accountId) && { opacity: 0.5 }]}
+                  disabled={busy || !actualAmount || !accountId}
+                  onPress={() => run("payment")}
+                  testID="fc-payment-submit"
+                >
+                  <Text style={styles.primaryText}>Save payment</Text>
+                </Pressable>
+              </>
+            ) : null}
+            {action === "allocate" ? (
+              <>
+                <Text style={styles.sheetBody}>Pick an existing spending event and how much of it to apply to this commitment. The event stays as-is — allocations only classify the money, they never move an account balance.</Text>
+                <Text style={styles.label}>EVENT</Text>
+                {eligibleEvents.length === 0 ? (
+                  <Text style={{ fontSize: 12, color: financeColors.inkFaint, marginTop: 4 }}>No confirmed {c.currency} outflow events with unallocated amount right now.</Text>
+                ) : (
+                  <ScrollView style={{ maxHeight: 220 }}>
+                    {eligibleEvents.map((e) => (
+                      <Pressable
+                        key={e.id}
+                        onPress={() => { allocateIdemKeyRef.current = null; setSelectedEventId(e.id); }}
+                        style={[styles.eventRow, selectedEventId === e.id && styles.eventRowSel]}
+                        testID={`fc-allocate-event-${e.id}`}
+                      >
+                        <Text style={styles.eventPrimary} numberOfLines={1}>{e.description || "Untitled event"}</Text>
+                        <Text style={styles.eventMeta}>{dateLabel(e.event_date)} · {c.currency} {formatMoney(e.amount)} · unallocated {formatMoney(e.unallocated_amount || "0")}</Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                )}
+                <Text style={styles.label}>AMOUNT ({c.currency})</Text>
+                <TextInput value={allocateAmount} onChangeText={(v) => { allocateIdemKeyRef.current = null; setAllocateAmount(v); }} keyboardType="decimal-pad" placeholder="0.00" placeholderTextColor={financeColors.inkFaint} style={styles.input} testID="fc-allocate-amount" />
+                <Pressable style={[styles.primary, (busy || !selectedEventId || !allocateAmount) && { opacity: 0.5 }]} disabled={busy || !selectedEventId || !allocateAmount} onPress={() => run("allocate")} testID="fc-allocate-submit">
+                  <Text style={styles.primaryText}>Apply to this commitment</Text>
+                </Pressable>
+              </>
+            ) : null}
           </View>
         </KeyboardAvoidingView>
       </Modal>
+      <AccountPickerModal
+        visible={accountPickerOpen}
+        currency={c.currency}
+        selectedId={accountId}
+        onSelect={async (id) => {
+          // 5B1.1 — Only a genuinely different account invalidates the
+          // pending direct-payment submission. Reselecting the already
+          // chosen account must preserve the retry identity so a prior
+          // uncertain attempt is still recognised by the backend as a
+          // deterministic replay. Opening/closing the picker without
+          // picking a different account is handled by not touching
+          // ``pendingPaymentRef`` in the row's ``onPress``.
+          if (id !== accountId) {
+            pendingPaymentRef.current = null;
+          }
+          setAccountId(id);
+          if (!id) { setAccountLabel("Assign later"); return; }
+          try {
+            const rows = await api.listFinancialAccounts();
+            const match = rows.find((r) => r.id === id);
+            setAccountLabel(match ? `${match.name} (${match.currency})` : "Account selected");
+          } catch {
+            setAccountLabel("Account selected");
+          }
+        }}
+        onClose={() => setAccountPickerOpen(false)}
+      />
     </SafeAreaView>
   );
 }
 
-function Row({ label, val }: { label: string; val: string }) {
-  return <View style={styles.row}><Text style={styles.rowLabel}>{label}</Text><Text style={styles.rowValue}>{val}</Text></View>;
-}
-
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.surface },
-  scroll: { padding: spacing.xl, gap: spacing.lg, paddingBottom: spacing.xxxl },
-  headerCard: { padding: spacing.lg, backgroundColor: colors.surfaceSecondary, borderRadius: radius.md, gap: spacing.xs },
-  title: { fontSize: 20, color: colors.onSurface, fontWeight: "700" },
-  desc: { fontSize: 13, color: colors.onSurfaceSecondary },
-  big: { fontSize: 28, color: colors.onSurface, fontWeight: "700", marginTop: spacing.md },
-  meta: { fontSize: 12, color: colors.onSurfaceSecondary },
-  chip: { paddingHorizontal: 6, paddingVertical: 2, borderRadius: radius.pill, alignSelf: "flex-start", marginRight: 4 },
-  chipText: { fontSize: 10, color: "#fff", fontWeight: "700", letterSpacing: 0.5 },
-  linkRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: spacing.sm },
-  linkText: { color: colors.brandPrimary, fontSize: 13, fontWeight: "600" },
-  section: { gap: spacing.xs, backgroundColor: colors.surfaceSecondary, padding: spacing.md, borderRadius: radius.md },
-  sectionTitle: { fontSize: 12, color: colors.onSurfaceSecondary, letterSpacing: 0.5, marginBottom: spacing.xs },
-  row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: spacing.xs },
-  rowLabel: { fontSize: 13, color: colors.onSurface },
-  rowValue: { fontSize: 14, color: colors.onSurface, fontWeight: "700" },
-  auditRow: { paddingVertical: 6, borderBottomWidth: 1, borderBottomColor: colors.border },
-  auditAction: { fontSize: 13, color: colors.onSurface, fontWeight: "600" },
-  auditMeta: { fontSize: 11, color: colors.onSurfaceSecondary, marginTop: 2 },
-  empty: { fontSize: 12, color: colors.onSurfaceSecondary, fontStyle: "italic" },
-  actionsRow: { flexDirection: "row", flexWrap: "wrap", gap: spacing.sm },
-  primary: { backgroundColor: colors.onSurface, paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, alignItems: "center" },
-  primaryText: { color: colors.onSurfaceInverse, fontSize: 14, fontWeight: "700" },
-  secondary: { paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.border, alignItems: "center" },
-  secondaryText: { color: colors.onSurface, fontSize: 14, fontWeight: "600" },
-  danger: { paddingVertical: spacing.md, paddingHorizontal: spacing.lg, borderRadius: radius.pill, borderWidth: 1, borderColor: colors.error, alignItems: "center" },
-  dangerText: { color: colors.error, fontSize: 14, fontWeight: "700" },
-  sheetWrap: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
-  sheetCard: { backgroundColor: colors.surface, borderTopLeftRadius: radius.lg, borderTopRightRadius: radius.lg, padding: spacing.xl, paddingBottom: spacing.xxxl, gap: spacing.md },
+  scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
+  pillRow: { flexDirection: "row", gap: 6, flexWrap: "wrap" },
+  title: { ...financeType.screenTitle, fontSize: 22 } as any,
+  desc: { fontSize: 13, color: financeColors.inkMuted, lineHeight: 19 },
+  meta: { fontSize: 11.5, color: financeColors.inkMuted, letterSpacing: 0.3 },
+  linkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingHorizontal: financeSpace.lg, paddingVertical: 14, backgroundColor: "#FFFFFF" },
+  linkText: { ...financeType.body, color: financeColors.accent, fontWeight: "600" } as any,
+  actionsRow: { flexDirection: "row", flexWrap: "wrap", gap: financeSpace.sm, marginTop: financeSpace.xs },
+  primary: { backgroundColor: financeColors.ink, paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill },
+  primaryText: { color: "#FBFBF6", fontSize: 13, fontWeight: "700", letterSpacing: 0.4 },
+  secondary: { paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  secondaryText: { color: financeColors.ink, fontSize: 13, fontWeight: "600" },
+  danger: { paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.danger },
+  dangerText: { color: financeColors.danger, fontSize: 13, fontWeight: "700" },
+  empty: { fontSize: 12.5, color: financeColors.inkMuted, padding: financeSpace.lg, textAlign: "center", fontStyle: "italic" },
+  sheetWrap: { flex: 1, backgroundColor: "rgba(20,20,18,0.4)", justifyContent: "flex-end" },
+  sheetCard: { backgroundColor: financeColors.page, borderTopLeftRadius: financeRadius.lg, borderTopRightRadius: financeRadius.lg, padding: financeSpace.xl, paddingBottom: financeSpace.xxxl, gap: financeSpace.md },
   sheetHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  sheetTitle: { fontSize: 16, fontWeight: "700", color: colors.onSurface },
-  sheetBody: { fontSize: 13, color: colors.onSurfaceSecondary, lineHeight: 18 },
-  label: { fontSize: 12, color: colors.onSurfaceSecondary, letterSpacing: 0.5 },
-  input: { backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md, fontSize: 15, color: colors.onSurface },
+  sheetTitle: { ...financeType.screenTitle, fontSize: 18 } as any,
+  sheetBody: { ...financeType.body, color: financeColors.inkMuted } as any,
+  label: { ...financeType.sectionLabel } as any,
+  input: { backgroundColor: "#FFFFFF", borderRadius: financeRadius.sm, paddingHorizontal: financeSpace.lg, paddingVertical: financeSpace.md, fontSize: 15, color: financeColors.ink, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder },
+  eventRow: { paddingHorizontal: financeSpace.md, paddingVertical: financeSpace.sm, borderRadius: financeRadius.sm, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, backgroundColor: "#FFFFFF", marginBottom: financeSpace.xs },
+  eventRowSel: { borderColor: financeColors.ink, backgroundColor: financeColors.pillBg },
+  eventPrimary: { fontSize: 13, color: financeColors.ink, fontWeight: "600" },
+  eventMeta: { fontSize: 11, color: financeColors.inkMuted, marginTop: 2 },
 });

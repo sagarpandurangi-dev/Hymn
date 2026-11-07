@@ -1,7 +1,7 @@
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { useState } from "react";
 import DateTimePicker, { DateTimePickerEvent } from "@react-native-community/datetimepicker";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { colors, radius, spacing } from "@/src/lib/theme";
 
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
@@ -49,6 +49,7 @@ export default function DateTimeField({ mode, value, onChange, placeholder, clea
     // Rendered via createElement to avoid RN-Web warning about unknown DOM props.
     return (
       <View style={styles.wrap} testID={testID}>
+        {/* @ts-ignore web-only element */}
         <input
           type={mode === "date" ? "date" : "time"}
           value={value}

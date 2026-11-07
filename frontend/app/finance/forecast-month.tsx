@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
-import { colors, radius, spacing } from "@/src/lib/theme";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
+import { FoldAmount, FoldCard, FoldHero, FoldPill, FoldRow, FoldSectionHeader, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeSpace } from "@/src/lib/finance/theme";
 import { formatMoney, monthLabel } from "@/src/lib/finance/format";
 
 export default function ForecastMonth() {
@@ -20,31 +21,47 @@ export default function ForecastMonth() {
   const cur = data?.by_currency?.find((c: any) => c.currency === currency);
   const m = cur?.months?.find((x: any) => x.month === month);
   return (
-    <SafeAreaView style={styles.safe} edges={["bottom"]}>
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
       <FinanceHeader title={monthLabel(month || "")} subtitle={`${currency} · forecast detail`} />
-      {loading ? <ActivityIndicator style={{ marginTop: spacing.xxxl }} /> : (
+      {loading ? <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} /> : (
         <ScrollView contentContainerStyle={styles.scroll}>
-          <Text style={styles.kpi}>{currency} {formatMoney(m?.projected_liquid_end_of_month || "0")}</Text>
-          <Text style={styles.sub}>Projected liquid end of month{m?.shortfall ? " · shortfall" : ""}</Text>
-          <Text style={styles.section}>Assumptions</Text>
-          {[
-            ["Recurring Income", m?.recurring_income],
-            ["Recurring Outflows", m?.recurring_outflows],
-            ["Reserved Commitments", m?.reserved_commitments_amount],
-            ["Projected Net Worth EoM", m?.projected_net_worth_end_of_month],
-          ].map(([label, val]) => (
-            <View key={String(label)} style={styles.row}>
-              <Text style={styles.rowLabel}>{label}</Text>
-              <Text style={styles.rowValue}>{currency} {formatMoney(String(val || "0"))}</Text>
-            </View>
-          ))}
-          <Text style={styles.section}>Contributing commitments</Text>
-          {(m?.reserved_commitment_ids || []).map((id: string) => (
-            <Pressable key={id} style={styles.linkRow} onPress={() => router.push(`/finance/commitments/${id}`)} testID={`fm-commit-${id}`}>
-              <Text style={styles.linkText}>Open commitment</Text>
-            </Pressable>
-          ))}
-          {(!m?.reserved_commitment_ids || m.reserved_commitment_ids.length === 0) && <Text style={styles.empty}>No reserved commitments this month.</Text>}
+          <FoldHero currency={currency} amount={formatMoney(m?.projected_liquid_end_of_month || "0")} size="xl" caption="Projected liquid end of month" />
+          {m?.shortfall ? <FoldPill label="Shortfall" tone="err" /> : null}
+
+          <FoldSectionHeader label="Assumptions" />
+          <FoldCard>
+            {[
+              ["Recurring income", m?.recurring_income],
+              ["Recurring outflows", m?.recurring_outflows],
+              ["Reserved commitments", m?.reserved_commitments_amount],
+              ["Projected net worth EoM", m?.projected_net_worth_end_of_month],
+            ].map(([label, val], idx) => (
+              <FoldRow
+                key={String(label)}
+                first={idx === 0}
+                label={String(label)}
+                right={<FoldAmount currency={currency} value={formatMoney(String(val || "0"))} />}
+              />
+            ))}
+          </FoldCard>
+
+          <FoldSectionHeader label="Contributing commitments" />
+          {(m?.reserved_commitment_ids || []).length === 0 ? (
+            <FoldCard><Text style={styles.empty}>No reserved commitments this month.</Text></FoldCard>
+          ) : (
+            <FoldCard>
+              {(m?.reserved_commitment_ids || []).map((id: string, idx: number) => (
+                <Pressable
+                  key={id}
+                  style={[styles.linkRow, idx > 0 && styles.rowDivider]}
+                  onPress={() => router.push(`/finance/commitments/${id}`)}
+                  testID={`fm-commit-${id}`}
+                >
+                  <Text style={styles.linkText}>Open commitment</Text>
+                </Pressable>
+              ))}
+            </FoldCard>
+          )}
         </ScrollView>
       )}
     </SafeAreaView>
@@ -52,15 +69,9 @@ export default function ForecastMonth() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: colors.surface },
-  scroll: { padding: spacing.xl, gap: spacing.md, paddingBottom: spacing.xxxl },
-  kpi: { fontSize: 28, fontWeight: "700", color: colors.onSurface },
-  sub: { fontSize: 12, color: colors.onSurfaceSecondary },
-  section: { fontSize: 12, color: colors.onSurfaceSecondary, letterSpacing: 0.5, marginTop: spacing.md },
-  row: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: spacing.md, backgroundColor: colors.surfaceSecondary, borderRadius: radius.sm },
-  rowLabel: { fontSize: 13, color: colors.onSurface, fontWeight: "500" },
-  rowValue: { fontSize: 14, color: colors.onSurface, fontWeight: "700" },
-  linkRow: { padding: spacing.md, backgroundColor: colors.brandTertiary, borderRadius: radius.sm },
-  linkText: { color: colors.brandPrimary, fontSize: 13, fontWeight: "600" },
-  empty: { fontSize: 12, color: colors.onSurfaceSecondary, fontStyle: "italic" },
+  scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
+  linkRow: { padding: financeSpace.lg, backgroundColor: "#FFFFFF" },
+  rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: financeColors.divider },
+  linkText: { fontSize: 13, color: financeColors.accent, fontWeight: "600" },
+  empty: { fontSize: 13, color: financeColors.inkMuted, padding: financeSpace.lg, fontStyle: "italic", textAlign: "center" },
 });

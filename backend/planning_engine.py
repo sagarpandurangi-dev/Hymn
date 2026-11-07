@@ -1,129 +1,69 @@
-"""Hymn Planning Engine — analyze → confirm → generate → approve.
+"""Hymn Planning Engine — Conversational.
 
-Pipeline (§1 of the spec):
+Reformed from the deterministic analyze → confirm → generate → approve
+pipeline to a **single conversational thread per (target_type, target_id)**
+that enriches the existing Goal or Project rather than creating parallel
+planning objects.
 
-* **A. Analyze** — deterministic only. Reads the relevant Hymn slice, infers
-  current-state facts, attaches stable ``evidence_id`` values, stores a
-  compact portfolio snapshot + hash. Never calls the LLM. Returns
-  ``confirmation_required`` with no outcomes / tasks / feasibility.
-* **B. Confirm** — batched. Persists and merges confirmations for every
-  field in one request. Never discards a prior confirmation. Builds the
-  ``resolved_context`` used downstream.
-* **C. Generate** — provider-neutral generation from the compact resolved
-  context, deterministic capacity summaries, and evidence IDs. The Foundation
-  implementation is local-only and never invents tasks or calls a remote
-  service.
-* **D. Approve** — only when status = ``proposal_ready``. Snapshot drift
-  triggers 409. Uses a durable state machine (preparing → applying →
-  committed / failed) so partial commits are rolled back.
+Design highlights
+-----------------
+* One ``plan_conversations`` doc per (user, target_type, target_id). Messages
+  and any proposed changes are appended atomically.
+* The LLM (Anthropic Claude Sonnet 4.5 via emergentintegrations) is invoked
+  with the Anthropic ``web_search`` provider-hosted tool enabled so the model
+  can ground its recommendations. The tool executes on the API side; we
+  never surface tool calls or raw JSON to the UI.
+* The assistant reply is split into a *prose* section (what the UI shows)
+  and a *structured proposal* section (parsed on the server, hidden from the
+  UI). The structured proposal is stored on the message so the UI can render
+  an "Apply changes" card next to the assistant bubble.
+* ``POST .../materialize`` applies the proposal into the target Goal/Project
+  by creating or updating existing expected_outcomes / tasks / check-ins /
+  goal cadence in an atomic pass, with per-action idempotency.
 
-Generated plans are constrained by strict Pydantic response models with
-``extra='forbid'`` and enum + date validation. No hard-coded fallback
-estimates. No invented sources. External estimates are always empty.
+Endpoints
+---------
+* ``GET  /planning/{target_type}/{target_id}/conversation``  — get or create.
+* ``POST /planning/{target_type}/{target_id}/messages``      — user turn.
+* ``POST /planning/{target_type}/{target_id}/reset``         — start over.
+* ``POST /planning/conversations/{id}/materialize``           — apply proposal.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
+import os
 import re
 import uuid
-from datetime import date as date_type, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from bson.decimal128 import Decimal128
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from dotenv import load_dotenv
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from deps import get_current_user, get_db
-from portfolio_manager import compute_time_union_and_overlap
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 planning_router = APIRouter(prefix="/planning", tags=["planning"])
 
+TARGET_TYPES = ("goal", "project")
 
-# ============================================================================
-# Constants
-# ============================================================================
-
-TARGET_TYPES = ("goal", "project", "journey")
-PROPOSAL_STATUSES = (
-    "confirmation_required",
-    "blocking_input_required",
-    "generating",
-    "proposal_ready",
-    "infeasible",
-    "approved",
-    "rejected",
-    "abandoned",
-    "paused",
-    "error",
-)
-FEASIBILITY_STATUSES = (
-    "feasible",
-    "feasible_with_tradeoffs",
-    "not_currently_feasible",
-    "unknown",
-)
-CONFIDENCE_LEVELS = ("high", "medium", "low")
-CONFIRMATION_ACTIONS = ("confirm", "edit", "reject", "mark_unknown")
-EVIDENCE_TYPES = (
-    "explicit_user_confirmation",
-    "verified_structured_field",
-    "approved_plan",
-    "current_activity_checkin",
-    "inference",
-    "external_estimate",
-    "llm_estimate",
-    "none",
-)
-EVIDENCE_PRECEDENCE: Tuple[str, ...] = EVIDENCE_TYPES  # already ordered
-COMMIT_PHASES = ("preparing", "applying", "committed", "failed")
-
-
-# ============================================================================
+# ---------------------------------------------------------------------------
 # Utilities
-# ============================================================================
+# ---------------------------------------------------------------------------
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _today_iso() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
-
-
 def _uuid() -> str:
     return str(uuid.uuid4())
-
-
-def _parse_date(s: Any) -> Optional[date_type]:
-    if not s or not isinstance(s, str):
-        return None
-    try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except (ValueError, TypeError):
-        return None
-
-
-def _is_iso_date(v: Any) -> bool:
-    return isinstance(v, str) and _parse_date(v) is not None
-
-
-def _hhmm_to_minutes(s: str) -> int:
-    try:
-        h, m = s.split(":")
-        return int(h) * 60 + int(m)
-    except Exception:
-        return 0
-
-
-def _weekday_name(d: date_type) -> str:
-    return ("monday", "tuesday", "wednesday", "thursday", "friday",
-            "saturday", "sunday")[d.weekday()]
 
 
 def _require(cond: bool, msg: str, code: int = 400) -> None:
@@ -131,2129 +71,2776 @@ def _require(cond: bool, msg: str, code: int = 400) -> None:
         raise HTTPException(status_code=code, detail=msg)
 
 
-def _require_in(v: str, choices: Tuple[str, ...], field: str) -> None:
-    _require(v in choices, f"{field} must be one of {list(choices)}")
-
-
-def _decimal_from_stored(v: Any) -> Decimal:
-    if v is None or v == "":
-        return Decimal(0)
-    if isinstance(v, Decimal128):
-        return v.to_decimal()
-    if isinstance(v, Decimal):
+def _iso_date(v: Any) -> Optional[str]:
+    if not isinstance(v, str) or not v:
+        return None
+    try:
+        datetime.strptime(v, "%Y-%m-%d")
         return v
-    try:
-        return Decimal(str(v))
-    except Exception:
-        return Decimal(0)
-
-
-def _stable_json(obj: Any) -> str:
-    """Deterministic JSON — used for snapshot hashing and LLM context."""
-    def default(o: Any) -> Any:
-        if isinstance(o, Decimal128):
-            return str(o.to_decimal())
-        if isinstance(o, Decimal):
-            return str(o)
-        if isinstance(o, datetime):
-            return o.isoformat()
-        if isinstance(o, date_type):
-            return o.isoformat()
-        return str(o)
-    return json.dumps(obj, sort_keys=True, default=default, separators=(",", ":"))
-
-
-def _snapshot_hash(snapshot: Dict[str, Any]) -> str:
-    """SHA-256 of the deterministic JSON of a snapshot, excluding
-    ``generated_at`` so an unchanged portfolio always yields the same hash."""
-    clone = {k: v for k, v in snapshot.items() if k != "generated_at"}
-    return hashlib.sha256(_stable_json(clone).encode("utf-8")).hexdigest()
-
-
-# ============================================================================
-# Fact / Evidence record
-# ============================================================================
-
-def _fact(field: str, value: Any, evidence: str, confidence: str,
-          source: Optional[str] = None, note: Optional[str] = None,
-          blocking: bool = False) -> dict:
-    _require_in(evidence, EVIDENCE_TYPES, "evidence")
-    _require_in(confidence, CONFIDENCE_LEVELS, "confidence")
-    return {
-        "evidence_id": _uuid(),  # stable identifier used by the LLM contract
-        "field": field,
-        "value": value,
-        "evidence": evidence,
-        "confidence": confidence,
-        "source": source,
-        "note": note,
-        "blocking": blocking,
-        "recorded_at": _now(),
-    }
-
-
-# ============================================================================
-# Portfolio snapshot — deterministic, RELEVANT-only.
-# ============================================================================
-
-async def _read_target(db, user_id: str, target_type: str, target_id: str) -> Optional[dict]:
-    coll_map = {"goal": "goals", "project": "projects", "journey": "knowledge_journeys"}
-    return await db[coll_map[target_type]].find_one(
-        {"id": target_id, "user_id": user_id}, {"_id": 0},
-    )
-
-
-async def _read_snapshot(db, user_id: str, target_type: str, target_id: str) -> Dict[str, Any]:
-    """Read only the relevant Hymn slice for planning this target.
-
-    Includes: target + linked EOs/knowledge stages/components, tasks linked
-    to the target chain, check-ins queried by real relationship fields,
-    domain, active/paused portfolio time_commitments and monthly_money_
-    commitments overlapping the horizon, financial_accounts, allocations
-    tied to the target chain or currently reserved money.
-    """
-    _require_in(target_type, TARGET_TYPES, "target_type")
-    target = await _read_target(db, user_id, target_type, target_id)
-    if not target:
-        raise HTTPException(status_code=404, detail=f"{target_type.title()} not found")
-
-    linked_outcomes: List[dict] = []
-    linked_stages: List[dict] = []
-    linked_components: List[dict] = []
-    linked_journey: Optional[dict] = None
-    linked_goal: Optional[dict] = None
-
-    if target_type == "goal":
-        linked_outcomes = await db.expected_outcomes.find(
-            {"goal_id": target_id, "user_id": user_id}, {"_id": 0},
-        ).to_list(length=200)
-        linked_journey = await db.knowledge_journeys.find_one(
-            {"goal_id": target_id, "user_id": user_id}, {"_id": 0},
-        )
-        if linked_journey:
-            linked_stages = await db.knowledge_stages.find(
-                {"journey_id": linked_journey["id"], "user_id": user_id}, {"_id": 0},
-            ).to_list(length=100)
-            linked_components = await db.knowledge_components.find(
-                {"journey_id": linked_journey["id"], "user_id": user_id}, {"_id": 0},
-            ).to_list(length=500)
-    elif target_type == "journey":
-        linked_goal = await db.goals.find_one(
-            {"id": target.get("goal_id"), "user_id": user_id}, {"_id": 0},
-        )
-        linked_outcomes = await db.expected_outcomes.find(
-            {"goal_id": target.get("goal_id"), "user_id": user_id}, {"_id": 0},
-        ).to_list(length=200)
-        linked_stages = await db.knowledge_stages.find(
-            {"journey_id": target_id, "user_id": user_id}, {"_id": 0},
-        ).to_list(length=100)
-        linked_components = await db.knowledge_components.find(
-            {"journey_id": target_id, "user_id": user_id}, {"_id": 0},
-        ).to_list(length=500)
-
-    # Tasks tied to the target chain.
-    if target_type == "goal":
-        eo_ids = [o["id"] for o in linked_outcomes]
-        tasks = await db.tasks.find(
-            {"user_id": user_id, "expected_outcome_id": {"$in": eo_ids}}, {"_id": 0},
-        ).to_list(length=1000) if eo_ids else []
-    elif target_type == "project":
-        tasks = await db.tasks.find(
-            {"user_id": user_id, "project_id": target_id}, {"_id": 0},
-        ).to_list(length=1000)
-    else:  # journey
-        comp_ids = [c["id"] for c in linked_components]
-        eo_ids = [o["id"] for o in linked_outcomes]
-        or_clauses: List[dict] = []
-        if comp_ids:
-            or_clauses.append({"component_id": {"$in": comp_ids}})
-        if eo_ids:
-            or_clauses.append({"expected_outcome_id": {"$in": eo_ids}})
-        tasks = await db.tasks.find(
-            {"user_id": user_id, "$or": or_clauses}, {"_id": 0},
-        ).to_list(length=1000) if or_clauses else []
-
-    # Check-ins — query using real relationship fields (§2).
-    checkin_or: List[dict] = []
-    task_ids = [t["id"] for t in tasks]
-    if target_type == "goal":
-        checkin_or.append({"goal_id": target_id})
-        if linked_outcomes:
-            checkin_or.append({"expected_outcome_id": {"$in": [o["id"] for o in linked_outcomes]}})
-    elif target_type == "project":
-        checkin_or.append({"project_id": target_id})
-    else:  # journey
-        if target.get("goal_id"):
-            checkin_or.append({"goal_id": target["goal_id"]})
-        if linked_components:
-            checkin_or.append({"component_id": {"$in": [c["id"] for c in linked_components]}})
-    if task_ids:
-        checkin_or.append({"task_id": {"$in": task_ids}})
-    checkins: List[dict] = []
-    if checkin_or:
-        checkins = await db.checkins.find(
-            {"user_id": user_id, "$or": checkin_or}, {"_id": 0},
-        ).sort("created_at", -1).to_list(length=200)
-
-    domain_id = target.get("domain_id") or (linked_goal or {}).get("domain_id")
-    domain = None
-    if domain_id:
-        domain = await db.domains.find_one({"id": domain_id, "user_id": user_id}, {"_id": 0})
-
-    # Only active/paused other goals & projects (§2 — "relevant" only).
-    other_goals = await db.goals.find(
-        {"user_id": user_id, "status": {"$in": ["active", "paused"]},
-         "id": {"$ne": target_id if target_type == "goal" else None}},
-        {"_id": 0, "id": 1, "title": 1, "status": 1, "deadline": 1, "priority": 1, "domain_id": 1},
-    ).to_list(length=500)
-    other_projects = await db.projects.find(
-        {"user_id": user_id, "status": {"$in": ["active", "paused"]},
-         "id": {"$ne": target_id if target_type == "project" else None}},
-        {"_id": 0, "id": 1, "title": 1, "status": 1, "target_end_date": 1, "priority": 1, "domain_id": 1},
-    ).to_list(length=500)
-
-    # Time commitments (deterministic caller handles effective_from/until).
-    time_commitments = await db.time_commitments.find(
-        {"user_id": user_id}, {"_id": 0},
-    ).to_list(length=2000)
-
-    # Financial accounts (already carry liquidity_type).
-    accounts = await db.financial_accounts.find(
-        {"user_id": user_id}, {"_id": 0},
-    ).to_list(length=200)
-    monthly_money = await db.monthly_money_commitments.find(
-        {"user_id": user_id}, {"_id": 0},
-    ).to_list(length=1000)
-
-    # Allocations — tied to target chain OR currently reserved money
-    # (finance-lifecycle rows are always relevant to feasibility).
-    alloc_or: List[dict] = []
-    if target_type == "goal":
-        alloc_or.append({"goal_id": target_id})
-    if target_type == "project":
-        alloc_or.append({"project_id": target_id})
-    if task_ids:
-        alloc_or.append({"owner_type": "task", "owner_id": {"$in": task_ids}})
-    # All active money reservations — they affect available capacity globally.
-    alloc_or.append({"resource_type": "money",
-                     "state": {"$in": ["reserved", "expired"]}})
-    # All time allocations — needed for capacity math.
-    alloc_or.append({"resource_type": "time",
-                     "status": {"$in": ["reserved", "consumed"]}})
-    allocations = await db.resource_allocations.find(
-        {"user_id": user_id, "$or": alloc_or}, {"_id": 0},
-    ).to_list(length=5000)
-
-    def _clean(doc: dict) -> dict:
-        out: dict = {}
-        for k, v in doc.items():
-            if isinstance(v, Decimal128):
-                out[k] = str(v.to_decimal())
-            else:
-                out[k] = v
-        return out
-
-    return {
-        "target_type": target_type,
-        "target_id": target_id,
-        "target": _clean(target),
-        "linked_goal": _clean(linked_goal) if linked_goal else None,
-        "linked_journey": _clean(linked_journey) if linked_journey else None,
-        "expected_outcomes": [_clean(o) for o in linked_outcomes],
-        "knowledge_stages": [_clean(s) for s in linked_stages],
-        "knowledge_components": [_clean(c) for c in linked_components],
-        "tasks": [_clean(t) for t in tasks],
-        "checkins": [_clean(c) for c in checkins],
-        "domain": _clean(domain) if domain else None,
-        "portfolio": {
-            "resource_allocations": [_clean(a) for a in allocations],
-            "time_commitments": [_clean(c) for c in time_commitments],
-            "financial_accounts": [_clean(a) for a in accounts],
-            "monthly_money_commitments": [_clean(m) for m in monthly_money],
-            "active_goals": [_clean(g) for g in other_goals],
-            "active_projects": [_clean(p) for p in other_projects],
-        },
-        "generated_at": _now(),
-    }
-
-
-# ============================================================================
-# Current-state inference — deterministic, evidence-tagged (§2).
-# ============================================================================
-
-def _infer_current_state(snapshot: Dict[str, Any]) -> List[dict]:
-    """Return every relevant fact with a stable evidence_id. Fields that
-    Hymn doesn't know are surfaced as ``value=None`` + ``evidence=none``
-    with ``blocking=True`` so the confirmation form can capture them."""
-    facts: List[dict] = []
-    t = snapshot["target"]
-    target_type = snapshot["target_type"]
-
-    facts.append(_fact(
-        "objective",
-        t.get("title") or None,
-        evidence="verified_structured_field" if t.get("title") else "none",
-        confidence="high" if t.get("title") else "low",
-        source=f"{target_type}.title",
-        blocking=not bool(t.get("title")),
-    ))
-
-    # Success criteria — Project.description is NOT success criteria (§2).
-    if target_type == "goal":
-        val = t.get("target_outcome") or None
-        facts.append(_fact(
-            "success_criteria", val,
-            evidence="verified_structured_field" if val else "none",
-            confidence="high" if val else "low",
-            source="goal.target_outcome",
-            note=None if val else "Not stored on the goal.",
-            blocking=not bool(val),
-        ))
-    elif target_type == "project":
-        # Project has no dedicated success_criteria field; stays unknown
-        # until the user confirms one.
-        facts.append(_fact(
-            "success_criteria", None,
-            evidence="none", confidence="low",
-            source="project has no success_criteria field",
-            note="Project description is not treated as success criteria.",
-            blocking=True,
-        ))
-    else:  # journey
-        goal = snapshot.get("linked_goal") or {}
-        val = goal.get("target_outcome") or None
-        facts.append(_fact(
-            "success_criteria", val,
-            evidence="verified_structured_field" if val else "none",
-            confidence="medium" if val else "low",
-            source="linked_goal.target_outcome" if val else None,
-            note=None if val else "Linked goal has no target outcome.",
-            blocking=not bool(val),
-        ))
-
-    deadline = (t.get("deadline") or t.get("target_end_date")
-                or (snapshot.get("linked_goal") or {}).get("deadline"))
-    facts.append(_fact(
-        "target_date", deadline or None,
-        evidence="verified_structured_field" if deadline else "none",
-        confidence="high" if deadline else "low",
-        source=f"{target_type}.deadline",
-        note=None if deadline else "No target date on record.",
-        blocking=not bool(deadline),
-    ))
-
-    eos = snapshot["expected_outcomes"]
-    if eos:
-        completed = sum(1 for e in eos if e.get("status") == "completed")
-        facts.append(_fact(
-            "current_progress",
-            {"expected_outcomes_completed": completed,
-             "expected_outcomes_total": len(eos),
-             "pct": round(100 * completed / len(eos), 1) if eos else 0.0},
-            evidence="verified_structured_field", confidence="high",
-            source="expected_outcomes.status",
-        ))
-    else:
-        facts.append(_fact(
-            "current_progress", None,
-            evidence="none", confidence="low",
-            note="No Expected Outcomes exist yet.",
-        ))
-
-    ts = snapshot["tasks"]
-    facts.append(_fact(
-        "completed_and_active_work",
-        {
-            "tasks_total": len(ts),
-            "tasks_done": sum(1 for x in ts if x.get("status") == "done"),
-            "tasks_todo": sum(1 for x in ts if x.get("status") == "todo"),
-            "tasks_deferred": sum(1 for x in ts if x.get("status") == "deferred"),
-            "recent_checkins": len(snapshot["checkins"]),
-        },
-        evidence="verified_structured_field", confidence="high",
-        source="tasks + checkins (queried by relationship fields)",
-    ))
-
-    facts.append(_fact(
-        "constraints",
-        {
-            "time_commitments_count": len(snapshot["portfolio"]["time_commitments"]),
-            "monthly_money_commitments_count": len(snapshot["portfolio"]["monthly_money_commitments"]),
-            "active_goals_count": len(snapshot["portfolio"]["active_goals"]),
-            "active_projects_count": len(snapshot["portfolio"]["active_projects"]),
-        },
-        evidence="verified_structured_field", confidence="high",
-        source="portfolio",
-    ))
-
-    # Dependencies — Hymn does not model cross-object deps yet.
-    facts.append(_fact(
-        "dependencies", None,
-        evidence="none", confidence="low",
-        note="Hymn does not model cross-object dependencies.",
-    ))
-
-    return facts
-
-
-# ============================================================================
-# Time capacity — reuses ``compute_time_union_and_overlap`` per-day (§3).
-# ============================================================================
-
-def _time_capacity_summary(
-    snapshot: Dict[str, Any],
-    horizon_start: date_type,
-    horizon_end: date_type,
-) -> Dict[str, Any]:
-    """Deterministic per-day free-minute intervals across the planning
-    horizon. Never sums overlapping commitments. Respects
-    ``effective_from``/``effective_until`` on time_commitments and dated
-    resource_allocations. Returns ``capacity_status='unknown'`` when there
-    is no commitment coverage or the horizon is empty."""
-    if horizon_end < horizon_start:
-        return {"capacity_status": "unknown", "reason": "empty or invalid horizon"}
-
-    day = horizon_start
-    total_free = 0
-    days_with_commitments = 0
-    days_seen = 0
-    per_day: List[dict] = []
-    tcs = snapshot["portfolio"]["time_commitments"]
-    time_allocs = [a for a in snapshot["portfolio"]["resource_allocations"]
-                   if a.get("resource_type") == "time"
-                   and a.get("status") in ("reserved", "consumed")]
-
-    while day <= horizon_end:
-        day_iso = day.isoformat()
-        wd = _weekday_name(day)
-        intervals: List[Tuple[int, int]] = []
-
-        for tc in tcs:
-            if (tc.get("day_of_week") or "").lower() != wd:
-                continue
-            eff_from = tc.get("effective_from")
-            eff_until = tc.get("effective_until")
-            if eff_from and _is_iso_date(eff_from) and eff_from > day_iso:
-                continue
-            if eff_until and _is_iso_date(eff_until) and eff_until < day_iso:
-                continue
-            if tc.get("start_time") and tc.get("end_time"):
-                intervals.append((_hhmm_to_minutes(tc["start_time"]),
-                                  _hhmm_to_minutes(tc["end_time"])))
-
-        for a in time_allocs:
-            mode = a.get("allocation_mode")
-            if mode == "one_time":
-                if a.get("date") != day_iso:
-                    continue
-            elif mode == "recurring":
-                # Only affects if day_of_week matches.
-                if (a.get("day_of_week") or "").lower() != wd:
-                    continue
-            else:
-                continue
-            if a.get("start_time") and a.get("end_time"):
-                intervals.append((_hhmm_to_minutes(a["start_time"]),
-                                  _hhmm_to_minutes(a["end_time"])))
-
-        committed, _overlap = compute_time_union_and_overlap(intervals)
-        free = max(0, 1440 - committed)
-        if intervals:
-            days_with_commitments += 1
-        days_seen += 1
-        total_free += free
-        per_day.append({"date": day_iso, "free_minutes": free,
-                         "committed_minutes": committed})
-        day = day + timedelta(days=1)
-
-    # capacity_status=unknown if the user has no scheduled commitments at all
-    # across the horizon (§3 — treat missing coverage as unknown).
-    coverage_ok = days_with_commitments > 0
-    return {
-        "capacity_status": "known" if coverage_ok else "unknown",
-        "horizon_start": horizon_start.isoformat(),
-        "horizon_end": horizon_end.isoformat(),
-        "days": days_seen,
-        "total_free_minutes": total_free if coverage_ok else None,
-        "reason": None if coverage_ok else "no time commitments configured across horizon",
-        "per_day_preview": per_day[:14],  # first two weeks for LLM context
-    }
-
-
-# ============================================================================
-# Money capacity — per-currency, per-month (§4).
-# ============================================================================
-
-def _month_of(iso: str) -> Optional[str]:
-    if not _is_iso_date(iso):
-        return None
-    return iso[:7]
-
-
-def _money_capacity_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
-    """Per-currency, per-month availability. Never combines currencies.
-    Never replaces unknown due_date with today. Avoids double-counting
-    rows that carry both finance-lifecycle and canonical allocation
-    fields (only counted once as money reservation)."""
-    accounts = snapshot["portfolio"]["financial_accounts"]
-    monthly = snapshot["portfolio"]["monthly_money_commitments"]
-    allocations = snapshot["portfolio"]["resource_allocations"]
-
-    # Opening liquid balance per currency (liquidity_type == 'liquid').
-    liquid_by_cur: Dict[str, Decimal] = {}
-    for acc in accounts:
-        if acc.get("liquidity_type") == "liquid":
-            cur = acc.get("currency") or ""
-            liquid_by_cur[cur] = liquid_by_cur.get(cur, Decimal(0)) + _decimal_from_stored(
-                acc.get("current_value"))
-
-    # Reservations from resource_allocations — money type in reserved/expired.
-    # If a row carries a financial_commitment_id, it's the finance-lifecycle
-    # row and MUST be counted only once (we already query it as an alloc).
-    reserved_by_month: Dict[str, Dict[str, Decimal]] = {}
-    unknown_due_reservations: Dict[str, Decimal] = {}
-    for a in allocations:
-        if a.get("resource_type") != "money":
-            continue
-        state = a.get("state")
-        status = a.get("status")
-        # Include when either finance-state is reserved/expired OR canonical
-        # status=reserved (but never double count — a single row).
-        counts = (state in ("reserved", "expired")) or (status == "reserved")
-        if not counts:
-            continue
-        cur = a.get("currency") or ""
-        amt = _decimal_from_stored(a.get("amount") or a.get("quantity"))
-        due = a.get("due_date") or a.get("date")
-        m = _month_of(due) if due else None
-        if m is None:
-            unknown_due_reservations[cur] = unknown_due_reservations.get(cur, Decimal(0)) + amt
-        else:
-            reserved_by_month.setdefault(m, {})
-            reserved_by_month[m][cur] = reserved_by_month[m].get(cur, Decimal(0)) + amt
-
-    # Monthly money commitments — a repeating obligation per month.
-    monthly_by_cur: Dict[str, Decimal] = {}
-    for m in monthly:
-        cur = m.get("currency") or ""
-        amt = _decimal_from_stored(m.get("amount"))
-        monthly_by_cur[cur] = monthly_by_cur.get(cur, Decimal(0)) + amt
-
-    # Report by currency separately.
-    currencies = sorted(set(list(liquid_by_cur) + list(monthly_by_cur)
-                            + [c for m in reserved_by_month.values() for c in m]))
-    by_currency: List[dict] = []
-    for cur in currencies:
-        liq = liquid_by_cur.get(cur, Decimal(0))
-        monthly_amt = monthly_by_cur.get(cur, Decimal(0))
-        rows_per_month: Dict[str, str] = {}
-        for month, cur_map in sorted(reserved_by_month.items()):
-            if cur in cur_map:
-                rows_per_month[month] = str(cur_map[cur])
-        unknown = unknown_due_reservations.get(cur, Decimal(0))
-        by_currency.append({
-            "currency": cur,
-            "liquid_opening": str(liq),
-            "monthly_committed_per_month": str(monthly_amt),
-            "reserved_by_month": rows_per_month,
-            "reserved_with_unknown_due_date": str(unknown),
-        })
-
-    return {
-        "by_currency": by_currency,
-        "has_unknown_due_dates": any(v > 0 for v in unknown_due_reservations.values()),
-    }
-
-
-# ============================================================================
-# Resolved context — used both by the LLM and by downstream deterministic
-# calculators. Applied confirmations override inferred values.
-# ============================================================================
-
-def _apply_confirmations(current_state: List[dict], confirmations: Dict[str, dict]) -> List[dict]:
-    """Merge confirmations onto the current_state list. Never discards a
-    prior confirmation. Returns a new list; the input is unchanged."""
-    out: List[dict] = []
-    for f in current_state:
-        conf = confirmations.get(f["field"])
-        new = dict(f)
-        if conf:
-            action = conf.get("action")
-            if action == "confirm":
-                new["evidence"] = "explicit_user_confirmation"
-                new["confidence"] = "high"
-                new["blocking"] = False
-                new["confirmed_at"] = conf.get("recorded_at") or _now()
-            elif action == "edit":
-                new["value"] = conf.get("value")
-                new["evidence"] = "explicit_user_confirmation"
-                new["confidence"] = "high"
-                new["blocking"] = False
-                new["confirmed_at"] = conf.get("recorded_at") or _now()
-            elif action == "mark_unknown":
-                new["value"] = None
-                new["evidence"] = "none"
-                new["confidence"] = "low"
-                new["blocking"] = True
-                new["confirmed_at"] = conf.get("recorded_at") or _now()
-            elif action == "reject":
-                # A rejected inference means the user disagrees with what we
-                # inferred; it must be explicitly re-entered as edit before
-                # we can proceed.
-                new["value"] = None
-                new["evidence"] = "none"
-                new["confidence"] = "low"
-                new["blocking"] = True
-                new["rejected_at"] = conf.get("recorded_at") or _now()
-        out.append(new)
-    return out
-
-
-def _resolved_context(current_state: List[dict]) -> Dict[str, Any]:
-    """Build the compact generator context: field → confirmed value.
-    Blocking / unknown fields carry ``value=None`` so generation cannot invent."""
-    return {f["field"]: {
-        "value": f.get("value"),
-        "evidence_id": f.get("evidence_id"),
-        "evidence": f.get("evidence"),
-        "confidence": f.get("confidence"),
-        "blocking": bool(f.get("blocking")),
-    } for f in current_state}
-
-
-def _blocking_fields(current_state: List[dict]) -> List[str]:
-    return [f["field"] for f in current_state if f.get("blocking")]
-
-
-# ============================================================================
-# Compact generator context — never expose the raw full portfolio (§1C).
-# ============================================================================
-
-def _compact_llm_context(
-    snapshot: Dict[str, Any],
-    resolved: Dict[str, Any],
-    time_capacity: Dict[str, Any],
-    money_capacity: Dict[str, Any],
-) -> Dict[str, Any]:
-    target_type = snapshot["target_type"]
-    t = snapshot["target"]
-    ctx = {
-        "target_type": target_type,
-        "target_id": snapshot["target_id"],
-        "target_summary": {
-            "title": t.get("title"),
-            "domain_id": t.get("domain_id"),
-            "priority": t.get("priority"),
-            "notes": (t.get("notes") or "")[:500] or None,
-            "deadline": t.get("deadline") or t.get("target_end_date"),
-            "status": t.get("status"),
-        },
-        "resolved_context": resolved,
-        "existing_expected_outcomes": [
-            {"id": e["id"], "title": e.get("title"), "target_value": e.get("target_value"),
-             "deadline": e.get("deadline"), "status": e.get("status")}
-            for e in snapshot["expected_outcomes"]
-        ],
-        "existing_tasks": [
-            {"id": x["id"], "title": x.get("title"), "status": x.get("status"),
-             "due_date": x.get("due_date"), "component_id": x.get("component_id"),
-             "expected_outcome_id": x.get("expected_outcome_id")}
-            for x in snapshot["tasks"]
-        ],
-        "existing_knowledge_stages": [
-            {"id": s["id"], "title": s.get("title"), "order": s.get("order")}
-            for s in snapshot["knowledge_stages"]
-        ],
-        "existing_knowledge_components": [
-            {"id": c["id"], "title": c.get("title"), "stage_id": c.get("stage_id"),
-             "status": c.get("status")}
-            for c in snapshot["knowledge_components"]
-        ],
-        "capacity": {
-            "time": {
-                "status": time_capacity["capacity_status"],
-                "total_free_minutes": time_capacity.get("total_free_minutes"),
-                "days": time_capacity.get("days"),
-                "horizon_start": time_capacity.get("horizon_start"),
-                "horizon_end": time_capacity.get("horizon_end"),
-                "reason": time_capacity.get("reason"),
-            },
-            "money": money_capacity,
-        },
-        "portfolio_summary": {
-            "active_goals_count": len(snapshot["portfolio"]["active_goals"]),
-            "active_projects_count": len(snapshot["portfolio"]["active_projects"]),
-        },
-    }
-    return ctx
-
-
-# ============================================================================
-# Strict Pydantic generated-plan contract (§5).
-# ============================================================================
-
-class LLMResourceMoney(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    amount: Optional[str] = None  # decimal string
-    currency: Optional[str] = None
-    assumption_id: Optional[str] = None
-
-
-class LLMResources(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    time_minutes: Optional[int] = Field(default=None, ge=0)
-    money: Optional[LLMResourceMoney] = None
-    energy: Optional[str] = Field(default=None, pattern="^(low|medium|high|unknown)$")
-    attention: Optional[str] = Field(default=None, pattern="^(low|medium|high|unknown)$")
-    assumption_id: Optional[str] = None
-
-
-class LLMSchedule(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    day_of_week: Optional[str] = Field(
-        default=None,
-        pattern="^(monday|tuesday|wednesday|thursday|friday|saturday|sunday)$",
-    )
-    date: Optional[str] = None
-    start_time: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$")
-    end_time: Optional[str] = Field(default=None, pattern=r"^\d{2}:\d{2}$")
-    mode: Optional[str] = Field(default=None, pattern="^(one_time|recurring)$")
-
-
-class LLMProposedOutcome(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    proposal_ref: str
-    title: str
-    measurable_end_state: Optional[str] = None
-    completion_condition: Optional[str] = None
-    target_date: Optional[str] = None
-    evidence_ids: List[str] = []
-    assumption_id: Optional[str] = None
-
-
-class LLMProposedTask(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    proposal_ref: str
-    parent_outcome_ref: Optional[str] = None  # required for goal/journey (validated later)
-    component_ref: Optional[str] = None
-    reuse_existing_task_id: Optional[str] = None
-    title: str
-    action_and_deliverable: Optional[str] = None
-    completion_condition: str
-    owner: Optional[str] = "self"
-    depends_on: List[str] = []
-    earliest_start: Optional[str] = None
-    target_date: Optional[str] = None
-    required_resources: Optional[LLMResources] = None
-    schedule: Optional[LLMSchedule] = None
-    evidence_ids: List[str] = []
-    assumption_id: Optional[str] = None
-
-
-class LLMBlockingQuestion(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    field: str
-    question: str
-    why_blocking: Optional[str] = None
-
-
-class LLMAssumption(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    assumption_id: str
-    statement: str
-    range: Optional[str] = None
-    requires_user_confirmation: bool = True
-
-
-class LLMCheckIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    cadence: str = Field(pattern="^(daily|weekly|monthly|manual)$")
-    linked_to: str = Field(pattern="^(outcome|task|goal|project|journey)$")
-
-
-class LLMRisk(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    description: str
-    evidence_ids: List[str] = []
-    assumption_id: Optional[str] = None
-
-
-class LLMResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    objective_summary: str
-    measurable_success_criteria: Optional[str] = None
-    proposed_outcomes: List[LLMProposedOutcome] = []
-    proposed_tasks: List[LLMProposedTask] = []
-    proposed_check_ins: List[LLMCheckIn] = []
-    blocking_questions: List[LLMBlockingQuestion] = []
-    assumptions: List[LLMAssumption] = []
-    risks: List[LLMRisk] = []
-
-
-# ============================================================================
-# LLM prompt & call
-# ============================================================================
-
-_LLM_SYSTEM = (
-    "You are Hymn's Planning Interpreter. You never invent facts. "
-    "You must ground every proposed outcome, task, risk, and assumption in "
-    "evidence supplied in the resolved_context (via evidence_ids) or in an "
-    "explicit assumption you declare. You must not invent external sources; "
-    "external estimates are disabled. Output ONLY valid JSON conforming to "
-    "the LLMResponse schema described in the user message. If a required "
-    "value cannot be grounded, omit the field or reference an assumption_id "
-    "you also emit in the assumptions array. Never fabricate durations, "
-    "costs, dates, dependencies, or skills."
-)
-
-
-_LLM_INSTRUCTIONS = """You will receive:
-
-* target_type
-* target_id
-* target_summary
-* resolved_context : field → {value, evidence_id, confidence, blocking}
-* existing_expected_outcomes / tasks / knowledge_stages / knowledge_components
-* capacity : deterministic time + money summaries
-* portfolio_summary : counts only
-
-Return a JSON object with EXACTLY these keys:
-
-{
-  "objective_summary": "one sentence grounded in target_summary + resolved_context.objective",
-  "measurable_success_criteria": null OR the confirmed value from resolved_context,
-  "proposed_outcomes": [{
-    "proposal_ref": "unique per-proposal identifier",
-    "title": "...",
-    "measurable_end_state": "e.g. body_weight <= 70kg",
-    "completion_condition": "...",
-    "target_date": "YYYY-MM-DD or null",
-    "evidence_ids": ["<evidence_id from resolved_context>", ...],
-    "assumption_id": null OR "<id you also emit in assumptions[]>"
-  }],
-  "proposed_tasks": [{
-    "proposal_ref": "unique",
-    "parent_outcome_ref": "for goal/journey: proposal_ref of the parent outcome OR an existing outcome id",
-    "component_ref": "for journey: existing knowledge_component id OR null",
-    "reuse_existing_task_id": null OR "id of an existing task to reuse/update",
-    "title": "...",
-    "action_and_deliverable": "...",
-    "completion_condition": "measurable — no 'work on', 'research', 'stay consistent'",
-    "owner": "self",
-    "depends_on": ["proposal_ref of another proposed task"],
-    "earliest_start": "YYYY-MM-DD or null",
-    "target_date": "YYYY-MM-DD or null",
-    "required_resources": {
-      "time_minutes": integer OR null,
-      "money": {"amount": "decimal string" OR null, "currency": "USD" OR null, "assumption_id": null},
-      "energy": "low|medium|high|unknown OR null",
-      "attention": "low|medium|high|unknown OR null",
-      "assumption_id": null
-    },
-    "schedule": null OR {"mode": "one_time|recurring", "day_of_week": "monday|...",
-                          "date": "YYYY-MM-DD", "start_time": "HH:MM", "end_time": "HH:MM"},
-    "evidence_ids": [...],
-    "assumption_id": null OR "<id>"
-  }],
-  "proposed_check_ins": [{"cadence": "daily|weekly|monthly|manual", "linked_to": "outcome|task|goal|project|journey"}],
-  "blocking_questions": [{"field": "field name", "question": "...", "why_blocking": "..."}],
-  "assumptions": [{"assumption_id": "unique",
-                    "statement": "...",
-                    "range": "text range or null",
-                    "requires_user_confirmation": true}],
-  "risks": [{"description": "...", "evidence_ids": [...], "assumption_id": null}]
-}
-
-STRICT RULES:
-1. Only reference evidence_ids that exist in resolved_context.
-2. If time_minutes / money / energy / attention are not known, leave them null and declare an assumption_id.
-3. Every proposed task MUST include a measurable completion_condition. No 'research X', 'work on Y' phrasings.
-4. Every proposed task for a goal or journey must set parent_outcome_ref to a proposal_ref you also emit OR an existing expected_outcome id.
-5. Journey tasks that map to a Knowledge Component MUST set component_ref to that component id.
-6. Do NOT output external_estimates. External sources are unavailable.
-7. Do NOT invent public sources; declare an assumption instead.
-8. Reuse an existing task via reuse_existing_task_id when the proposed task duplicates an existing one.
-"""
-
-
-def _extract_json(text: str) -> Optional[dict]:
-    if not text:
-        return None
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        cand = m.group(1)
-    else:
-        start = text.find("{")
-        if start == -1:
-            return None
-        depth = 0
-        end = -1
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    break
-        if end == -1:
-            return None
-        cand = text[start:end]
-    try:
-        return json.loads(cand)
-    except json.JSONDecodeError:
+    except ValueError:
         return None
 
 
-def _generate_plan_locally(
-    compact_ctx: Dict[str, Any],
-    target_type: str,
-    target_id: str,
-) -> LLMResponse:
-    """Return a deterministic Foundation plan without network access.
-
-    The local generator preserves the response contract and useful confirmed
-    context, but deliberately refuses to invent outcomes, tasks, estimates,
-    or dependencies. A blocking question makes that limitation explicit and
-    prevents approval of an empty plan.
-    """
-    del target_id  # The target remains represented in compact_ctx.
-    resolved = compact_ctx.get("resolved_context") or {}
-    target_summary = compact_ctx.get("target_summary") or {}
-    objective = (resolved.get("objective") or {}).get("value")
-    success = (resolved.get("success_criteria") or {}).get("value")
-    risks: List[LLMRisk] = []
-
-    time_capacity = ((compact_ctx.get("capacity") or {}).get("time") or {})
-    if time_capacity.get("status") != "known":
-        risks.append(
-            LLMRisk(
-                description=(
-                    "Time capacity is unknown because the local portfolio "
-                    "does not contain enough scheduled commitment coverage."
-                ),
-            )
+def _money_context_value(value: Any, field: str) -> str:
+    if not isinstance(value, Decimal):
+        raise RuntimeError(
+            f"Canonical money field {field} must be Decimal; "
+            f"received {type(value).__name__}"
         )
-    money_capacity = ((compact_ctx.get("capacity") or {}).get("money") or {})
-    if money_capacity.get("has_unknown_due_dates"):
-        risks.append(
-            LLMRisk(
-                description=(
-                    "Some money reservations have unknown due dates, so "
-                    "monthly feasibility cannot be determined."
-                ),
-            )
-        )
+    if not value.is_finite():
+        raise RuntimeError(f"Canonical money field {field} must be finite")
+    return format(value, ".2f")
 
-    return LLMResponse(
-        objective_summary=str(objective or target_summary.get("title") or target_type.title()),
-        measurable_success_criteria=str(success) if success is not None else None,
-        blocking_questions=[
-            LLMBlockingQuestion(
-                field="plan_items",
-                question="Add or confirm concrete outcomes and tasks before approval.",
-                why_blocking=(
-                    "Foundation generation is local and deterministic; it "
-                    "does not invent plan items or estimates."
-                ),
-            )
-        ],
-        risks=risks,
-    )
 
+# ---------------------------------------------------------------------------
+# Context snapshot — kept small so we don't blow the LLM context.
+# ---------------------------------------------------------------------------
 
-# ============================================================================
-# Deterministic post-LLM validation & feasibility (§5, §7).
-# ============================================================================
 
-def _detect_cycles(tasks: List[dict]) -> List[List[str]]:
-    graph: Dict[str, List[str]] = {t["proposal_ref"]: [] for t in tasks}
-    for t in tasks:
-        for d in (t.get("depends_on") or []):
-            if d in graph:
-                graph[t["proposal_ref"]].append(d)
-    WHITE, GRAY, BLACK = 0, 1, 2
-    color: Dict[str, int] = {n: WHITE for n in graph}
-    stack: List[str] = []
-    cycles: List[List[str]] = []
-
-    def dfs(u: str) -> None:
-        color[u] = GRAY
-        stack.append(u)
-        for v in graph.get(u, []):
-            if color.get(v, WHITE) == GRAY and v in stack:
-                cycles.append(stack[stack.index(v):] + [v])
-            elif color.get(v, WHITE) == WHITE:
-                dfs(v)
-        color[u] = BLACK
-        stack.pop()
-
-    for n in list(graph):
-        if color[n] == WHITE:
-            dfs(n)
-    return cycles
-
-
-def _detect_duplicates_against_existing(
-    proposed_tasks: List[dict], existing_tasks: List[dict],
-) -> List[dict]:
-    """Return proposed tasks whose title matches an existing task's title
-    (case-insensitive) AND that don't already carry ``reuse_existing_task_id``."""
-    existing_by_title: Dict[str, str] = {}
-    for et in existing_tasks:
-        existing_by_title[(et.get("title") or "").strip().lower()] = et["id"]
-    dups: List[dict] = []
-    for pt in proposed_tasks:
-        if pt.get("reuse_existing_task_id"):
-            continue
-        key = (pt.get("title") or "").strip().lower()
-        if not key:
-            continue
-        if key in existing_by_title:
-            dups.append({
-                "proposal_ref": pt["proposal_ref"],
-                "title": pt["title"],
-                "existing_task_id": existing_by_title[key],
-            })
-    return dups
-
-
-def _validate_dependencies(proposed_tasks: List[dict]) -> List[str]:
-    refs = {t["proposal_ref"] for t in proposed_tasks}
-    problems: List[str] = []
-    for t in proposed_tasks:
-        for d in (t.get("depends_on") or []):
-            if d not in refs:
-                problems.append(f"task '{t['proposal_ref']}' depends on missing '{d}'")
-    return problems
-
-
-def _validate_evidence_refs(llm_out: LLMResponse, evidence_ids: set, assumption_ids: set) -> List[str]:
-    problems: List[str] = []
-    for o in llm_out.proposed_outcomes:
-        for eid in o.evidence_ids:
-            if eid not in evidence_ids:
-                problems.append(f"outcome '{o.proposal_ref}' references unknown evidence_id={eid}")
-        if o.assumption_id and o.assumption_id not in assumption_ids:
-            problems.append(f"outcome '{o.proposal_ref}' references unknown assumption_id={o.assumption_id}")
-    for t in llm_out.proposed_tasks:
-        for eid in t.evidence_ids:
-            if eid not in evidence_ids:
-                problems.append(f"task '{t.proposal_ref}' references unknown evidence_id={eid}")
-        if t.assumption_id and t.assumption_id not in assumption_ids:
-            problems.append(f"task '{t.proposal_ref}' references unknown assumption_id={t.assumption_id}")
-        if t.required_resources:
-            if t.required_resources.assumption_id and t.required_resources.assumption_id not in assumption_ids:
-                problems.append(f"task '{t.proposal_ref}' required_resources.assumption_id={t.required_resources.assumption_id} unknown")
-            if t.required_resources.money and t.required_resources.money.assumption_id and t.required_resources.money.assumption_id not in assumption_ids:
-                problems.append(f"task '{t.proposal_ref}' money assumption_id unknown")
-    for r in llm_out.risks:
-        for eid in r.evidence_ids:
-            if eid not in evidence_ids:
-                problems.append(f"risk references unknown evidence_id={eid}")
-        if r.assumption_id and r.assumption_id not in assumption_ids:
-            problems.append(f"risk references unknown assumption_id={r.assumption_id}")
-    return problems
-
-
-_BAD_TITLE_PATTERNS = ("research", "work on", "make progress", "stay consistent")
-
-
-def _validate_tasks_semantic(llm_out: LLMResponse, target_type: str) -> List[str]:
-    problems: List[str] = []
-    for t in llm_out.proposed_tasks:
-        if not t.completion_condition or t.completion_condition.strip() == "":
-            problems.append(f"task '{t.proposal_ref}' missing completion_condition")
-        lower = (t.title or "").lower()
-        if any(p in lower for p in _BAD_TITLE_PATTERNS) and not (t.completion_condition or "").strip():
-            problems.append(f"task '{t.proposal_ref}' vague title without measurable completion_condition")
-        # Dates
-        if t.earliest_start and not _is_iso_date(t.earliest_start):
-            problems.append(f"task '{t.proposal_ref}' has non-ISO earliest_start='{t.earliest_start}'")
-        if t.target_date and not _is_iso_date(t.target_date):
-            problems.append(f"task '{t.proposal_ref}' has non-ISO target_date='{t.target_date}'")
-        if t.earliest_start and t.target_date and _is_iso_date(t.earliest_start) and _is_iso_date(t.target_date):
-            if t.earliest_start > t.target_date:
-                problems.append(f"task '{t.proposal_ref}' earliest_start > target_date")
-        # goal/journey tasks need parent_outcome_ref
-        if target_type in ("goal", "journey") and not t.parent_outcome_ref:
-            problems.append(f"task '{t.proposal_ref}' missing parent_outcome_ref (required for {target_type})")
-    return problems
-
-
-def _validate_parent_outcome_refs(
-    llm_out: LLMResponse, existing_outcome_ids: set,
-) -> List[str]:
-    """Parent outcome refs must either point to a proposal_ref in the same
-    LLM response or to an existing expected_outcome id."""
-    proposed_refs = {o.proposal_ref for o in llm_out.proposed_outcomes}
-    problems: List[str] = []
-    for t in llm_out.proposed_tasks:
-        if t.parent_outcome_ref and t.parent_outcome_ref not in proposed_refs and t.parent_outcome_ref not in existing_outcome_ids:
-            problems.append(f"task '{t.proposal_ref}' parent_outcome_ref={t.parent_outcome_ref} not found in proposals or existing outcomes")
-    return problems
-
-
-def _validate_component_refs(llm_out: LLMResponse, existing_component_ids: set, target_type: str) -> List[str]:
-    problems: List[str] = []
-    if target_type != "journey":
-        return problems
-    for t in llm_out.proposed_tasks:
-        if t.component_ref and t.component_ref not in existing_component_ids:
-            problems.append(f"task '{t.proposal_ref}' component_ref={t.component_ref} not found")
-    return problems
-
-
-def _validate_reuse_targets(llm_out: LLMResponse, existing_task_ids: set) -> List[str]:
-    problems: List[str] = []
-    for t in llm_out.proposed_tasks:
-        if t.reuse_existing_task_id and t.reuse_existing_task_id not in existing_task_ids:
-            problems.append(f"task '{t.proposal_ref}' reuse_existing_task_id={t.reuse_existing_task_id} not found")
-    return problems
-
-
-def _feasibility(
-    llm_out: LLMResponse,
-    time_capacity: Dict[str, Any],
-    money_capacity: Dict[str, Any],
-    portfolio_conflicts: List[dict],
-) -> Dict[str, Any]:
-    """§7 feasibility grading — must be exactly one of the four statuses.
-
-    ``feasible`` is only allowed when EVERY task has known time / money /
-    energy / attention / dependencies + measurable completion + no
-    unresolved hard conflict AND time_capacity is known AND every
-    money-requiring task has a known currency and due date.
-    """
-    unknowns: List[str] = []
-    hard_conflict = False
-    tradeoffs: List[dict] = []
-
-    if time_capacity["capacity_status"] != "known":
-        unknowns.append("time_capacity_unknown")
-    if money_capacity.get("has_unknown_due_dates"):
-        unknowns.append("money_reservation_with_unknown_due_date")
-
-    total_free_min = time_capacity.get("total_free_minutes")
-    total_required_min = 0
-    money_needed_by_month_cur: Dict[Tuple[str, str], Decimal] = {}
-    for t in llm_out.proposed_tasks:
-        req = t.required_resources
-        if req is None:
-            unknowns.append(f"task '{t.proposal_ref}' required_resources missing")
-            continue
-        if req.time_minutes is None:
-            unknowns.append(f"task '{t.proposal_ref}' time_minutes unknown")
-        else:
-            total_required_min += req.time_minutes
-        if req.energy is None or req.energy == "unknown":
-            unknowns.append(f"task '{t.proposal_ref}' energy unknown")
-        if req.attention is None or req.attention == "unknown":
-            unknowns.append(f"task '{t.proposal_ref}' attention unknown")
-        if req.money and (req.money.amount or req.money.currency):
-            if not req.money.amount or not req.money.currency:
-                unknowns.append(f"task '{t.proposal_ref}' partial money (need amount+currency)")
-            else:
-                if not t.target_date or not _is_iso_date(t.target_date):
-                    unknowns.append(f"task '{t.proposal_ref}' money required but no due date")
-                    continue
-                m = _month_of(t.target_date)
-                key = (m, req.money.currency)
-                try:
-                    money_needed_by_month_cur[key] = money_needed_by_month_cur.get(key, Decimal(0)) + Decimal(req.money.amount)
-                except Exception:
-                    unknowns.append(f"task '{t.proposal_ref}' invalid money amount")
-
-    for c in portfolio_conflicts:
-        if c.get("kind") in ("dependency_cycle", "missing_dependency", "duplicate_task",
-                             "impossible_date", "parent_outcome_missing",
-                             "component_ref_missing", "reuse_target_missing"):
-            hard_conflict = True
-
-    # Time shortfall (only meaningful if capacity is known).
-    if total_free_min is not None and total_required_min > total_free_min:
-        tradeoffs.append({
-            "kind": "time_over_allocation",
-            "required_minutes": total_required_min,
-            "available_minutes": total_free_min,
-            "options": [
-                {"id": "extend_deadline", "action": "extend_deadline",
-                 "rationale": "brings weekly load under available capacity"},
-                {"id": "reduce_scope", "action": "reduce_scope",
-                 "rationale": "cut lowest-priority proposed tasks"},
-                {"id": "reallocate_time", "action": "reallocate_time_from_lower_priority",
-                 "rationale": "requires explicit user approval of the source"},
-            ],
-        })
-
-    # Money shortfall — per currency + month. We don't have full monthly
-    # inflow modeling; we only compare against liquid_opening as a strict
-    # lower bound.
-    money_by_cur = {row["currency"]: row for row in money_capacity["by_currency"]}
-    for (month, cur), needed in money_needed_by_month_cur.items():
-        row = money_by_cur.get(cur)
-        if not row:
-            unknowns.append(f"required currency {cur} has no known liquid position")
-            continue
-        liquid = Decimal(row.get("liquid_opening") or "0")
-        reserved_that_month = Decimal(row.get("reserved_by_month", {}).get(month, "0"))
-        available = liquid - reserved_that_month
-        if needed > available:
-            tradeoffs.append({
-                "kind": "money_over_allocation",
-                "currency": cur, "month": month,
-                "required": str(needed), "available": str(available),
-                "options": [
-                    {"id": "wait_for_income", "action": "wait_for_income",
-                     "rationale": "cannot spend beyond liquid+available"},
-                    {"id": "reduce_scope", "action": "reduce_scope",
-                     "rationale": "cut cost-bearing tasks"},
-                    {"id": "reallocate_money", "action": "reallocate_from_lower_priority_reservation",
-                     "rationale": "requires explicit user approval"},
-                ],
-            })
-
-    if unknowns:
-        return {"status": "unknown", "reasons": unknowns, "tradeoffs": [], "alternatives": []}
-    if hard_conflict:
-        return {"status": "not_currently_feasible",
-                "reasons": [c.get("kind") for c in portfolio_conflicts if c.get("kind")],
-                "tradeoffs": [], "alternatives": []}
-    if tradeoffs:
-        return {"status": "feasible_with_tradeoffs",
-                "reasons": [t["kind"] for t in tradeoffs],
-                "tradeoffs": tradeoffs,
-                "alternatives": tradeoffs,
-                "selected_tradeoff_id": None}
-    return {"status": "feasible", "reasons": [], "tradeoffs": [], "alternatives": []}
-
-
-# ============================================================================
-# Approval actions — built from the validated LLM response.
-# ============================================================================
-
-def _plan_actions(
-    llm_out: LLMResponse,
-    target_type: str,
-    target_id: str,
-    linked_goal_id: Optional[str],
-) -> List[dict]:
-    """Convert the validated LLM output into a strict list of approval
-    actions. Each action carries an ``action_id`` (proposal_ref + action)
-    so idempotency by (version, action_id) works during commit."""
-    actions: List[dict] = []
-    for o in llm_out.proposed_outcomes:
-        if target_type not in ("goal", "journey"):
-            continue
-        goal_id = target_id if target_type == "goal" else linked_goal_id
-        if not goal_id:
-            continue
-        actions.append({
-            "action_id": f"outcome:{o.proposal_ref}",
-            "action": "create_expected_outcome",
-            "proposal_ref": o.proposal_ref,
-            "payload": {
-                "goal_id": goal_id,
-                "title": o.title,
-                "target_value": o.measurable_end_state or "",
-                "current_value": "",
-                "unit": "",
-                "deadline": o.target_date if _is_iso_date(o.target_date or "") else "",
-                "status": "active",
-                "outcome_type": "generic",
-                "notes": o.completion_condition or "",
-            },
-        })
-    for t in llm_out.proposed_tasks:
-        if t.reuse_existing_task_id:
-            actions.append({
-                "action_id": f"reuse_task:{t.proposal_ref}",
-                "action": "update_task",
-                "proposal_ref": t.proposal_ref,
-                "existing_task_id": t.reuse_existing_task_id,
-                "payload": {
-                    "notes": (t.action_and_deliverable or "") + "\n\nCompletion: " + (t.completion_condition or ""),
-                    "due_date": t.target_date if _is_iso_date(t.target_date or "") else None,
-                },
-            })
-        else:
-            actions.append({
-                "action_id": f"task:{t.proposal_ref}",
-                "action": "create_task",
-                "proposal_ref": t.proposal_ref,
-                "parent_outcome_ref": t.parent_outcome_ref,
-                "component_ref": t.component_ref,
-                "depends_on_refs": t.depends_on,
-                "payload": {
-                    "title": t.title,
-                    "due_date": t.target_date if _is_iso_date(t.target_date or "") else "",
-                    "priority": "medium",
-                    "status": "todo",
-                    "notes": (t.action_and_deliverable or "") + "\n\nCompletion: " + (t.completion_condition or ""),
-                    "origin": {"goal": "expected_outcome",
-                                "journey": "expected_outcome",
-                                "project": "project"}.get(target_type, "standalone"),
-                },
-            })
-        # Time allocation, only when a valid schedule is present (§3).
-        sch = t.schedule
-        req = t.required_resources
-        duration = req.time_minutes if (req and req.time_minutes) else None
-        if sch and sch.mode and sch.start_time and sch.end_time and duration:
-            if sch.mode == "one_time" and _is_iso_date(sch.date or ""):
-                actions.append({
-                    "action_id": f"time_alloc:{t.proposal_ref}",
-                    "action": "create_time_allocation",
-                    "proposal_ref": t.proposal_ref,
-                    "attach_task": True,
-                    "payload": {
-                        "allocation_mode": "one_time",
-                        "date": sch.date,
-                        "day_of_week": None,
-                        "start_time": sch.start_time,
-                        "end_time": sch.end_time,
-                        "quantity": duration,
-                        "unit": "minutes",
-                        "status": "reserved",
-                    },
-                })
-            elif sch.mode == "recurring" and sch.day_of_week:
-                actions.append({
-                    "action_id": f"time_alloc:{t.proposal_ref}",
-                    "action": "create_time_allocation",
-                    "proposal_ref": t.proposal_ref,
-                    "attach_task": True,
-                    "payload": {
-                        "allocation_mode": "recurring",
-                        "date": None,
-                        "day_of_week": sch.day_of_week,
-                        "start_time": sch.start_time,
-                        "end_time": sch.end_time,
-                        "quantity": duration,
-                        "unit": "minutes",
-                        "status": "reserved",
-                    },
-                })
-        if req and req.money and req.money.amount and req.money.currency and _is_iso_date(t.target_date or ""):
-            actions.append({
-                "action_id": f"money_alloc:{t.proposal_ref}",
-                "action": "create_money_reservation",
-                "proposal_ref": t.proposal_ref,
-                "attach_task": True,
-                "payload": {
-                    "amount": req.money.amount,
-                    "currency": req.money.currency,
-                    "due_date": t.target_date,
-                    "priority": "medium",
-                    "title": f"Reserve for: {t.title}",
-                    "description": t.action_and_deliverable or "",
-                },
-            })
-    # Check-ins: map to Goal/Project cadence, do NOT create future completed check-ins.
-    if llm_out.proposed_check_ins:
-        # Pick strictest cadence linked to the target itself.
-        for c in llm_out.proposed_check_ins:
-            if c.linked_to in ("goal", "project", "journey") and target_type == c.linked_to:
-                actions.append({
-                    "action_id": f"cadence:{c.linked_to}:{c.cadence}",
-                    "action": "set_target_cadence",
-                    "payload": {"cadence": c.cadence},
-                })
-                break
-    return actions
-
-
-# ============================================================================
-# Proposal construction
-# ============================================================================
-
-async def _build_analyze(
-    db, user_id: str, target_type: str, target_id: str,
-) -> Dict[str, Any]:
-    """Deterministic-only analyze (§1A)."""
-    snapshot = await _read_snapshot(db, user_id, target_type, target_id)
-    current_state = _infer_current_state(snapshot)
-    snapshot_hash = _snapshot_hash(snapshot)
-    proposal_id = _uuid()
-    now = _now()
-    return {
-        "id": proposal_id,
-        "user_id": user_id,
-        "target_type": target_type,
-        "target_id": target_id,
-        "snapshot": snapshot,
-        "snapshot_hash": snapshot_hash,
-        "version": 1,
-        "status": "confirmation_required",
-        "current_state": current_state,
-        "confirmations": {},
-        "blocking_questions": [],
-        "proposed_outcomes": [],
-        "proposed_tasks": [],
-        "proposed_check_ins": [],
-        "visual_phases": [],
-        "resource_requirements": [],
-        "portfolio_conflicts": [],
-        "assumptions": [],
-        "external_estimates": [],  # always empty (§5)
-        "risks": [],
-        "feasibility": {"status": "unknown", "reasons": ["not_yet_generated"],
-                        "tradeoffs": [], "alternatives": []},
-        "approval_actions": [],
-        "evidence_map": [{"field": f["field"], "evidence_id": f["evidence_id"],
-                           "evidence": f["evidence"], "confidence": f["confidence"]}
-                          for f in current_state],
-        "validation_errors": [],
-        "commit_phase": None,
-        "committed_action_ids": [],
-        "selected_tradeoff_id": None,
-        "objective_summary": snapshot["target"].get("title") or None,
-        "measurable_success_criteria": None,
-        "created_at": now,
-        "updated_at": now,
-    }
-
-
-async def _build_generate(db, user_id: str, proposal: Dict[str, Any]) -> Dict[str, Any]:
-    """Take a confirmed proposal and generate the LLM proposal (§1C)."""
-    snapshot = proposal["snapshot"]
-    current_state = _apply_confirmations(proposal["current_state"], proposal.get("confirmations") or {})
-
-    # Blockers must be resolved.
-    still_blocking = _blocking_fields(current_state)
-    if still_blocking:
-        proposal["current_state"] = current_state
-        proposal["status"] = "blocking_input_required"
-        proposal["validation_errors"] = [f"blocking field unresolved: {f}" for f in still_blocking]
-        proposal["updated_at"] = _now()
-        return proposal
-
-    resolved = _resolved_context(current_state)
-
-    # Determine horizon from confirmed target_date.
-    target_date_raw = resolved.get("target_date", {}).get("value")
-    target_date = target_date_raw if _is_iso_date(target_date_raw or "") else None
-    today = datetime.now(timezone.utc).date()
-    horizon_end = _parse_date(target_date) if target_date else (today + timedelta(days=90))
-    if horizon_end < today:
-        horizon_end = today + timedelta(days=30)
-    time_capacity = _time_capacity_summary(snapshot, today, horizon_end)
-    money_capacity = _money_capacity_summary(snapshot)
-
-    compact = _compact_llm_context(snapshot, resolved, time_capacity, money_capacity)
-    llm_out = _generate_plan_locally(
-        compact,
-        snapshot["target_type"],
-        snapshot["target_id"],
-    )
-
-    validation_errors: List[str] = []
-    portfolio_conflicts: List[dict] = []
-    approval_actions: List[dict] = []
-
-    if llm_out:
-        # Evidence + assumption reference validation
-        evidence_ids = {f["evidence_id"] for f in current_state}
-        assumption_ids = {a.assumption_id for a in llm_out.assumptions}
-        validation_errors.extend(_validate_evidence_refs(llm_out, evidence_ids, assumption_ids))
-        validation_errors.extend(_validate_tasks_semantic(llm_out, snapshot["target_type"]))
-
-        existing_outcome_ids = {o["id"] for o in snapshot["expected_outcomes"]}
-        existing_task_ids = {t["id"] for t in snapshot["tasks"]}
-        existing_component_ids = {c["id"] for c in snapshot["knowledge_components"]}
-        validation_errors.extend(_validate_parent_outcome_refs(llm_out, existing_outcome_ids))
-        validation_errors.extend(_validate_component_refs(llm_out, existing_component_ids, snapshot["target_type"]))
-        validation_errors.extend(_validate_reuse_targets(llm_out, existing_task_ids))
-
-        # Dependencies
-        proposed_tasks_dict = [t.model_dump() for t in llm_out.proposed_tasks]
-        dep_problems = _validate_dependencies(proposed_tasks_dict)
-        validation_errors.extend(dep_problems)
-        cycles = _detect_cycles(proposed_tasks_dict)
-        for cyc in cycles:
-            portfolio_conflicts.append({"kind": "dependency_cycle", "cycle": cyc})
-        # Duplicates against existing
-        dups = _detect_duplicates_against_existing(proposed_tasks_dict, snapshot["tasks"])
-        for d in dups:
-            portfolio_conflicts.append({"kind": "duplicate_task", **d})
-
-        approval_actions = _plan_actions(
-            llm_out, snapshot["target_type"], snapshot["target_id"],
-            (snapshot.get("linked_goal") or {}).get("id"),
-        )
-    feasibility = _feasibility(
-        llm_out,
-        time_capacity,
-        money_capacity,
-        portfolio_conflicts,
-    )
-
-    # Roll-ups
-    resource_requirements: List[dict] = []
-    if llm_out:
-        total_min = 0
-        money_by_cur: Dict[str, Decimal] = {}
-        for t in llm_out.proposed_tasks:
-            if t.required_resources and t.required_resources.time_minutes:
-                total_min += t.required_resources.time_minutes
-            if t.required_resources and t.required_resources.money and t.required_resources.money.amount and t.required_resources.money.currency:
-                try:
-                    money_by_cur[t.required_resources.money.currency] = money_by_cur.get(t.required_resources.money.currency, Decimal(0)) + Decimal(t.required_resources.money.amount)
-                except Exception:
-                    pass
-        if total_min > 0:
-            resource_requirements.append({"kind": "time", "minutes": total_min,
-                                           "period": "over_horizon", "confidence": "medium"})
-        for cur, amt in money_by_cur.items():
-            resource_requirements.append({"kind": "money", "amount": str(amt),
-                                           "currency": cur, "period": "over_horizon",
-                                           "confidence": "medium"})
-
-    # Visual phases (month grouping)
-    visual_phases: List[dict] = []
-    if llm_out:
-        by_month: Dict[str, List[str]] = {}
-        for t in llm_out.proposed_tasks:
-            m = _month_of(t.earliest_start or t.target_date or "") or "unknown"
-            by_month.setdefault(m, []).append(t.title)
-        for month, titles in sorted(by_month.items()):
-            visual_phases.append({"label": f"Phase {month}", "tasks": titles})
-
-    proposal["current_state"] = current_state
-    proposal["proposed_outcomes"] = [o.model_dump() for o in (llm_out.proposed_outcomes if llm_out else [])]
-    proposal["proposed_tasks"] = [t.model_dump() for t in (llm_out.proposed_tasks if llm_out else [])]
-    proposal["proposed_check_ins"] = [c.model_dump() for c in (llm_out.proposed_check_ins if llm_out else [])]
-    proposal["blocking_questions"] = [q.model_dump() for q in (llm_out.blocking_questions if llm_out else [])]
-    proposal["assumptions"] = [a.model_dump() for a in (llm_out.assumptions if llm_out else [])]
-    proposal["risks"] = [r.model_dump() for r in (llm_out.risks if llm_out else [])]
-    proposal["portfolio_conflicts"] = portfolio_conflicts
-    proposal["visual_phases"] = visual_phases
-    proposal["resource_requirements"] = resource_requirements
-    proposal["feasibility"] = feasibility
-    proposal["approval_actions"] = approval_actions
-    proposal["validation_errors"] = validation_errors
-    proposal["objective_summary"] = (llm_out.objective_summary if llm_out
-                                      else snapshot["target"].get("title") or None)
-    proposal["measurable_success_criteria"] = (llm_out.measurable_success_criteria
-                                               if llm_out else None)
-    proposal["external_estimates"] = []
-
-    # Status determination
-    if validation_errors:
-        proposal["status"] = "blocking_input_required" if proposal["blocking_questions"] else "infeasible"
-    elif proposal["blocking_questions"]:
-        proposal["status"] = "blocking_input_required"
-    elif feasibility["status"] == "not_currently_feasible":
-        proposal["status"] = "infeasible"
-    elif feasibility["status"] == "unknown":
-        proposal["status"] = "blocking_input_required"
-    elif feasibility["status"] == "feasible_with_tradeoffs":
-        # Cannot approve until a trade-off is selected — but the proposal is
-        # otherwise fully generated. Represent as proposal_ready UI-side but
-        # gate approval on selected_tradeoff_id.
-        proposal["status"] = "proposal_ready"
-    else:
-        proposal["status"] = "proposal_ready"
-    proposal["updated_at"] = _now()
-    return proposal
-
-
-# ============================================================================
-# API models
-# ============================================================================
-
-class AnalyzeRequest(BaseModel):
-    target_type: str
-    target_id: str
-
-
-class ConfirmationEntry(BaseModel):
-    field: str
-    action: str
-    value: Any = None
-    note: Optional[str] = None
-
-
-class ConfirmRequest(BaseModel):
-    confirmations: List[ConfirmationEntry]
-
-
-class TradeoffRequest(BaseModel):
-    tradeoff_id: str
-
-
-class PauseRequest(BaseModel):
-    future_allocations: str
-
-
-# ============================================================================
-# Persistence helpers
-# ============================================================================
-
-async def _store_proposal(db, proposal: Dict[str, Any]) -> None:
-    await db.plan_proposals.replace_one(
-        {"id": proposal["id"]}, dict(proposal), upsert=True,
-    )
-
-
-async def _load_proposal(db, user_id: str, proposal_id: str) -> Dict[str, Any]:
-    doc = await db.plan_proposals.find_one(
-        {"id": proposal_id, "user_id": user_id}, {"_id": 0},
-    )
+async def _read_target(db, user_id: str, target_type: str, target_id: str) -> dict:
+    coll = {"goal": "goals", "project": "projects"}.get(target_type)
+    _require(coll is not None, f"Unsupported target_type: {target_type}")
+    doc = await db[coll].find_one({"id": target_id, "user_id": user_id}, {"_id": 0})
     if not doc:
-        raise HTTPException(status_code=404, detail="Proposal not found")
+        raise HTTPException(status_code=404, detail=f"{target_type.title()} not found")
     return doc
 
 
-def _slim(proposal: Dict[str, Any]) -> Dict[str, Any]:
-    """Strip the full snapshot from an API response payload."""
-    out = dict(proposal)
-    out.pop("snapshot", None)
-    return out
+async def _read_context(db, user_id: str, target_type: str, target_id: str) -> Dict[str, Any]:
+    """Portfolio-aware context: target + existing outcomes/tasks/check-ins +
+    other active goals/projects + time commitments + rough weekly capacity.
+    Kept compact so we don't blow the LLM context window."""
+    target = await _read_target(db, user_id, target_type, target_id)
+    if target_type == "goal":
+        outcomes = await db.expected_outcomes.find(
+            {"user_id": user_id, "goal_id": target_id}, {"_id": 0},
+        ).to_list(length=200)
+        eo_ids = [e["id"] for e in outcomes]
+        tasks = await db.tasks.find(
+            {"user_id": user_id, "expected_outcome_id": {"$in": eo_ids}}, {"_id": 0},
+        ).to_list(length=500) if eo_ids else []
+        checkins = await db.checkins.find(
+            {"user_id": user_id, "goal_id": target_id}, {"_id": 0},
+        ).sort("created_at", -1).to_list(length=25)
+    else:  # project
+        outcomes = []
+        tasks = await db.tasks.find(
+            {"user_id": user_id, "project_id": target_id}, {"_id": 0},
+        ).to_list(length=500)
+        checkins = await db.checkins.find(
+            {"user_id": user_id, "project_id": target_id}, {"_id": 0},
+        ).sort("created_at", -1).to_list(length=25)
 
+    # ---- Portfolio-wide context (other active goals, projects, time) ------
+    other_goals = await db.goals.find(
+        {"user_id": user_id, "id": {"$ne": target_id if target_type == "goal" else None},
+         "status": {"$in": ["active", "paused"]}},
+        {"_id": 0},
+    ).to_list(length=200)
+    other_projects = await db.projects.find(
+        {"user_id": user_id, "id": {"$ne": target_id if target_type == "project" else None},
+         "status": {"$in": ["active", "paused"]}},
+        {"_id": 0},
+    ).to_list(length=200)
 
-# ============================================================================
-# Endpoints
-# ============================================================================
+    # Batch 2B2 — canonical weekly capacity via time_service.
+    today = datetime.now(timezone.utc).date()
+    monday = today - timedelta(days=today.weekday())
+    from time_service import load_week_time_capacity  # noqa: WPS433
+    capacity = await load_week_time_capacity(db, user_id, monday.isoformat())
 
-@planning_router.post("/analyze")
-async def analyze(body: AnalyzeRequest, current_user: dict = Depends(get_current_user)):
-    """Deterministic-only. Returns status=confirmation_required. No LLM."""
-    db = get_db()
-    _require_in(body.target_type, TARGET_TYPES, "target_type")
-    existing = await db.plan_proposals.count_documents(
-        {"user_id": current_user["id"], "target_type": body.target_type,
-         "target_id": body.target_id},
-    )
-    proposal = await _build_analyze(db, current_user["id"], body.target_type, body.target_id)
-    proposal["version"] = existing + 1
-    await _store_proposal(db, proposal)
-    return _slim(proposal)
+    from money_service import load_availability  # noqa: WPS433
 
+    money_snapshot = await load_availability(db, user_id)
+    raw_by_currency = money_snapshot.get("by_currency")
+    pending_events = money_snapshot.get("pending_events")
 
-@planning_router.get("/proposals/{proposal_id}")
-async def get_proposal(proposal_id: str, current_user: dict = Depends(get_current_user)):
-    db = get_db()
-    doc = await _load_proposal(db, current_user["id"], proposal_id)
-    return _slim(doc)
+    if not isinstance(raw_by_currency, dict):
+        raise RuntimeError(
+            "Canonical money availability must contain a by_currency mapping"
+        )
+    if not isinstance(pending_events, list):
+        raise RuntimeError(
+            "Canonical money availability must contain a pending_events list"
+        )
 
-
-@planning_router.get("/proposals")
-async def list_proposals(
-    target_type: Optional[str] = Query(None),
-    target_id: Optional[str] = Query(None),
-    current_user: dict = Depends(get_current_user),
-):
-    db = get_db()
-    q: dict = {"user_id": current_user["id"]}
-    if target_type:
-        _require_in(target_type, TARGET_TYPES, "target_type")
-        q["target_type"] = target_type
-    if target_id:
-        q["target_id"] = target_id
-    docs = await db.plan_proposals.find(q, {"_id": 0, "snapshot": 0}).sort(
-        [("created_at", -1)]).to_list(length=200)
-    return docs
-
-
-@planning_router.post("/proposals/{proposal_id}/confirm")
-async def confirm_proposal(
-    proposal_id: str, body: ConfirmRequest, current_user: dict = Depends(get_current_user),
-):
-    """Batch-merge confirmations onto the proposal. Never discards prior
-    confirmations. Never calls the LLM."""
-    db = get_db()
-    proposal = await _load_proposal(db, current_user["id"], proposal_id)
-    _require(
-        proposal.get("status") not in ("approved", "rejected", "abandoned"),
-        f"Cannot confirm — proposal is {proposal.get('status')}",
-    )
-    now = _now()
-    merged = dict(proposal.get("confirmations") or {})
-    for c in body.confirmations:
-        _require_in(c.action, CONFIRMATION_ACTIONS, "action")
-        # Only overwrite the field the user is touching now; prior
-        # confirmations for other fields are preserved.
-        merged[c.field] = {
-            "action": c.action,
-            "value": c.value,
-            "note": c.note,
-            "recorded_at": now,
-        }
-    proposal["confirmations"] = merged
-    # Re-derive current_state view with merged confirmations applied.
-    proposal["current_state"] = _apply_confirmations(proposal["current_state"], merged)
-    # Status: still confirmation_required if any blocking remain.
-    still_blocking = _blocking_fields(proposal["current_state"])
-    proposal["status"] = "confirmation_required" if still_blocking else "blocking_input_required"
-    # blocking_input_required is the "ready to generate" gate — the user can
-    # now hit /generate. If ALL blockers are resolved and no /generate has
-    # been called yet, status stays at blocking_input_required until the LLM
-    # runs.
-    if not still_blocking:
-        # Mark as ready-to-generate — the frontend polls / triggers /generate.
-        proposal["status"] = "confirmation_required"
-        proposal["ready_to_generate"] = True
-    else:
-        proposal["ready_to_generate"] = False
-    proposal["updated_at"] = now
-    await _store_proposal(db, proposal)
-    return _slim(proposal)
-
-
-@planning_router.post("/proposals/{proposal_id}/generate")
-async def generate_proposal(proposal_id: str, current_user: dict = Depends(get_current_user)):
-    """Generate locally with deterministic validation (§1C).
-
-    Only permitted once all current-state blockers are resolved.
-    """
-    db = get_db()
-    proposal = await _load_proposal(db, current_user["id"], proposal_id)
-    _require(
-        proposal.get("status") not in ("approved", "rejected", "abandoned"),
-        f"Cannot generate — proposal is {proposal.get('status')}",
-    )
-    # Ensure confirmations applied and no blockers remain.
-    proposal["current_state"] = _apply_confirmations(
-        proposal["current_state"], proposal.get("confirmations") or {},
-    )
-    still_blocking = _blocking_fields(proposal["current_state"])
-    if still_blocking:
-        proposal["status"] = "confirmation_required"
-        proposal["validation_errors"] = [f"blocking field unresolved: {f}" for f in still_blocking]
-        proposal["updated_at"] = _now()
-        await _store_proposal(db, proposal)
-        return _slim(proposal)
-
-    proposal["status"] = "generating"
-    proposal["updated_at"] = _now()
-    await _store_proposal(db, proposal)
-
-    generated = await _build_generate(db, current_user["id"], proposal)
-    await _store_proposal(db, generated)
-    return _slim(generated)
-
-
-@planning_router.post("/proposals/{proposal_id}/select-tradeoff")
-async def select_tradeoff(
-    proposal_id: str, body: TradeoffRequest, current_user: dict = Depends(get_current_user),
-):
-    """User selects a trade-off from the feasibility.alternatives list. The
-    trade-off id is persisted; approval remains blocked for
-    feasible_with_tradeoffs proposals until this call succeeds."""
-    db = get_db()
-    proposal = await _load_proposal(db, current_user["id"], proposal_id)
-    _require(
-        proposal.get("feasibility", {}).get("status") == "feasible_with_tradeoffs",
-        "select-tradeoff only applies to feasible_with_tradeoffs proposals",
-    )
-    alts = proposal.get("feasibility", {}).get("alternatives") or []
-    valid_ids: List[str] = []
-    for a in alts:
-        for opt in (a.get("options") or []):
-            valid_ids.append(opt.get("id"))
-    _require(body.tradeoff_id in valid_ids,
-             f"tradeoff_id must be one of {valid_ids}")
-    proposal["feasibility"]["selected_tradeoff_id"] = body.tradeoff_id
-    proposal["selected_tradeoff_id"] = body.tradeoff_id
-    proposal["updated_at"] = _now()
-    await _store_proposal(db, proposal)
-    return _slim(proposal)
-
-
-# ============================================================================
-# Approval commit — safe state machine (§8).
-# ============================================================================
-
-async def _commit_actions(
-    db, user_id: str, proposal: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Durable commit: preparing → applying → committed / failed. Uses
-    ``plan_action_log`` for per-action idempotency by
-    ``(proposal_version, action_id)``."""
-    now = _now()
-    proposal_id = proposal["id"]
-    version = proposal.get("version", 1)
-    proposal["commit_phase"] = "applying"
-    await _store_proposal(db, proposal)
-
-    actions = proposal.get("approval_actions") or []
-    log_entries: List[dict] = []
-    task_id_by_ref: Dict[str, str] = {}
-    outcome_id_by_ref: Dict[str, str] = {}
-
-    async def _rollback():
-        for entry in reversed(log_entries):
-            try:
-                if entry["kind"] == "expected_outcome":
-                    await db.expected_outcomes.delete_one({"id": entry["created_id"]})
-                elif entry["kind"] == "task":
-                    await db.tasks.delete_one({"id": entry["created_id"]})
-                elif entry["kind"] == "resource_allocation":
-                    await db.resource_allocations.delete_one({"id": entry["created_id"]})
-                await db.plan_action_log.delete_one(
-                    {"proposal_id": proposal_id, "version": version,
-                     "action_id": entry["action_id"]},
-                )
-            except Exception:
-                pass
-
-    try:
-        # Try Mongo multi-document transaction where the deployment supports it.
-        session = None
-        supports_tx = False
-        try:
-            client = db.client if hasattr(db, "client") else None
-            if client is not None:
-                session = await client.start_session()
-                # We don't actually enter a tx here because Motor's context
-                # manager requires start_transaction; single-node deployments
-                # (default local mongo) don't support it. We fall back to the
-                # state-machine + compensating rollback below.
-                await session.end_session()
-                session = None
-        except Exception:
-            session = None
-        _ = supports_tx  # explicit no-op — state machine path handles both.
-
-        # First pass — outcomes + tasks (they need to exist before allocations
-        # can attach owners and before parent_outcome refs can resolve).
-        for act in actions:
-            action = act["action"]
-            action_id = act["action_id"]
-            # Idempotency check by (version, action_id).
-            existing = await db.plan_action_log.find_one(
-                {"proposal_id": proposal_id, "version": version, "action_id": action_id},
+    for currency in raw_by_currency:
+        if not isinstance(currency, str) or not currency.strip():
+            raise RuntimeError(
+                "Canonical money availability contains an invalid currency"
             )
-            if existing:
-                if existing["kind"] == "task":
-                    task_id_by_ref[act["proposal_ref"]] = existing["created_id"]
-                elif existing["kind"] == "expected_outcome":
-                    outcome_id_by_ref[act["proposal_ref"]] = existing["created_id"]
-                continue
 
-            if action == "create_expected_outcome":
-                eo_id = _uuid()
-                await db.expected_outcomes.insert_one({
-                    "id": eo_id,
-                    "user_id": user_id,
-                    **act["payload"],
-                    "created_at": now,
-                    "updated_at": now,
-                })
-                outcome_id_by_ref[act["proposal_ref"]] = eo_id
-                log_entries.append({"kind": "expected_outcome",
-                                     "created_id": eo_id, "action_id": action_id})
-                await db.plan_action_log.insert_one({
-                    "proposal_id": proposal_id, "version": version,
-                    "action_id": action_id, "kind": "expected_outcome",
-                    "created_id": eo_id, "user_id": user_id, "created_at": now,
-                })
-            elif action == "create_task":
-                task_id = _uuid()
-                # Resolve parent_outcome_ref → real outcome id.
-                parent = act.get("parent_outcome_ref")
-                resolved_eo_id: Optional[str] = None
-                if parent:
-                    resolved_eo_id = outcome_id_by_ref.get(parent, parent)
-                # Journeys: preserve component_ref as component_id.
-                comp_id = act.get("component_ref")
-                origin = act["payload"].get("origin") or "standalone"
-                doc = {
-                    "id": task_id,
-                    "user_id": user_id,
-                    "title": act["payload"]["title"],
-                    "due_date": act["payload"].get("due_date", ""),
-                    "priority": act["payload"].get("priority", "medium"),
-                    "status": "todo",
-                    "notes": act["payload"].get("notes", ""),
-                    "origin": origin,
-                    "expected_outcome_id": resolved_eo_id if proposal["target_type"] in ("goal", "journey") else None,
-                    "project_id": proposal["target_id"] if proposal["target_type"] == "project" else None,
-                    "component_id": comp_id if proposal["target_type"] == "journey" else None,
-                    "assigned_to_type": "self",
-                    "assigned_to_name": "",
-                    "assigned_to_phone": "",
-                    "deferred_until": None,
-                    "original_due_date": None,
-                    "defer_count": 0,
-                    "depends_on_task_ids": [],  # will be back-filled after all tasks created
-                    "created_at": now,
-                    "updated_at": now,
-                }
-                await db.tasks.insert_one(doc)
-                task_id_by_ref[act["proposal_ref"]] = task_id
-                log_entries.append({"kind": "task", "created_id": task_id, "action_id": action_id})
-                await db.plan_action_log.insert_one({
-                    "proposal_id": proposal_id, "version": version,
-                    "action_id": action_id, "kind": "task",
-                    "created_id": task_id, "user_id": user_id, "created_at": now,
-                })
-            elif action == "update_task":
-                existing_id = act.get("existing_task_id")
-                if not existing_id:
-                    raise ValueError("update_task requires existing_task_id")
-                await db.tasks.update_one(
-                    {"id": existing_id, "user_id": user_id},
-                    {"$set": {**{k: v for k, v in act["payload"].items() if v is not None},
-                               "updated_at": now}},
-                )
-                task_id_by_ref[act["proposal_ref"]] = existing_id
-                log_entries.append({"kind": "task_update", "created_id": existing_id,
-                                     "action_id": action_id})
-                await db.plan_action_log.insert_one({
-                    "proposal_id": proposal_id, "version": version,
-                    "action_id": action_id, "kind": "task_update",
-                    "created_id": existing_id, "user_id": user_id, "created_at": now,
-                })
-
-        # Second pass — allocations (need task_ids from first pass).
-        for act in actions:
-            action = act["action"]
-            action_id = act["action_id"]
-            if action in ("create_expected_outcome", "create_task", "update_task",
-                           "set_target_cadence"):
-                continue
-            existing = await db.plan_action_log.find_one(
-                {"proposal_id": proposal_id, "version": version, "action_id": action_id},
+    money_by_currency: List[Dict[str, str]] = []
+    for currency in sorted(raw_by_currency):
+        row = raw_by_currency[currency]
+        if not isinstance(row, dict):
+            raise RuntimeError(
+                f"Canonical money availability row for {currency} must be a mapping"
             )
-            if existing:
-                continue
+        money_by_currency.append({
+            "currency": currency,
+            "liquid_effective": _money_context_value(
+                row.get("liquid_effective"),
+                f"{currency}.liquid_effective",
+            ),
+            "reserved": _money_context_value(
+                row.get("reserved"),
+                f"{currency}.reserved",
+            ),
+            "available_unreserved": _money_context_value(
+                row.get("available_unreserved"),
+                f"{currency}.available_unreserved",
+            ),
+        })
 
-            if action == "create_time_allocation":
-                task_id = task_id_by_ref.get(act.get("proposal_ref"))
-                if act.get("attach_task") and not task_id:
-                    raise ValueError(f"time allocation for {act['proposal_ref']} missing owner task")
-                alloc_id = _uuid()
-                p = act["payload"]
-                await db.resource_allocations.insert_one({
-                    "id": alloc_id,
-                    "user_id": user_id,
-                    "resource_type": "time",
-                    "owner_type": "task" if task_id else "standalone",
-                    "owner_id": task_id,
-                    "allocation_mode": p["allocation_mode"],
-                    "date": p.get("date"),
-                    "day_of_week": p.get("day_of_week"),
-                    "start_time": p["start_time"],
-                    "end_time": p["end_time"],
-                    "quantity": p["quantity"],
-                    "unit": "minutes",
-                    "currency": None,
-                    "status": "reserved",
-                    "fixed_or_flexible": "flexible",
-                    "created_at": now,
-                    "updated_at": now,
-                })
-                log_entries.append({"kind": "resource_allocation",
-                                     "created_id": alloc_id, "action_id": action_id})
-                await db.plan_action_log.insert_one({
-                    "proposal_id": proposal_id, "version": version,
-                    "action_id": action_id, "kind": "resource_allocation",
-                    "created_id": alloc_id, "user_id": user_id, "created_at": now,
-                })
-            elif action == "create_money_reservation":
-                task_id = task_id_by_ref.get(act.get("proposal_ref"))
-                if act.get("attach_task") and not task_id:
-                    raise ValueError(f"money reservation for {act['proposal_ref']} missing owner task")
-                alloc_id = _uuid()
-                fc_id = _uuid()
-                p = act["payload"]
-                amt = Decimal128(Decimal(p["amount"]))
-                await db.resource_allocations.insert_one({
-                    "id": alloc_id,
-                    "user_id": user_id,
-                    "resource_type": "money",
-                    "owner_type": "task" if task_id else "standalone",
-                    "owner_id": task_id,
-                    "allocation_mode": "one_time",
-                    "date": p["due_date"],
-                    "day_of_week": None,
-                    "start_time": None,
-                    "end_time": None,
-                    "quantity": amt,
-                    "unit": "currency",
-                    "currency": p["currency"],
-                    "status": "reserved",
-                    "fixed_or_flexible": "fixed",
-                    "financial_commitment_id": fc_id,
-                    "state": "reserved",
-                    "title": p.get("title", ""),
-                    "description": p.get("description", ""),
-                    "amount": amt,
-                    "due_date": p["due_date"],
-                    "original_due_date": p["due_date"],
-                    "priority": p.get("priority", "medium"),
-                    "domain_id": None,
-                    "goal_id": proposal["target_id"] if proposal["target_type"] == "goal" else None,
-                    "project_id": proposal["target_id"] if proposal["target_type"] == "project" else None,
-                    "task_id": task_id,
-                    "resource_allocation_id": alloc_id,
-                    "actual_amount": None, "variance": None, "unused_reservation": None,
-                    "overrun_amount": None, "completed_at": None, "cancelled_at": None,
-                    "postpone_count": 0, "last_reviewed_at": None, "next_review_date": None,
-                    "source": "planning_engine",
-                    "created_at": now, "updated_at": now,
-                })
-                log_entries.append({"kind": "resource_allocation",
-                                     "created_id": alloc_id, "action_id": action_id})
-                await db.plan_action_log.insert_one({
-                    "proposal_id": proposal_id, "version": version,
-                    "action_id": action_id, "kind": "resource_allocation",
-                    "created_id": alloc_id, "user_id": user_id, "created_at": now,
-                })
-            elif action == "set_target_cadence":
-                p = act["payload"]
-                coll = {"goal": "goals", "project": "projects",
-                         "journey": "knowledge_journeys"}[proposal["target_type"]]
-                await db[coll].update_one(
-                    {"id": proposal["target_id"], "user_id": user_id},
-                    {"$set": {"checkin_cadence": p["cadence"], "updated_at": now}},
-                )
-                log_entries.append({"kind": "target_cadence",
-                                     "created_id": proposal["target_id"], "action_id": action_id})
-                await db.plan_action_log.insert_one({
-                    "proposal_id": proposal_id, "version": version,
-                    "action_id": action_id, "kind": "target_cadence",
-                    "created_id": proposal["target_id"], "user_id": user_id, "created_at": now,
-                })
-            else:
-                raise ValueError(f"unsupported action: {action}")
+    money_capacity = {
+        "by_currency": money_by_currency,
+        "pending_event_count": len(pending_events),
+        "has_pending_events": len(pending_events) > 0,
+        "capacity_basis": (
+            "effective_liquid_balances_minus_active_reservations"
+        ),
+    }
 
-        # Third pass — resolve depends_on_task_ids on newly created tasks.
-        for act in actions:
-            if act["action"] != "create_task":
-                continue
-            refs = act.get("depends_on_refs") or []
-            if not refs:
-                continue
-            task_id = task_id_by_ref.get(act["proposal_ref"])
-            if not task_id:
-                continue
-            dep_ids = [task_id_by_ref[r] for r in refs if r in task_id_by_ref]
-            if dep_ids:
-                await db.tasks.update_one(
-                    {"id": task_id, "user_id": user_id},
-                    {"$set": {"depends_on_task_ids": dep_ids, "updated_at": now}},
-                )
+    # Time commitments (recurring weekly). Only include currently-effective
+    # ones (effective_from <= today AND (effective_until is null or >= today)).
+    today_iso = today.isoformat()
+    time_commitments = await db.time_commitments.find(
+        {"user_id": user_id, "effective_from": {"$lte": today_iso}},
+        {"_id": 0},
+    ).to_list(length=500)
+    time_commitments = [
+        tc for tc in time_commitments
+        if not tc.get("effective_until") or tc["effective_until"] >= today_iso
+    ]
 
-    except Exception as exc:
-        await _rollback()
-        proposal["commit_phase"] = "failed"
-        proposal["status"] = "proposal_ready"  # allow retry
-        proposal["updated_at"] = _now()
-        proposal["validation_errors"] = [
-            *(proposal.get("validation_errors") or []),
-            f"commit failed: {type(exc).__name__}: {exc}",
-        ]
-        await _store_proposal(db, proposal)
-        raise HTTPException(status_code=500, detail=f"Approval failed: {type(exc).__name__}: {exc}")
+    weekly_capacity = {
+        # Legacy keys — kept so downstream compatibility never breaks.
+        "committed_hours_per_week": round(capacity["committed_minutes"] / 60.0, 1),
+        "free_hours_per_week_estimate": round(capacity["available_minutes"] / 60.0, 1),
+        # Batch 2B2 — canonical decomposition.
+        "baseline_committed_hours_per_week": round(capacity["baseline_committed_minutes"] / 60.0, 1),
+        "reserved_hours_per_week": round(capacity["reserved_minutes"] / 60.0, 1),
+        "overlapping_hours_per_week": round(capacity["overlapping_minutes"] / 60.0, 1),
+        "capacity_basis": "recorded_commitments_and_active_reservations",
+        "is_estimate": True,
+    }
 
-    proposal["commit_phase"] = "committed"
-    proposal["status"] = "approved"
-    proposal["approved_at"] = now
-    proposal["updated_at"] = now
-    proposal["committed_action_ids"] = [e["created_id"] for e in log_entries]
-    await _store_proposal(db, proposal)
+    # Count active tasks with due dates across the user (workload heat).
+    upcoming_task_count = await db.tasks.count_documents({
+        "user_id": user_id,
+        "status": {"$nin": ["done", "cancelled"]},
+        "due_date": {"$ne": ""},
+    })
+
     return {
-        "status": "approved",
-        "committed_actions": len(log_entries),
-        "created_expected_outcomes": list(outcome_id_by_ref.values()),
-        "created_tasks": list(task_id_by_ref.values()),
+        "target_type": target_type,
+        "target": {
+            "id": target["id"],
+            "title": target.get("title"),
+            "notes": (target.get("notes") or "")[:1000],
+            "deadline": target.get("deadline") or target.get("target_end_date") or "",
+            "status": target.get("status"),
+            "priority": target.get("priority"),
+            "checkin_cadence": target.get("checkin_cadence") or "",
+            "journey_type": target.get("journey_type") or "",
+            "commitment_type": target.get("commitment_type") or "postponable",
+        },
+        "expected_outcomes": [
+            {"id": e["id"], "title": e.get("title"), "status": e.get("status"),
+             "target_value": e.get("target_value"), "current_value": e.get("current_value"),
+             "unit": e.get("unit"), "deadline": e.get("deadline")}
+            for e in outcomes
+        ],
+        "tasks": [
+            {"id": t["id"], "title": t.get("title"), "status": t.get("status"),
+             "priority": t.get("priority"), "due_date": t.get("due_date"),
+             "expected_outcome_id": t.get("expected_outcome_id"),
+             "commitment_type": t.get("commitment_type") or "postponable"}
+            for t in tasks
+        ],
+        "checkins_recent": [
+            {"date": c.get("date"), "title": c.get("title"), "notes": (c.get("notes") or "")[:200]}
+            for c in checkins
+        ],
+        "other_goals": [
+            {"id": g["id"], "title": g.get("title"), "domain_name": g.get("domain_name") or "",
+             "deadline": g.get("deadline"), "status": g.get("status"),
+             "commitment_type": g.get("commitment_type") or "postponable",
+             "checkin_cadence": g.get("checkin_cadence") or ""}
+            for g in other_goals
+        ],
+        "other_projects": [
+            {"id": p["id"], "title": p.get("title"),
+             "start_date": p.get("start_date"), "target_end_date": p.get("target_end_date"),
+             "status": p.get("status"),
+             "commitment_type": p.get("commitment_type") or "postponable"}
+            for p in other_projects
+        ],
+        "time_commitments": [
+            {"id": tc["id"], "title": tc.get("title"),
+             "day_of_week": tc.get("day_of_week"), "start_time": tc.get("start_time"),
+             "end_time": tc.get("end_time"), "commitment_type": tc.get("commitment_type"),
+             "flexibility": tc.get("flexibility") or "flexible"}
+            for tc in time_commitments
+        ],
+        "weekly_capacity": weekly_capacity,
+        "money_capacity": money_capacity,
+        "upcoming_task_count": upcoming_task_count,
     }
 
 
-@planning_router.post("/proposals/{proposal_id}/approve")
-async def approve_proposal(proposal_id: str, current_user: dict = Depends(get_current_user)):
-    db = get_db()
-    proposal = await _load_proposal(db, current_user["id"], proposal_id)
-    _require(proposal["status"] == "proposal_ready",
-             f"Approve requires status=proposal_ready (current={proposal['status']})")
-    _require(not proposal.get("validation_errors"),
-             f"Cannot approve — validation_errors: {proposal.get('validation_errors')}")
-    feas = proposal.get("feasibility", {}).get("status")
-    _require(feas in ("feasible", "feasible_with_tradeoffs"),
-             f"Cannot approve — feasibility={feas}")
-    if feas == "feasible_with_tradeoffs":
-        _require(proposal.get("selected_tradeoff_id") or proposal.get("feasibility", {}).get("selected_tradeoff_id"),
-                 "Select a trade-off before approving (feasible_with_tradeoffs)")
+# ---------------------------------------------------------------------------
+# LLM
+# ---------------------------------------------------------------------------
 
-    # Snapshot-drift check.
-    live_snapshot = await _read_snapshot(
-        db, current_user["id"], proposal["target_type"], proposal["target_id"],
+_SYSTEM_PROMPT = """You are Hymn's Planning Copilot — a warm, practical, senior coach who
+helps the user decompose a Goal or Project into concrete Expected Outcomes,
+Tasks, and Check-ins that enrich what they already have. You do NOT create
+new goals or parallel plans; you always add to (or refine) the existing
+target the user is planning.
+
+You have access to the `web_search` tool. Use it sparingly and only when a
+question would genuinely benefit from up-to-date external information
+(e.g. current best practices for a professional certification, syllabus for
+a course, benchmark timelines). Never invent citations. If web_search is
+unavailable or returns nothing useful, say so plainly and keep going with
+what you know.
+
+CAPACITY & PORTFOLIO AWARENESS (CRITICAL):
+You are given the user's OTHER active goals, projects, and weekly TIME
+COMMITMENTS in the context prelude. Before proposing new work, quickly
+consider whether the user has the time / mental bandwidth for it.
+- Rough weekly free capacity is provided; typical sustainable output is
+  ~8–15 hours/week on optional pursuits after work + sleep + routines.
+- If the plan you're about to propose would exceed the user's realistic
+  free capacity given everything else running, DO NOT silently pretend
+  it fits. Tell the user honestly, name 1–3 SPECIFIC other items in
+  their portfolio that could be POSTPONED or CANCELLED to make room,
+  and offer them the choice. NEVER suggest touching items whose
+  commitment_type is "exclusive" (a booked movie ticket, a scheduled
+  surgery, a fixed exam date) — those are non-negotiable; find room
+  elsewhere or advise scaling this new plan down.
+
+MONEY CAPACITY (CRITICAL):
+You may receive canonical money-capacity rows, one per currency. For every
+currency:
+- `liquid_effective` is the user's effective liquid money before active
+  reservations are deducted.
+- `reserved` is already committed and is not available for a new plan.
+- `available_unreserved` is the only amount you may treat as currently
+  available for a new purchase or money-dependent proposal.
+- Never add, net, compare, or convert amounts across different currencies.
+- Never invent an exchange rate, account balance, income, liability, asset,
+  reservation, purchase price, financing offer, interest rate, or repayment
+  capacity.
+- A web-search price is an external estimate. It is not evidence that the
+  user can afford the purchase and must never replace `available_unreserved`.
+- When a stated or externally estimated cost exceeds
+  `available_unreserved` in the same currency, say plainly that the purchase
+  does not currently fit the recorded available money. Offer only explicit
+  alternatives such as changing timing, reducing scope, building savings,
+  or exploring financing assumptions with the user.
+- When the purchase currency is missing, ask for it. Do not select one.
+- When no canonical position exists for the relevant currency, say that
+  affordability cannot yet be assessed and ask the user for the missing
+  information.
+- When MONEY POSITION WARNING is present, describe the affordability view
+  as provisional because unresolved financial events may change it.
+- Never expose account-level or transaction-level data because it is not
+  provided to you.
+
+LIFE PATTERNS (VERY IMPORTANT):
+Watch for the user casually mentioning recurring life patterns —
+"I work a job from 10 to 6 all weekdays", "I have pilates every morning",
+"I sleep by 11", "I pick up my kid at 4 on Wednesdays", "I fast on
+Tuesdays". If they mention a pattern that is NOT already in their
+existing time_commitments:
+  • If you have enough info (title, day(s), start & end time), include it
+    in the proposal block under `time_commitments`.
+  • If key info is missing (e.g. they said "pilates every morning" — you
+    know title=Pilates but not the exact time), ASK ONE clarifying
+    question in the prose section, and DO NOT include it in the
+    proposal block yet. Add it on the next turn when the user replies.
+
+RESPONSE FORMAT (STRICT):
+Every response has TWO parts:
+
+1) A short conversational reply for the user (Markdown, 2–5 short
+   paragraphs, warm and specific, no headers "## Section" style). Reference
+   what they already have when relevant. Ask ONE focused follow-up question
+   when needed. Never expose tool calls, JSON, or your own reasoning steps.
+
+2) If (and only if) you are proposing concrete changes, append a
+   machine-readable block on its own line at the very end of the message:
+
+<<<HYMN_PROPOSAL>>>
+{"summary": "one-line human summary",
+ "feasibility_note": "one short line if capacity is tight, otherwise omit",
+ "plan": {"title": "human-readable name for this plan",
+          "phases": [{"title": "phase name",
+                      "description": "optional short description or null",
+                      "milestones": [{"title": "milestone name",
+                                       "description": "optional short description or null",
+                                       "target_date": "YYYY-MM-DD or null",
+                                       "tasks": [{"title": "task name",
+                                                   "description": "optional short description or null",
+                                                   "due_date": "YYYY-MM-DD or null",
+                                                   "priority": "low|medium|high",
+                                                   "required_checkins": [{"title": "one-line label",
+                                                                            "prompt": "what the user should verify or report",
+                                                                            "cadence": "once|daily|weekly|monthly|quarterly"}]}]}]}]},
+ "expected_outcomes": [{"title": "...", "target_value": "", "unit": "",
+                         "deadline": "YYYY-MM-DD or empty",
+                         "outcome_type": "generic"}],
+ "tasks": [{"title": "...",
+             "expected_outcome_title": "match one of the above OR an existing outcome title (case-insensitive)",
+             "due_date": "YYYY-MM-DD or empty",
+             "priority": "low|medium|high",
+             "commitment_type": "postponable|exclusive",
+             "notes": "optional short note"}],
+ "checkins": [{"type": "goal|project|life",
+                "title": "one-line label",
+                "date": "YYYY-MM-DD",
+                "time": "HH:MM",
+                "expected_outcome_title": "for goal type — existing OR newly proposed outcome title",
+                "project_id": "for project type — the current target id",
+                "notes": "optional short note"}],
+ "checkin_recurrences": [{"type": "goal|project|life",
+                           "title": "Studies for CA",
+                           "start_date": "YYYY-MM-DD",
+                           "end_date":   "YYYY-MM-DD",
+                           "days_of_week": ["monday","tuesday","wednesday","thursday","friday","saturday","sunday"],
+                           "time": "HH:MM",
+                           "expected_outcome_title": "for goal type",
+                           "project_id": "for project type",
+                           "notes": "optional short note"}],
+ "time_commitments": [{"title": "e.g. Job",
+                        "day_of_week": "monday|tuesday|…|sunday",
+                        "start_time": "HH:MM (24h)",
+                        "end_time": "HH:MM (24h)",
+                        "commitment_type": "work|sleep|commute|study|meal|caregiving|household|health|personal|other",
+                        "flexibility": "fixed|flexible",
+                        "notes": "optional"}],
+ "checkin_cadence": "daily|weekly|monthly|manual OR omit",
+ "target_updates": {"deadline": "YYYY-MM-DD or omit",
+                     "notes": "optional refined why/description or omit",
+                     "commitment_type": "postponable|exclusive OR omit"}}
+<<<END>>>
+
+Rules for the proposal block:
+- Every actionable proposal MUST include a `plan` object with a
+  non-empty `phases` list. Every phase MUST have a non-empty
+  `milestones` list; every milestone MUST have a non-empty `tasks`
+  list; every task MUST have a non-empty `required_checkins` list.
+  This is the durable Plan → Phase → Milestone → Task → Required
+  Check-in hierarchy Hymn stores server-side.
+- `required_checkins` describe future obligations the user will
+  verify — they are NOT completed check-ins. Never invent progress,
+  qualifications, current balances, or historical activity for them.
+- Only propose additions/refinements to the current target — never delete
+  its existing items.
+- Do not propose deleting, merging, postponing, cancelling, completing, renaming, or otherwise modifying existing Goals, Projects, Expected Outcomes, Tasks, or Check-ins. Explain any suggested trade-off conversationally. Hymn requires item-by-item user review before existing records may be changed.
+- For Goals: tasks MUST attach to a proposed or existing expected_outcome.
+- For Projects: tasks attach directly to the project (leave
+  expected_outcome_title empty).
+- Keep it tight: 1–6 new outcomes and 1–20 new tasks per turn — smaller is better.
+- If the user is just asking a question or exploring, DO NOT include the
+  proposal block. Only include it when proposing concrete additions.
+- `checkin_recurrences` are expanded server-side into one check-in per
+  matching day within [start_date, end_date] (including backfill into
+  the past if the range straddles today). Prefer a recurrence over
+  emitting 30 individual checkins.
+- `time_commitments` should only be added when the user's message
+  clearly established a recurring life pattern with an explicit or
+  strongly-implied start/end time.
+- All dates must be ISO YYYY-MM-DD. All times HH:MM (24-hour).
+- Never wrap the proposal in code fences. Emit it verbatim, exactly once,
+  as the final content of your message.
+
+You are talking directly to the user. Do not narrate your process."""
+
+
+_PROPOSAL_RE = re.compile(
+    r"<<<HYMN_PROPOSAL>>>\s*(\{.*?\})\s*<<<END>>>", re.DOTALL,
+)
+
+
+def _split_message(raw: str) -> Tuple[str, Optional[dict]]:
+    """Split an assistant reply into (visible_prose, structured_proposal_or_None)."""
+    if not raw:
+        return "", None
+    m = _PROPOSAL_RE.search(raw)
+    if not m:
+        return raw.strip(), None
+    prose = _PROPOSAL_RE.sub("", raw).strip()
+    try:
+        proposal = json.loads(m.group(1))
+        if isinstance(proposal, dict):
+            return prose, proposal
+    except json.JSONDecodeError:
+        pass
+    return prose, None
+
+
+def _context_prelude(ctx: Dict[str, Any]) -> str:
+    """Serialize the small context snapshot into a compact system prelude."""
+    t = ctx["target"]
+    lines = [
+        f"CURRENT TARGET ({ctx['target_type'].upper()}):",
+        f"- id: {t['id']}",
+        f"- title: {t.get('title')}",
+        f"- deadline: {t.get('deadline') or '—'}",
+        f"- status: {t.get('status') or 'active'}",
+        f"- commitment_type: {t.get('commitment_type') or 'postponable'}",
+        f"- check-in cadence: {t.get('checkin_cadence') or '—'}",
+    ]
+    if t.get("journey_type"):
+        lines.append(f"- journey type: {t['journey_type']}")
+    if t.get("notes"):
+        lines.append(f"- notes: {t['notes'][:300]}")
+    if ctx["expected_outcomes"]:
+        lines.append("\nEXISTING EXPECTED OUTCOMES (on this target):")
+        for e in ctx["expected_outcomes"][:20]:
+            lines.append(f"- {e['title']} (status={e['status']}, {e.get('current_value','')}/{e.get('target_value','') or '—'} {e.get('unit') or ''})")
+    if ctx["tasks"]:
+        lines.append(f"\nEXISTING TASKS on this target ({len(ctx['tasks'])}, first 20 shown):")
+        for tk in ctx["tasks"][:20]:
+            lines.append(f"- {tk['title']} [{tk['status']}, {tk.get('priority')}, commitment={tk.get('commitment_type')}]")
+    if ctx["checkins_recent"]:
+        lines.append(f"\nRECENT CHECK-INS on this target: {len(ctx['checkins_recent'])} in the last window.")
+
+    # ---- Portfolio view -------------------------------------------------
+    other_goals = ctx.get("other_goals") or []
+    other_projects = ctx.get("other_projects") or []
+    if other_goals:
+        lines.append(f"\nOTHER ACTIVE GOALS ({len(other_goals)}, first 15):")
+        for g in other_goals[:15]:
+            lines.append(
+                f"- id={g['id']} · {g['title']} · domain={g.get('domain_name') or '—'}"
+                f" · deadline={g.get('deadline') or '—'} · status={g.get('status')}"
+                f" · commitment={g.get('commitment_type')}"
+                f" · cadence={g.get('checkin_cadence') or '—'}"
+            )
+    if other_projects:
+        lines.append(f"\nOTHER ACTIVE PROJECTS ({len(other_projects)}, first 15):")
+        for p in other_projects[:15]:
+            lines.append(
+                f"- id={p['id']} · {p['title']} · {p.get('start_date') or '—'}→{p.get('target_end_date') or '—'}"
+                f" · status={p.get('status')} · commitment={p.get('commitment_type')}"
+            )
+    tcs = ctx.get("time_commitments") or []
+    if tcs:
+        lines.append(f"\nWEEKLY TIME COMMITMENTS ({len(tcs)}):")
+        for tc in tcs[:30]:
+            lines.append(
+                f"- {tc['title']} · {tc['day_of_week']} {tc['start_time']}–{tc['end_time']}"
+                f" · type={tc.get('commitment_type')} · flexibility={tc.get('flexibility')}"
+            )
+    else:
+        lines.append("\nWEEKLY TIME COMMITMENTS: none recorded yet. Ask contextual questions if the user mentions a recurring life pattern.")
+    wc = ctx.get("weekly_capacity") or {}
+    if wc:
+        # Batch 2B2 — describe the number honestly. This is *recorded*
+        # uncommitted time (recurring commitments + active
+        # reservations), not guaranteed free / usable time. Missing
+        # sleep, meals, travel, caregiving or other unrecorded
+        # obligations may still occupy some of these hours.
+        lines.append(
+            f"\nWEEKLY CAPACITY (recorded uncommitted time, estimate): "
+            f"{wc.get('committed_hours_per_week', 0)}h already recorded "
+            f"(baseline {wc.get('baseline_committed_hours_per_week', 0)}h + reservations "
+            f"{wc.get('reserved_hours_per_week', 0)}h; overlap "
+            f"{wc.get('overlapping_hours_per_week', 0)}h), ~"
+            f"{wc.get('free_hours_per_week_estimate', 0)}h remains uncommitted in the record."
+            "\nCAPACITY BASIS: This is recorded uncommitted time, not guaranteed free or usable time."
+            " Sleep, breaks, travel, caregiving and other obligations may be included in the remainder if the user hasn't recorded them."
+            " If a proposal's feasibility depends on time you don't know, ask the user rather than invent availability."
+        )
+    mc = ctx["money_capacity"]
+    money_rows = mc["by_currency"]
+    if money_rows:
+        lines.append(
+            "\nMONEY CAPACITY "
+            "(canonical effective liquid money minus active reservations):"
+        )
+        for row in money_rows:
+            lines.append(
+                f"- {row['currency']}: "
+                f"liquid_effective={row['liquid_effective']}; "
+                f"reserved={row['reserved']}; "
+                f"available_unreserved={row['available_unreserved']}"
+            )
+    else:
+        lines.append(
+            "\nMONEY CAPACITY: No canonical currency position is available."
+        )
+
+    lines.append(
+        "MONEY CAPACITY BASIS: "
+        "effective liquid account balances minus active money reservations."
     )
-    live_hash = _snapshot_hash(live_snapshot)
-    if live_hash != proposal.get("snapshot_hash"):
-        raise HTTPException(status_code=409,
-                            detail="Portfolio changed since proposal was generated. Please re-analyze.")
 
-    proposal["commit_phase"] = "preparing"
-    await _store_proposal(db, proposal)
-    return await _commit_actions(db, current_user["id"], proposal)
+    if mc["has_pending_events"]:
+        lines.append(
+            f"MONEY POSITION WARNING: "
+            f"{mc['pending_event_count']} financial event(s) still require review. "
+            "Treat every displayed money position as provisional."
+        )
+    tc_up = ctx.get("upcoming_task_count", 0)
+    if tc_up:
+        lines.append(f"CURRENT WORKLOAD: {tc_up} open tasks with due dates across the whole portfolio.")
+
+    # ---- Duplicate hints (naive title-similarity across ALL goals/projects)
+    def _norm(s: str) -> str:
+        import re as _re
+        return _re.sub(r"\s+", " ", (s or "").strip().lower())
+    all_g = other_goals + ([{"id": t["id"], "title": t.get("title"), "commitment_type": t.get("commitment_type")}] if ctx["target_type"] == "goal" else [])
+    all_p = other_projects + ([{"id": t["id"], "title": t.get("title"), "commitment_type": t.get("commitment_type")}] if ctx["target_type"] == "project" else [])
+    dup_hints: List[str] = []
+    for pool, kind in ((all_g, "goal"), (all_p, "project")):
+        seen: Dict[str, List[str]] = {}
+        for item in pool:
+            key = _norm(item.get("title") or "")
+            if not key:
+                continue
+            # very simple: exact-normalized-title clusters
+            seen.setdefault(key, []).append(item["id"])
+            # also cluster on trimmed prefixes (first 4 words)
+            short = " ".join(key.split()[:4])
+            if short and short != key:
+                seen.setdefault(short, []).append(item["id"])
+        for key, ids in seen.items():
+            if len(set(ids)) > 1:
+                dup_hints.append(f"- possible duplicate {kind}s: {list(set(ids))} (title fragment ‘{key}’)")
+    if dup_hints:
+        lines.append("\nPOSSIBLE DUPLICATES (title heuristic, verify before proposing consolidation):")
+        lines.extend(dup_hints[:20])
+    return "\n".join(lines)
 
 
-@planning_router.post("/proposals/{proposal_id}/reject")
-async def reject_proposal(proposal_id: str, current_user: dict = Depends(get_current_user)):
-    db = get_db()
-    proposal = await _load_proposal(db, current_user["id"], proposal_id)
-    _require(proposal.get("status") not in ("approved", "rejected", "abandoned"),
-             f"Cannot reject — proposal is {proposal.get('status')}")
-    proposal["status"] = "rejected"
-    proposal["rejected_at"] = _now()
-    proposal["updated_at"] = _now()
-    await _store_proposal(db, proposal)
-    return {"status": "rejected"}
+async def _call_llm(history: List[Dict[str, str]], user_text: str, ctx: Dict[str, Any]) -> str:
+    """Non-streaming LLM turn with Anthropic web_search enabled.
+
+    Returns the assistant's raw text (still containing any HYMN_PROPOSAL
+    block). Raises HTTPException on any provider error so the caller can
+    surface a friendly message to the user."""
+    api_key = os.environ.get("EMERGENT_LLM_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500,
+                            detail="Planning is unavailable — LLM key not configured.")
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage  # noqa: WPS433
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500,
+                            detail=f"Planning is unavailable — {type(exc).__name__}")
+
+    # Rebuild history as simplified messages [{role, content}]. We drop any
+    # HYMN_PROPOSAL blocks from prior assistant messages before feeding the
+    # LLM — the model doesn't need to see its own machine block.
+    initial = [{"role": "system", "content": _SYSTEM_PROMPT + "\n\n" + _context_prelude(ctx)}]
+    for msg in history:
+        role = msg.get("role")
+        content = msg.get("content") or ""
+        if role == "assistant":
+            content, _ = _split_message(content)
+        if role in ("user", "assistant") and content.strip():
+            initial.append({"role": role, "content": content})
+
+    chat = LlmChat(
+        api_key=api_key,
+        session_id=f"planning-{ctx['target_type']}-{ctx['target']['id']}",
+        system_message=initial[0]["content"],
+        initial_messages=initial,
+    ).with_model("anthropic", "claude-sonnet-4-6")
+
+    # Attach Anthropic web_search tool. Provider-hosted tool → results are
+    # applied on the API side; we get the final assistant text back on
+    # response.content.
+    try:
+        chat.with_tools([
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 3},
+        ])
+    except Exception:
+        # If tools API is unavailable, continue without web search.
+        pass
+
+    try:
+        response = await chat.send_message_with_tools(UserMessage(text=user_text))
+    except Exception as exc:
+        logger.exception("Planning LLM call failed")
+        raise HTTPException(status_code=502,
+                            detail=f"Planning assistant temporarily unavailable ({type(exc).__name__}).")
+
+    text = response.content or ""
+    return text.strip()
 
 
-@planning_router.post("/proposals/{proposal_id}/pause")
-async def pause_proposal(
-    proposal_id: str, body: PauseRequest, current_user: dict = Depends(get_current_user),
+# ---------------------------------------------------------------------------
+# Conversation persistence
+# ---------------------------------------------------------------------------
+
+
+async def _get_or_create_conversation(db, user_id: str, target_type: str, target_id: str) -> dict:
+    _require(target_type in TARGET_TYPES, f"target_type must be one of {list(TARGET_TYPES)}")
+    await _read_target(db, user_id, target_type, target_id)  # ownership + existence
+    doc = await db.plan_conversations.find_one(
+        {"user_id": user_id, "target_type": target_type, "target_id": target_id},
+        {"_id": 0},
+    )
+    if doc:
+        return doc
+    now = _now()
+    doc = {
+        "id": _uuid(),
+        "user_id": user_id,
+        "target_type": target_type,
+        "target_id": target_id,
+        "messages": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.plan_conversations.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+def _shape_message(msg: dict) -> dict:
+    """Public shape sent to the UI (never leaks the HYMN_PROPOSAL block into
+    the visible content)."""
+    role = msg.get("role")
+    content = msg.get("content") or ""
+    proposal = msg.get("proposal")
+    if role == "assistant":
+        content, _ = _split_message(content)
+    return {
+        "id": msg.get("id") or _uuid(),
+        "role": role,
+        "content": content,
+        "created_at": msg.get("created_at"),
+        "proposal": proposal,  # may be None
+        "materialized_at": msg.get("materialized_at"),
+        "materialized_summary": msg.get("materialized_summary"),
+        # Batch 2B8 — expose draft revision + materialization state so the
+        # UI can decide whether the plan is editable.
+        "proposal_revision": msg.get("proposal_revision"),
+        "materialization_state": msg.get("materialization_state"),
+    }
+
+
+def _public_conversation(conv: dict) -> dict:
+    return {
+        "id": conv["id"],
+        "target_type": conv["target_type"],
+        "target_id": conv["target_id"],
+        "created_at": conv["created_at"],
+        "updated_at": conv["updated_at"],
+        "messages": [_shape_message(m) for m in (conv.get("messages") or [])],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Materialization — atomic apply of a proposal into the target.
+# ---------------------------------------------------------------------------
+
+VALID_PRIORITIES = {"low", "medium", "high"}
+VALID_CADENCES = {"daily", "weekly", "monthly", "manual"}
+VALID_COMMITMENT_TYPES = {"postponable", "exclusive"}
+VALID_DAYS_OF_WEEK = {"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"}
+VALID_TC_TYPES = {"sleep", "work", "commute", "study", "meal", "caregiving",
+                  "household", "health", "personal", "other"}
+VALID_TC_FLEX = {"fixed", "flexible"}
+VALID_CHECKIN_TYPES = {"goal", "project", "life"}
+_HHMM_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
+_WEEKDAY_INDEX = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                  "friday": 4, "saturday": 5, "sunday": 6}
+
+
+def _normalize_hhmm(v: Any) -> Optional[str]:
+    if not isinstance(v, str) or not _HHMM_RE.match(v.strip()):
+        return None
+    h, m = v.strip().split(":")
+    try:
+        hi, mi = int(h), int(m)
+        if 0 <= hi < 24 and 0 <= mi < 60:
+            return f"{hi:02d}:{mi:02d}"
+    except ValueError:
+        pass
+    return None
+
+
+def _iter_dates(start: str, end: str, days_of_week: Optional[List[str]] = None):
+    """Inclusive iterator over YYYY-MM-DD dates filtered by day-of-week set."""
+    try:
+        cur = datetime.strptime(start, "%Y-%m-%d").date()
+        stop = datetime.strptime(end, "%Y-%m-%d").date()
+    except ValueError:
+        return
+    if cur > stop:
+        return
+    allowed_idx = None
+    if days_of_week:
+        allowed_idx = {
+            _WEEKDAY_INDEX[d] for d in days_of_week
+            if isinstance(d, str) and d.lower() in _WEEKDAY_INDEX
+        }
+    while cur <= stop:
+        if allowed_idx is None or cur.weekday() in allowed_idx:
+            yield cur.isoformat()
+        cur = cur.fromordinal(cur.toordinal() + 1)
+
+
+def _materialization_key(
+    conversation_id: str,
+    message_id: str,
+    artifact_kind: str,
+    artifact_position: str,
+) -> str:
+    """Deterministic key identifying a single additive artifact."""
+    return f"{conversation_id}:{message_id}:{artifact_kind}:{artifact_position}"
+
+
+def _materialized_id(materialization_key: str) -> str:
+    """Non-secret deterministic id derived from a materialization key."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"hymn:{materialization_key}"))
+
+
+async def _upsert_artifact(
+    db, collection: str, user_id: str, key: str, document: dict,
+) -> Tuple[dict, bool]:
+    """Upsert an additive artifact keyed by (user_id, planning_materialization_key).
+    Returns (stored_document, was_inserted_this_attempt)."""
+    result = await db[collection].update_one(
+        {"user_id": user_id, "planning_materialization_key": key},
+        {"$setOnInsert": document},
+        upsert=True,
+    )
+    stored = await db[collection].find_one(
+        {"user_id": user_id, "planning_materialization_key": key}, {"_id": 0},
+    )
+    return stored or document, result.upserted_id is not None
+
+
+VALID_REQUIRED_CHECKIN_CADENCES = {"once", "daily", "weekly", "monthly", "quarterly"}
+
+
+def _validate_plan_hierarchy(plan: Any) -> None:
+    """Strictly validate a durable Plan → Phase → Milestone → Task →
+    Required Check-in hierarchy. On any structural or field error raises
+    HTTPException(status_code=422, ...) whose detail identifies the
+    exact hierarchy location using zero-based indexes.
+    """
+    def fail(location: str, msg: str) -> None:
+        raise HTTPException(status_code=422, detail=f"{location} {msg}")
+
+    def _nonblank_str(v: Any) -> bool:
+        return isinstance(v, str) and v.strip() != ""
+
+    if not isinstance(plan, dict):
+        fail("plan", "must be an object")
+    if not _nonblank_str(plan.get("title")):
+        fail("plan.title", "must be a non-empty string")
+    phases = plan.get("phases")
+    if not isinstance(phases, list) or len(phases) == 0:
+        fail("plan.phases", "must be a non-empty array")
+    for pi, phase in enumerate(phases):
+        ploc = f"plan.phases[{pi}]"
+        if not isinstance(phase, dict):
+            fail(ploc, "must be an object")
+        if not _nonblank_str(phase.get("title")):
+            fail(f"{ploc}.title", "must be a non-empty string")
+        milestones = phase.get("milestones")
+        if not isinstance(milestones, list) or len(milestones) == 0:
+            fail(f"{ploc}.milestones", "must be a non-empty array")
+        for mi, milestone in enumerate(milestones):
+            mloc = f"{ploc}.milestones[{mi}]"
+            if not isinstance(milestone, dict):
+                fail(mloc, "must be an object")
+            if not _nonblank_str(milestone.get("title")):
+                fail(f"{mloc}.title", "must be a non-empty string")
+            td = milestone.get("target_date")
+            if td is not None and _iso_date(td) is None:
+                fail(f"{mloc}.target_date", "must be null or YYYY-MM-DD")
+            tasks = milestone.get("tasks")
+            if not isinstance(tasks, list) or len(tasks) == 0:
+                fail(f"{mloc}.tasks", "must be a non-empty array")
+            for ti, task in enumerate(tasks):
+                tloc = f"{mloc}.tasks[{ti}]"
+                if not isinstance(task, dict):
+                    fail(tloc, "must be an object")
+                if not _nonblank_str(task.get("title")):
+                    fail(f"{tloc}.title", "must be a non-empty string")
+                dd = task.get("due_date")
+                if dd is not None and _iso_date(dd) is None:
+                    fail(f"{tloc}.due_date", "must be null or YYYY-MM-DD")
+                pr = task.get("priority")
+                if pr not in VALID_PRIORITIES:
+                    fail(f"{tloc}.priority", "must be one of low, medium, high")
+                rcs = task.get("required_checkins")
+                if not isinstance(rcs, list) or len(rcs) == 0:
+                    fail(f"{tloc}.required_checkins", "must be a non-empty array")
+                for ri, rc in enumerate(rcs):
+                    rloc = f"{tloc}.required_checkins[{ri}]"
+                    if not isinstance(rc, dict):
+                        fail(rloc, "must be an object")
+                    if not _nonblank_str(rc.get("title")):
+                        fail(f"{rloc}.title", "must be a non-empty string")
+                    if not _nonblank_str(rc.get("prompt")):
+                        fail(f"{rloc}.prompt", "must be a non-empty string")
+                    if rc.get("cadence") not in VALID_REQUIRED_CHECKIN_CADENCES:
+                        fail(
+                            f"{rloc}.cadence",
+                            "must be one of once, daily, weekly, monthly, quarterly",
+                        )
+
+
+# ---------------------------------------------------------------------------
+# Batch 2B8 — draft (in-conversation) hierarchy editing helpers.
+# These operate on the proposal.plan JSON embedded in the assistant message
+# in `plan_conversations`. They MUST NEVER touch permanent hierarchy records
+# in plans / plan_phases / plan_milestones / tasks / required_checkins.
+# ---------------------------------------------------------------------------
+
+
+import copy as _copy  # local alias to avoid shadowing any existing name
+
+
+_DRAFT_EDITABLE_FIELDS: Dict[str, set] = {
+    "plan": {"title"},
+    "phase": {"title", "description"},
+    "milestone": {"title", "description", "target_date"},
+    "task": {"title", "description", "due_date", "priority"},
+    "required_checkin": {"title", "prompt", "cadence"},
+}
+
+_DRAFT_ENTITY_TYPES = ("plan", "phase", "milestone", "task", "required_checkin")
+
+
+def _draft_node_id(
+    message_id: str,
+    node_type: str,
+    structural_path: str,
+) -> str:
+    """Deterministic UUIDv5 for a draft hierarchy node.
+
+    Draft IDs are namespaced separately from Batch 2B7 permanent
+    materialization IDs so they can never collide.
+    """
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"hymn:draft:{message_id}:{node_type}:{structural_path}",
+    ))
+
+
+def _normalise_draft_hierarchy(plan: dict, message_id: str) -> dict:
+    """Return a deep-copied plan with stable draft node IDs assigned.
+
+    - Preserves any existing valid string id.
+    - Assigns a deterministic id (via ``_draft_node_id``) where missing.
+    - Validates all ids are non-empty strings and globally unique.
+    - Never mutates the caller's dictionary.
+    """
+    if not isinstance(plan, dict):
+        raise HTTPException(status_code=422, detail="plan must be an object")
+    new_plan = _copy.deepcopy(plan)
+
+    seen: Dict[str, str] = {}
+
+    def _assign(node: dict, node_type: str, structural_path: str, location: str) -> None:
+        # Batch 2B8.1 — reject malformed present ids. Only a truly missing
+        # key or an explicit null may be filled in with a deterministic id.
+        if "id" not in node or node.get("id") is None:
+            nid = _draft_node_id(message_id, node_type, structural_path)
+        else:
+            current = node.get("id")
+            if not isinstance(current, str) or not current.strip():
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{location}.id must be a non-empty string",
+                )
+            nid = current.strip()
+        if not isinstance(nid, str) or not nid:
+            raise HTTPException(status_code=422, detail=f"{location}.id must be a non-empty string")
+        if nid in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{location}.id duplicates {seen[nid]}",
+            )
+        seen[nid] = location
+        node["id"] = nid
+
+    _assign(new_plan, "plan", "0", "plan")
+
+    phases = new_plan.get("phases")
+    if not isinstance(phases, list):
+        raise HTTPException(status_code=422, detail="plan.phases must be a non-empty array")
+    for pi, phase in enumerate(phases):
+        if not isinstance(phase, dict):
+            raise HTTPException(status_code=422, detail=f"plan.phases[{pi}] must be an object")
+        _assign(phase, "phase", f"{pi}", f"plan.phases[{pi}]")
+        milestones = phase.get("milestones")
+        if not isinstance(milestones, list):
+            raise HTTPException(
+                status_code=422,
+                detail=f"plan.phases[{pi}].milestones must be a non-empty array",
+            )
+        for mi, milestone in enumerate(milestones):
+            if not isinstance(milestone, dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"plan.phases[{pi}].milestones[{mi}] must be an object",
+                )
+            _assign(
+                milestone, "milestone", f"{pi}:{mi}",
+                f"plan.phases[{pi}].milestones[{mi}]",
+            )
+            tasks = milestone.get("tasks")
+            if not isinstance(tasks, list):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"plan.phases[{pi}].milestones[{mi}].tasks must be a non-empty array",
+                )
+            for ti, task in enumerate(tasks):
+                if not isinstance(task, dict):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}] must be an object",
+                    )
+                _assign(
+                    task, "task", f"{pi}:{mi}:{ti}",
+                    f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]",
+                )
+                rcs = task.get("required_checkins")
+                if not isinstance(rcs, list):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]"
+                            f".required_checkins must be a non-empty array"
+                        ),
+                    )
+                for ri, rc in enumerate(rcs):
+                    if not isinstance(rc, dict):
+                        raise HTTPException(
+                            status_code=422,
+                            detail=(
+                                f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]"
+                                f".required_checkins[{ri}] must be an object"
+                            ),
+                        )
+                    _assign(
+                        rc, "required_checkin", f"{pi}:{mi}:{ti}:{ri}",
+                        (
+                            f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]"
+                            f".required_checkins[{ri}]"
+                        ),
+                    )
+
+    return new_plan
+
+
+def _collect_draft_ids(plan: dict) -> Dict[str, str]:
+    """Return {node_id: location_string} for every node in the draft plan."""
+    ids: Dict[str, str] = {}
+
+    def _record(node: dict, location: str) -> None:
+        nid = node.get("id") if isinstance(node, dict) else None
+        if not (isinstance(nid, str) and nid):
+            raise HTTPException(status_code=422, detail=f"{location}.id must be a non-empty string")
+        if nid in ids:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{location}.id duplicates {ids[nid]}",
+            )
+        ids[nid] = location
+
+    _record(plan, "plan")
+    for pi, phase in enumerate(plan.get("phases") or []):
+        _record(phase, f"plan.phases[{pi}]")
+        for mi, m in enumerate(phase.get("milestones") or []):
+            _record(m, f"plan.phases[{pi}].milestones[{mi}]")
+            for ti, t in enumerate(m.get("tasks") or []):
+                _record(t, f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]")
+                for ri, rc in enumerate(t.get("required_checkins") or []):
+                    _record(
+                        rc,
+                        (
+                            f"plan.phases[{pi}].milestones[{mi}].tasks[{ti}]"
+                            f".required_checkins[{ri}]"
+                        ),
+                    )
+    return ids
+
+
+def _locate_draft_node(plan: dict, entity_type: str, entity_id: str) -> Dict[str, Any]:
+    """Find a node by stable draft id.
+
+    Returns a dict with keys:
+      node, parent, container_list, index,
+      phase, milestone, task (ancestors where relevant),
+      located_type.
+    Raises 404 if not found. Raises 400 if entity_type does not match the
+    located node's type. NEVER locates by title or by client-supplied index.
+    """
+    if not isinstance(entity_id, str) or not entity_id:
+        raise HTTPException(status_code=404, detail=f"Draft {entity_type} not found")
+
+    # Plan itself.
+    if plan.get("id") == entity_id:
+        located_type = "plan"
+        if entity_type != located_type:
+            raise HTTPException(
+                status_code=400,
+                detail="entity_id does not identify the requested entity_type",
+            )
+        return {
+            "node": plan, "parent": None, "container_list": None,
+            "index": None, "phase": None, "milestone": None, "task": None,
+            "located_type": "plan",
+        }
+
+    phases = plan.get("phases") or []
+    for pi, phase in enumerate(phases):
+        if isinstance(phase, dict) and phase.get("id") == entity_id:
+            located_type = "phase"
+            if entity_type != located_type:
+                raise HTTPException(
+                    status_code=400,
+                    detail="entity_id does not identify the requested entity_type",
+                )
+            return {
+                "node": phase, "parent": plan, "container_list": phases,
+                "index": pi, "phase": phase, "milestone": None, "task": None,
+                "located_type": "phase",
+            }
+        milestones = (phase or {}).get("milestones") or []
+        for mi, m in enumerate(milestones):
+            if isinstance(m, dict) and m.get("id") == entity_id:
+                located_type = "milestone"
+                if entity_type != located_type:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="entity_id does not identify the requested entity_type",
+                    )
+                return {
+                    "node": m, "parent": phase, "container_list": milestones,
+                    "index": mi, "phase": phase, "milestone": m, "task": None,
+                    "located_type": "milestone",
+                }
+            tasks = (m or {}).get("tasks") or []
+            for ti, t in enumerate(tasks):
+                if isinstance(t, dict) and t.get("id") == entity_id:
+                    located_type = "task"
+                    if entity_type != located_type:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="entity_id does not identify the requested entity_type",
+                        )
+                    return {
+                        "node": t, "parent": m, "container_list": tasks,
+                        "index": ti, "phase": phase, "milestone": m, "task": t,
+                        "located_type": "task",
+                    }
+                rcs = (t or {}).get("required_checkins") or []
+                for ri, rc in enumerate(rcs):
+                    if isinstance(rc, dict) and rc.get("id") == entity_id:
+                        located_type = "required_checkin"
+                        if entity_type != located_type:
+                            raise HTTPException(
+                                status_code=400,
+                                detail="entity_id does not identify the requested entity_type",
+                            )
+                        return {
+                            "node": rc, "parent": t, "container_list": rcs,
+                            "index": ri, "phase": phase, "milestone": m, "task": t,
+                            "located_type": "required_checkin",
+                        }
+
+    raise HTTPException(status_code=404, detail=f"Draft {entity_type} not found")
+
+
+def _validate_editable_values(
+    entity_type: str, values: Any, *, require_all: bool,
+    allow_nested_children: bool = False,
+) -> Dict[str, Any]:
+    """Return a dict of validated field->value for a draft edit.
+
+    - Rejects unknown fields (does not silently discard).
+    - Validates each supplied field per the batch 2B7 rules.
+    - When ``allow_nested_children`` is True (used by ``add``) the reserved
+      keys ``milestones``, ``tasks``, and ``required_checkins`` are also
+      accepted here — the caller is responsible for consuming them.
+    """
+    allowed = _DRAFT_EDITABLE_FIELDS[entity_type]
+    if not isinstance(values, dict):
+        raise HTTPException(status_code=400, detail="values must be an object")
+    # Batch 2B8.1 — entity-specific nested child keys, strictly enforced.
+    # A phase can only carry a nested `milestones` list, a milestone a
+    # nested `tasks` list, a task a nested `required_checkins` list. All
+    # other nested keys go through the unknown-field rejection below.
+    nested_child_key_by_entity = {
+        "phase": "milestones",
+        "milestone": "tasks",
+        "task": "required_checkins",
+        "plan": None,
+        "required_checkin": None,
+    }
+    if allow_nested_children:
+        expected_child = nested_child_key_by_entity.get(entity_type)
+        child_keys = {expected_child} if expected_child else set()
+    else:
+        child_keys = set()
+    unknown = [k for k in values.keys() if k not in allowed and k not in child_keys]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown field(s) for {entity_type}: {', '.join(sorted(unknown))}",
+        )
+    if require_all:
+        # For ``add``, required_checkin needs title/prompt/cadence explicitly.
+        # For phase/milestone/task the create defaults fill in what values omits.
+        pass
+    out: Dict[str, Any] = {}
+    if "title" in values or (require_all and entity_type in {"required_checkin"}):
+        t = values.get("title")
+        if not (isinstance(t, str) and t.strip()):
+            raise HTTPException(status_code=400, detail="title must be a non-empty string")
+        out["title"] = t.strip()
+    if "description" in values:
+        d = values.get("description")
+        if d is None:
+            out["description"] = None
+        elif isinstance(d, str):
+            out["description"] = d.strip() if d.strip() else None
+        else:
+            raise HTTPException(status_code=400, detail="description must be a string or null")
+    if "target_date" in values:
+        td = values.get("target_date")
+        if td is None:
+            out["target_date"] = None
+        elif isinstance(td, str) and _iso_date(td):
+            out["target_date"] = td
+        else:
+            raise HTTPException(status_code=400, detail="target_date must be null or YYYY-MM-DD")
+    if "due_date" in values:
+        dd = values.get("due_date")
+        if dd is None:
+            out["due_date"] = None
+        elif isinstance(dd, str) and _iso_date(dd):
+            out["due_date"] = dd
+        else:
+            raise HTTPException(status_code=400, detail="due_date must be null or YYYY-MM-DD")
+    if "priority" in values:
+        pr = values.get("priority")
+        if pr not in VALID_PRIORITIES:
+            raise HTTPException(status_code=400, detail="priority must be one of low, medium, high")
+        out["priority"] = pr
+    if "prompt" in values or (require_all and entity_type == "required_checkin"):
+        p = values.get("prompt")
+        if not (isinstance(p, str) and p.strip()):
+            raise HTTPException(status_code=400, detail="prompt must be a non-empty string")
+        out["prompt"] = p.strip()
+    if "cadence" in values or (require_all and entity_type == "required_checkin"):
+        c = values.get("cadence")
+        if c not in VALID_REQUIRED_CHECKIN_CADENCES:
+            raise HTTPException(
+                status_code=400,
+                detail="cadence must be one of once, daily, weekly, monthly, quarterly",
+            )
+        out["cadence"] = c
+    return out
+
+
+def _op_child_id(message_id: str, operation_id: str, node_type: str, relative_path: str) -> str:
+    return str(uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"hymn:draft-operation:{message_id}:{operation_id}:{node_type}:{relative_path}",
+    ))
+
+
+def _build_added_required_checkin(
+    values: Dict[str, Any],
+    message_id: str, operation_id: str, relative_path: str,
+) -> dict:
+    v = _validate_editable_values("required_checkin", values, require_all=True, allow_nested_children=False)
+    return {
+        "id": _op_child_id(message_id, operation_id, "required_checkin", relative_path),
+        "title": v["title"], "prompt": v["prompt"], "cadence": v["cadence"],
+    }
+
+
+def _build_added_task(
+    values: Dict[str, Any],
+    message_id: str, operation_id: str, relative_path: str,
+) -> dict:
+    edit = _validate_editable_values("task", values, require_all=False, allow_nested_children=True)
+    title = edit.get("title")
+    if not title:
+        raise HTTPException(status_code=400, detail="title must be a non-empty string")
+    rcs_in = values.get("required_checkins")
+    if not isinstance(rcs_in, list) or not rcs_in:
+        raise HTTPException(
+            status_code=400,
+            detail="An added task requires values.required_checkins with at least one entry",
+        )
+    task = {
+        "id": _op_child_id(message_id, operation_id, "task", relative_path),
+        "title": title,
+        "description": edit.get("description", None),
+        "due_date": edit.get("due_date", None),
+        "priority": edit.get("priority", "medium"),
+        "required_checkins": [],
+    }
+    for ri, rc_values in enumerate(rcs_in):
+        if not isinstance(rc_values, dict):
+            raise HTTPException(status_code=400, detail=f"required_checkins[{ri}] must be an object")
+        task["required_checkins"].append(_build_added_required_checkin(
+            rc_values, message_id, operation_id, f"{relative_path}:rc{ri}",
+        ))
+    return task
+
+
+def _build_added_milestone(
+    values: Dict[str, Any],
+    message_id: str, operation_id: str, relative_path: str,
+) -> dict:
+    edit = _validate_editable_values("milestone", values, require_all=False, allow_nested_children=True)
+    title = edit.get("title")
+    if not title:
+        raise HTTPException(status_code=400, detail="title must be a non-empty string")
+    tasks_in = values.get("tasks")
+    if not isinstance(tasks_in, list) or not tasks_in:
+        raise HTTPException(
+            status_code=400,
+            detail="An added milestone requires values.tasks with at least one entry",
+        )
+    milestone = {
+        "id": _op_child_id(message_id, operation_id, "milestone", relative_path),
+        "title": title,
+        "description": edit.get("description", None),
+        "target_date": edit.get("target_date", None),
+        "tasks": [],
+    }
+    for ti, t_values in enumerate(tasks_in):
+        if not isinstance(t_values, dict):
+            raise HTTPException(status_code=400, detail=f"tasks[{ti}] must be an object")
+        milestone["tasks"].append(_build_added_task(
+            t_values, message_id, operation_id, f"{relative_path}:t{ti}",
+        ))
+    return milestone
+
+
+def _build_added_phase(
+    values: Dict[str, Any],
+    message_id: str, operation_id: str, relative_path: str,
+) -> dict:
+    edit = _validate_editable_values("phase", values, require_all=False, allow_nested_children=True)
+    title = edit.get("title")
+    if not title:
+        raise HTTPException(status_code=400, detail="title must be a non-empty string")
+    milestones_in = values.get("milestones")
+    if not isinstance(milestones_in, list) or not milestones_in:
+        raise HTTPException(
+            status_code=400,
+            detail="An added phase requires values.milestones with at least one entry",
+        )
+    phase = {
+        "id": _op_child_id(message_id, operation_id, "phase", relative_path),
+        "title": title,
+        "description": edit.get("description", None),
+        "milestones": [],
+    }
+    for mi, m_values in enumerate(milestones_in):
+        if not isinstance(m_values, dict):
+            raise HTTPException(status_code=400, detail=f"milestones[{mi}] must be an object")
+        phase["milestones"].append(_build_added_milestone(
+            m_values, message_id, operation_id, f"{relative_path}:m{mi}",
+        ))
+    return phase
+
+
+def _reassign_duplicate_ids(node: dict, entity_type: str, message_id: str, operation_id: str) -> None:
+    """Rewrite every id inside a duplicated subtree to a new deterministic id
+    derived from (message_id, operation_id, node_type, original_id).
+    """
+    original_id = node.get("id")
+    node["id"] = _op_child_id(
+        message_id, operation_id, entity_type, original_id or "root",
+    )
+    if entity_type == "phase":
+        for m in node.get("milestones") or []:
+            _reassign_duplicate_ids(m, "milestone", message_id, operation_id)
+    elif entity_type == "milestone":
+        for t in node.get("tasks") or []:
+            _reassign_duplicate_ids(t, "task", message_id, operation_id)
+    elif entity_type == "task":
+        for rc in node.get("required_checkins") or []:
+            _reassign_duplicate_ids(rc, "required_checkin", message_id, operation_id)
+
+
+def _apply_draft_hierarchy_operation(
+    plan: dict, message_id: str, body: "HierarchyOperationRequest",
+) -> dict:
+    """Apply exactly one draft edit to a deep copy of the plan and return it.
+    Validates the complete resulting hierarchy before returning.
+    """
+    new_plan = _copy.deepcopy(plan)
+    action = body.action
+    etype = body.entity_type
+
+    # ------ Action: update -----------------------------------------------
+    if action == "update":
+        if not body.entity_id:
+            raise HTTPException(status_code=400, detail="entity_id is required for update")
+        if body.parent_id is not None:
+            raise HTTPException(status_code=400, detail="parent_id must be null for update")
+        if body.position is not None:
+            raise HTTPException(status_code=400, detail="position must be null for update")
+        if not isinstance(body.values, dict) or not body.values:
+            raise HTTPException(status_code=400, detail="values is required and must not be empty for update")
+        loc = _locate_draft_node(new_plan, etype, body.entity_id)
+        validated = _validate_editable_values(etype, body.values, require_all=False)
+        loc["node"].update(validated)
+
+    # ------ Action: add --------------------------------------------------
+    elif action == "add":
+        if etype == "plan":
+            raise HTTPException(status_code=400, detail="A draft already has one plan")
+        if body.entity_id is not None:
+            raise HTTPException(status_code=400, detail="entity_id must be null for add")
+        if not body.parent_id:
+            raise HTTPException(status_code=400, detail="parent_id is required for add")
+        if body.position is None:
+            raise HTTPException(status_code=400, detail="position is required for add")
+        if not isinstance(body.values, dict):
+            raise HTTPException(status_code=400, detail="values is required for add")
+
+        # Determine required parent type.
+        required_parent_type = {
+            "phase": "plan", "milestone": "phase",
+            "task": "milestone", "required_checkin": "task",
+        }[etype]
+        if required_parent_type == "plan":
+            if body.parent_id != new_plan.get("id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="parent_id must reference the draft plan",
+                )
+            container = new_plan.setdefault("phases", [])
+        else:
+            parent_loc = _locate_draft_node(new_plan, required_parent_type, body.parent_id)
+            child_key = {
+                "phase": "milestones", "milestone": "tasks",
+                "task": "required_checkins",
+            }[required_parent_type]
+            container = parent_loc["node"].setdefault(child_key, [])
+
+        max_pos = len(container) + 1
+        if body.position < 1 or body.position > max_pos:
+            raise HTTPException(
+                status_code=400,
+                detail=f"position must be between 1 and {max_pos}",
+            )
+
+        if etype == "phase":
+            new_node = _build_added_phase(body.values, message_id, body.operation_id, "new")
+        elif etype == "milestone":
+            new_node = _build_added_milestone(body.values, message_id, body.operation_id, "new")
+        elif etype == "task":
+            new_node = _build_added_task(body.values, message_id, body.operation_id, "new")
+        else:  # required_checkin
+            new_node = _build_added_required_checkin(body.values, message_id, body.operation_id, "new")
+
+        container.insert(body.position - 1, new_node)
+
+    # ------ Action: delete ----------------------------------------------
+    elif action == "delete":
+        if not body.entity_id:
+            raise HTTPException(status_code=400, detail="entity_id is required for delete")
+        if body.values is not None or body.parent_id is not None or body.position is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="values, parent_id, and position must be null for delete",
+            )
+        if etype == "plan":
+            raise HTTPException(status_code=400, detail="The draft plan itself cannot be deleted")
+        loc = _locate_draft_node(new_plan, etype, body.entity_id)
+        container: List[dict] = loc["container_list"]
+        idx: int = loc["index"]
+        # Invariants: keep at least one at every level after removal.
+        if etype == "phase" and len(container) <= 1:
+            raise HTTPException(
+                status_code=409, detail="A plan must contain at least one phase",
+            )
+        if etype == "milestone" and len(container) <= 1:
+            raise HTTPException(
+                status_code=409, detail="A phase must contain at least one milestone",
+            )
+        if etype == "task" and len(container) <= 1:
+            raise HTTPException(
+                status_code=409, detail="A milestone must contain at least one task",
+            )
+        if etype == "required_checkin" and len(container) <= 1:
+            raise HTTPException(
+                status_code=409, detail="A task must contain at least one required check-in",
+            )
+        container.pop(idx)
+
+    # ------ Action: move -------------------------------------------------
+    elif action == "move":
+        if not body.entity_id:
+            raise HTTPException(status_code=400, detail="entity_id is required for move")
+        if body.parent_id is None:
+            raise HTTPException(status_code=400, detail="parent_id is required for move")
+        if body.position is None:
+            raise HTTPException(status_code=400, detail="position is required for move")
+        if body.values is not None:
+            raise HTTPException(status_code=400, detail="values must be null for move")
+        if etype == "plan":
+            raise HTTPException(status_code=400, detail="The draft plan itself cannot be moved")
+
+        loc = _locate_draft_node(new_plan, etype, body.entity_id)
+        source_list: List[dict] = loc["container_list"]
+        source_index: int = loc["index"]
+
+        required_parent_type = {
+            "phase": "plan", "milestone": "phase",
+            "task": "milestone", "required_checkin": "task",
+        }[etype]
+
+        if required_parent_type == "plan":
+            if body.parent_id != new_plan.get("id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="parent_id must reference the draft plan",
+                )
+            dest_list = new_plan.setdefault("phases", [])
+        else:
+            parent_loc = _locate_draft_node(new_plan, required_parent_type, body.parent_id)
+            child_key = {
+                "phase": "milestones", "milestone": "tasks",
+                "task": "required_checkins",
+            }[required_parent_type]
+            dest_list = parent_loc["node"].setdefault(child_key, [])
+
+        same_parent = dest_list is source_list
+        if same_parent:
+            if body.position < 1 or body.position > len(dest_list):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"position must be between 1 and {len(dest_list)}",
+                )
+        else:
+            # Cross-parent move must not leave source empty.
+            if etype == "milestone" and len(source_list) <= 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Moving the last milestone out of a phase is forbidden",
+                )
+            if etype == "task" and len(source_list) <= 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Moving the last task out of a milestone is forbidden",
+                )
+            if etype == "required_checkin" and len(source_list) <= 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Moving the last required check-in out of a task is forbidden",
+                )
+            if body.position < 1 or body.position > len(dest_list) + 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"position must be between 1 and {len(dest_list) + 1}",
+                )
+
+        node = source_list.pop(source_index)
+        # If same_parent and the removal shifted indices, use raw insert.
+        dest_list.insert(body.position - 1, node)
+
+    # ------ Action: duplicate -------------------------------------------
+    elif action == "duplicate":
+        if not body.entity_id:
+            raise HTTPException(status_code=400, detail="entity_id is required for duplicate")
+        if body.parent_id is None:
+            raise HTTPException(status_code=400, detail="parent_id is required for duplicate")
+        if body.position is None:
+            raise HTTPException(status_code=400, detail="position is required for duplicate")
+        if body.values is not None:
+            raise HTTPException(status_code=400, detail="values must be null for duplicate")
+        if etype == "plan":
+            raise HTTPException(status_code=400, detail="The draft plan itself cannot be duplicated")
+
+        loc = _locate_draft_node(new_plan, etype, body.entity_id)
+
+        required_parent_type = {
+            "phase": "plan", "milestone": "phase",
+            "task": "milestone", "required_checkin": "task",
+        }[etype]
+
+        if required_parent_type == "plan":
+            if body.parent_id != new_plan.get("id"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="parent_id must reference the draft plan",
+                )
+            dest_list = new_plan.setdefault("phases", [])
+        else:
+            parent_loc = _locate_draft_node(new_plan, required_parent_type, body.parent_id)
+            child_key = {
+                "phase": "milestones", "milestone": "tasks",
+                "task": "required_checkins",
+            }[required_parent_type]
+            dest_list = parent_loc["node"].setdefault(child_key, [])
+
+        if body.position < 1 or body.position > len(dest_list) + 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"position must be between 1 and {len(dest_list) + 1}",
+            )
+
+        duplicate = _copy.deepcopy(loc["node"])
+        _reassign_duplicate_ids(duplicate, etype, message_id, body.operation_id)
+        dest_list.insert(body.position - 1, duplicate)
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+
+    # Validate the full resulting hierarchy.
+    _validate_plan_hierarchy(new_plan)
+    _collect_draft_ids(new_plan)  # ensures every id is present and unique
+    return new_plan
+
+
+
+
+async def _materialize_proposal(
+    db, user_id: str, target_type: str, target_id: str, proposal: dict,
+    conversation_id: str, message_id: str,
+) -> Dict[str, Any]:
+    """Idempotently apply an additive proposal with best-effort compensation
+    for records inserted during the current attempt.
+
+    Not multi-collection atomic — every write is a per-key upsert.
+    Reapplying the same (conversation_id, message_id) yields the same records.
+    """
+    if not isinstance(proposal, dict):
+        raise HTTPException(status_code=400, detail="Invalid proposal.")
+
+    # Batch 2B6 — reject unsafe historical operations up front.
+    unsafe_review = HTTPException(
+        status_code=409,
+        detail="This proposal contains changes that require item-by-item review and cannot be applied yet.",
+    )
+    for legacy_field in ("existing_item_changes", "existing_item_updates", "consolidations"):
+        v = proposal.get(legacy_field)
+        if isinstance(v, list) and len(v) > 0:
+            raise unsafe_review
+
+    now = _now()
+    today = datetime.now(timezone.utc).date().isoformat()
+    created_outcomes: List[str] = []
+    created_tasks: List[str] = []
+    created_time_commitments: List[str] = []
+    created_checkins: List[str] = []
+    # Batch 2B7 — durable Plan hierarchy result buckets.
+    plan_document: Optional[dict] = None
+    phase_documents: List[dict] = []
+    milestone_documents: List[dict] = []
+    hierarchical_task_documents: List[dict] = []
+    required_checkin_documents: List[dict] = []
+    inserted_this_attempt: Dict[str, List[str]] = {
+        "expected_outcomes": [], "tasks": [], "time_commitments": [], "checkins": [],
+        "plans": [], "plan_phases": [], "plan_milestones": [], "required_checkins": [],
+    }
+    target_updates: Dict[str, Any] = {}
+    plan_input = proposal.get("plan")
+    has_plan_hierarchy = plan_input is not None
+    if has_plan_hierarchy:
+        _validate_plan_hierarchy(plan_input)
+
+    if target_type == "goal":
+        existing_outcomes = await db.expected_outcomes.find(
+            {"user_id": user_id, "goal_id": target_id}, {"_id": 0},
+        ).to_list(length=200)
+    else:
+        existing_outcomes = []
+    outcome_id_by_title: Dict[str, str] = {
+        (e.get("title") or "").strip().lower(): e["id"] for e in existing_outcomes
+    }
+
+    try:
+        # 2. Expected outcomes (goals only).
+        if target_type == "goal":
+            for idx, eo in enumerate(proposal.get("expected_outcomes") or []):
+                if not isinstance(eo, dict):
+                    continue
+                title = (eo.get("title") or "").strip()
+                if not title:
+                    continue
+                key_lower = title.lower()
+                if key_lower in outcome_id_by_title:
+                    # Title-dedupe against existing.
+                    continue
+                key = _materialization_key(conversation_id, message_id, "expected_outcome", str(idx))
+                doc = {
+                    "id": _materialized_id(key), "user_id": user_id, "goal_id": target_id,
+                    "title": title,
+                    "target_value": (eo.get("target_value") or "").strip(),
+                    "current_value": "",
+                    "unit": (eo.get("unit") or "").strip(),
+                    "deadline": _iso_date(eo.get("deadline")) or "",
+                    "status": "active", "notes": "",
+                    "outcome_type": eo.get("outcome_type") or "generic",
+                    "planning_materialization_key": key,
+                    "created_at": now, "updated_at": now,
+                }
+                stored, was_new = await _upsert_artifact(db, "expected_outcomes", user_id, key, doc)
+                outcome_id_by_title[key_lower] = stored["id"]
+                created_outcomes.append(stored["id"])
+                if was_new:
+                    inserted_this_attempt["expected_outcomes"].append(stored["id"])
+
+        # 2b. Batch 2B7 — Durable Plan → Phase → Milestone → Task →
+        # Required Check-in hierarchy. When the proposal carries a
+        # `plan` object we materialize this permanent hierarchy and
+        # skip the legacy flat tasks/checkins/checkin_recurrences
+        # so the same proposal cannot produce two competing views.
+        if has_plan_hierarchy:
+            plan_title = (plan_input.get("title") or "").strip()
+            plan_key = _materialization_key(conversation_id, message_id, "plan", "0")
+            plan_doc = {
+                "id": _materialized_id(plan_key), "user_id": user_id,
+                "target_type": target_type, "target_id": target_id,
+                "title": plan_title, "status": "active",
+                "source_conversation_id": conversation_id,
+                "planning_materialization_key": plan_key,
+                "created_at": now, "updated_at": now,
+            }
+            stored_plan, was_new = await _upsert_artifact(db, "plans", user_id, plan_key, plan_doc)
+            plan_document = stored_plan
+            plan_id_val = stored_plan["id"]
+            if was_new:
+                inserted_this_attempt["plans"].append(stored_plan["id"])
+            for pi, phase in enumerate(plan_input.get("phases") or []):
+                phase_title = (phase.get("title") or "").strip()
+                phase_desc_raw = phase.get("description")
+                phase_desc = phase_desc_raw.strip() if isinstance(phase_desc_raw, str) and phase_desc_raw.strip() else None
+                phase_key = _materialization_key(conversation_id, message_id, "phase", str(pi))
+                phase_doc = {
+                    "id": _materialized_id(phase_key), "user_id": user_id,
+                    "plan_id": plan_id_val,
+                    "title": phase_title, "description": phase_desc,
+                    "position": pi + 1, "status": "active",
+                    "source_conversation_id": conversation_id,
+                    "planning_materialization_key": phase_key,
+                    "created_at": now, "updated_at": now,
+                }
+                stored_phase, was_new = await _upsert_artifact(db, "plan_phases", user_id, phase_key, phase_doc)
+                phase_documents.append(stored_phase)
+                phase_id_val = stored_phase["id"]
+                if was_new:
+                    inserted_this_attempt["plan_phases"].append(stored_phase["id"])
+                for mi, milestone in enumerate(phase.get("milestones") or []):
+                    m_title = (milestone.get("title") or "").strip()
+                    m_desc_raw = milestone.get("description")
+                    m_desc = m_desc_raw.strip() if isinstance(m_desc_raw, str) and m_desc_raw.strip() else None
+                    m_target_date = _iso_date(milestone.get("target_date")) or None
+                    m_key = _materialization_key(conversation_id, message_id, "milestone", f"{pi}:{mi}")
+                    m_doc = {
+                        "id": _materialized_id(m_key), "user_id": user_id,
+                        "plan_id": plan_id_val, "phase_id": phase_id_val,
+                        "title": m_title, "description": m_desc,
+                        "target_date": m_target_date,
+                        "position": mi + 1, "status": "active",
+                        "source_conversation_id": conversation_id,
+                        "planning_materialization_key": m_key,
+                        "created_at": now, "updated_at": now,
+                    }
+                    stored_m, was_new = await _upsert_artifact(db, "plan_milestones", user_id, m_key, m_doc)
+                    milestone_documents.append(stored_m)
+                    milestone_id_val = stored_m["id"]
+                    if was_new:
+                        inserted_this_attempt["plan_milestones"].append(stored_m["id"])
+                    for ti, task in enumerate(milestone.get("tasks") or []):
+                        t_title = (task.get("title") or "").strip()
+                        t_desc_raw = task.get("description")
+                        t_desc = t_desc_raw.strip() if isinstance(t_desc_raw, str) and t_desc_raw.strip() else ""
+                        t_due = _iso_date(task.get("due_date")) or ""
+                        t_priority = (task.get("priority") or "medium").lower()
+                        if t_priority not in VALID_PRIORITIES:
+                            t_priority = "medium"
+                        t_key = _materialization_key(conversation_id, message_id, "task", f"{pi}:{mi}:{ti}")
+                        t_doc = {
+                            "id": _materialized_id(t_key), "user_id": user_id,
+                            "title": t_title, "description": t_desc,
+                            "due_date": t_due, "priority": t_priority,
+                            "status": "todo",
+                            "notes": "",
+                            "origin": "plan",
+                            "plan_id": plan_id_val,
+                            "phase_id": phase_id_val,
+                            "milestone_id": milestone_id_val,
+                            "goal_id": target_id if target_type == "goal" else None,
+                            "project_id": target_id if target_type == "project" else None,
+                            "expected_outcome_id": None,
+                            "plan_position": ti + 1,
+                            "assigned_to_type": "self", "assigned_to_name": "", "assigned_to_phone": "",
+                            "commitment_type": "postponable",
+                            "planning_materialization_key": t_key,
+                            "created_at": now, "updated_at": now,
+                        }
+                        stored_t, was_new = await _upsert_artifact(db, "tasks", user_id, t_key, t_doc)
+                        hierarchical_task_documents.append(stored_t)
+                        task_id_val = stored_t["id"]
+                        created_tasks.append(stored_t["id"])
+                        if was_new:
+                            inserted_this_attempt["tasks"].append(stored_t["id"])
+                        for ri, rc in enumerate(task.get("required_checkins") or []):
+                            rc_title = (rc.get("title") or "").strip()
+                            rc_prompt = (rc.get("prompt") or "").strip()
+                            rc_cadence = rc.get("cadence")
+                            rc_key = _materialization_key(
+                                conversation_id, message_id, "required_checkin",
+                                f"{pi}:{mi}:{ti}:{ri}",
+                            )
+                            rc_doc = {
+                                "id": _materialized_id(rc_key), "user_id": user_id,
+                                "plan_id": plan_id_val, "phase_id": phase_id_val,
+                                "milestone_id": milestone_id_val, "task_id": task_id_val,
+                                "title": rc_title, "prompt": rc_prompt,
+                                "cadence": rc_cadence,
+                                "position": ri + 1, "status": "active",
+                                "source_conversation_id": conversation_id,
+                                "planning_materialization_key": rc_key,
+                                "created_at": now, "updated_at": now,
+                            }
+                            stored_rc, was_new = await _upsert_artifact(
+                                db, "required_checkins", user_id, rc_key, rc_doc,
+                            )
+                            required_checkin_documents.append(stored_rc)
+                            if was_new:
+                                inserted_this_attempt["required_checkins"].append(stored_rc["id"])
+
+        # 3. Tasks (legacy flat proposal path — only when no plan hierarchy).
+        if not has_plan_hierarchy:
+            for idx, tk in enumerate(proposal.get("tasks") or []):
+                if not isinstance(tk, dict):
+                    continue
+                title = (tk.get("title") or "").strip()
+                if not title:
+                    continue
+                priority = (tk.get("priority") or "medium").lower()
+                if priority not in VALID_PRIORITIES:
+                    priority = "medium"
+                commitment_type = (tk.get("commitment_type") or "postponable").lower()
+                if commitment_type not in VALID_COMMITMENT_TYPES:
+                    commitment_type = "postponable"
+                due = _iso_date(tk.get("due_date")) or ""
+                expected_outcome_id: Optional[str] = None
+                project_id: Optional[str] = None
+                origin = "standalone"
+                if target_type == "goal":
+                    eo_title = (tk.get("expected_outcome_title") or "").strip().lower()
+                    if eo_title and eo_title in outcome_id_by_title:
+                        expected_outcome_id = outcome_id_by_title[eo_title]
+                        origin = "expected_outcome"
+                    elif outcome_id_by_title:
+                        expected_outcome_id = next(iter(outcome_id_by_title.values()))
+                        origin = "expected_outcome"
+                else:
+                    project_id = target_id
+                    origin = "project"
+                key = _materialization_key(conversation_id, message_id, "task", str(idx))
+                doc = {
+                    "id": _materialized_id(key), "user_id": user_id,
+                    "title": title, "due_date": due,
+                    "priority": priority, "status": "todo",
+                    "notes": (tk.get("notes") or "").strip(),
+                    "origin": origin,
+                    "expected_outcome_id": expected_outcome_id,
+                    "project_id": project_id,
+                    "component_id": None,
+                    "assigned_to_type": "self", "assigned_to_name": "", "assigned_to_phone": "",
+                    "commitment_type": commitment_type,
+                    "planning_materialization_key": key,
+                    "created_at": now, "updated_at": now,
+                }
+                stored, was_new = await _upsert_artifact(db, "tasks", user_id, key, doc)
+                created_tasks.append(stored["id"])
+                if was_new:
+                    inserted_this_attempt["tasks"].append(stored["id"])
+
+        # 4. Time commitments.
+        for idx, tc in enumerate(proposal.get("time_commitments") or []):
+            if not isinstance(tc, dict):
+                continue
+            title = (tc.get("title") or "").strip()
+            day = (tc.get("day_of_week") or "").strip().lower()
+            start = _normalize_hhmm(tc.get("start_time"))
+            end = _normalize_hhmm(tc.get("end_time"))
+            if not (title and day in VALID_DAYS_OF_WEEK and start and end):
+                continue
+            def _mins(hhmm: str) -> int:
+                h, m = hhmm.split(":")
+                return int(h) * 60 + int(m)
+            if _mins(end) <= _mins(start):
+                continue
+            ctype = (tc.get("commitment_type") or "personal").strip().lower()
+            if ctype not in VALID_TC_TYPES:
+                ctype = "personal"
+            flex = (tc.get("flexibility") or "flexible").strip().lower()
+            if flex not in VALID_TC_FLEX:
+                flex = "flexible"
+            key = _materialization_key(conversation_id, message_id, "time_commitment", str(idx))
+            doc = {
+                "id": _materialized_id(key), "user_id": user_id,
+                "title": title, "day_of_week": day,
+                "start_time": start, "end_time": end,
+                "commitment_type": ctype, "flexibility": flex,
+                "effective_from": today, "effective_until": None,
+                "source_type": "system", "source_id": None,
+                "notes": (tc.get("notes") or "").strip(),
+                "planning_materialization_key": key,
+                "created_at": now, "updated_at": now,
+            }
+            stored, was_new = await _upsert_artifact(db, "time_commitments", user_id, key, doc)
+            created_time_commitments.append(stored["id"])
+            if was_new:
+                inserted_this_attempt["time_commitments"].append(stored["id"])
+
+        # 5. Check-ins.
+        async def _resolve_checkin_anchor(entry: dict) -> Optional[Dict[str, Any]]:
+            ci_type = (entry.get("type") or "").lower()
+            if ci_type not in VALID_CHECKIN_TYPES:
+                return None
+            base = {"type": ci_type,
+                    "expected_outcome_id": None, "goal_id": None,
+                    "project_id": None, "task_id": None,
+                    "outcome_type": None}
+            if ci_type == "goal":
+                eo_title = (entry.get("expected_outcome_title") or "").strip().lower()
+                eo_id: Optional[str] = None
+                if eo_title and eo_title in outcome_id_by_title:
+                    eo_id = outcome_id_by_title[eo_title]
+                elif target_type == "goal" and outcome_id_by_title:
+                    eo_id = next(iter(outcome_id_by_title.values()))
+                if not eo_id:
+                    return None
+                eo = await db.expected_outcomes.find_one(
+                    {"id": eo_id, "user_id": user_id}, {"_id": 0},
+                )
+                if not eo:
+                    return None
+                base["expected_outcome_id"] = eo["id"]
+                base["goal_id"] = eo["goal_id"]
+                base["outcome_type"] = eo.get("outcome_type", "generic")
+            elif ci_type == "project":
+                pid = (entry.get("project_id") or "").strip() or (target_id if target_type == "project" else None)
+                if not pid:
+                    return None
+                p = await db.projects.find_one({"id": pid, "user_id": user_id}, {"_id": 0, "id": 1})
+                if not p:
+                    return None
+                base["project_id"] = p["id"]
+            return base
+
+        for idx, entry in enumerate((proposal.get("checkins") or []) if not has_plan_hierarchy else []):
+            if not isinstance(entry, dict):
+                continue
+            title = (entry.get("title") or "").strip()
+            date = _iso_date(entry.get("date")) or ""
+            time_hhmm = _normalize_hhmm(entry.get("time")) or ""
+            if not (title and date and time_hhmm):
+                continue
+            anchor = await _resolve_checkin_anchor(entry)
+            if not anchor:
+                continue
+            key = _materialization_key(conversation_id, message_id, "checkin", str(idx))
+            doc = {
+                "id": _materialized_id(key), "user_id": user_id,
+                "type": anchor["type"], "title": title,
+                "date": date, "time": time_hhmm,
+                "notes": (entry.get("notes") or "").strip(), "attachment": "",
+                "expected_outcome_id": anchor["expected_outcome_id"],
+                "goal_id": anchor["goal_id"], "project_id": anchor["project_id"],
+                "task_id": None, "component_id": None, "follow_up_task_id": None,
+                "source": "system", "outcome_type": anchor["outcome_type"],
+                "data": {}, "money_spent": None, "money_currency": None,
+                "planning_materialization_key": key,
+                "created_at": now, "updated_at": now,
+            }
+            stored, was_new = await _upsert_artifact(db, "checkins", user_id, key, doc)
+            created_checkins.append(stored["id"])
+            if was_new:
+                inserted_this_attempt["checkins"].append(stored["id"])
+
+        # 6. Recurring check-ins (legacy — skipped when plan hierarchy present).
+        for rule_index, rule in enumerate((proposal.get("checkin_recurrences") or []) if not has_plan_hierarchy else []):
+            if not isinstance(rule, dict):
+                continue
+            title = (rule.get("title") or "").strip()
+            start = _iso_date(rule.get("start_date"))
+            end = _iso_date(rule.get("end_date"))
+            time_hhmm = _normalize_hhmm(rule.get("time")) or ""
+            if not (title and start and end and time_hhmm):
+                continue
+            anchor = await _resolve_checkin_anchor(rule)
+            if not anchor:
+                continue
+            dows = rule.get("days_of_week") or None
+            if isinstance(dows, list) and not dows:
+                dows = None
+            for d in _iter_dates(start, end, dows):
+                key = _materialization_key(conversation_id, message_id, "recurring_checkin", f"{rule_index}:{d}")
+                doc = {
+                    "id": _materialized_id(key), "user_id": user_id,
+                    "type": anchor["type"], "title": title,
+                    "date": d, "time": time_hhmm,
+                    "notes": (rule.get("notes") or "").strip(), "attachment": "",
+                    "expected_outcome_id": anchor["expected_outcome_id"],
+                    "goal_id": anchor["goal_id"], "project_id": anchor["project_id"],
+                    "task_id": None, "component_id": None, "follow_up_task_id": None,
+                    "source": "system", "outcome_type": anchor["outcome_type"],
+                    "data": {}, "money_spent": None, "money_currency": None,
+                    "planning_materialization_key": key,
+                    "created_at": now, "updated_at": now,
+                }
+                stored, was_new = await _upsert_artifact(db, "checkins", user_id, key, doc)
+                created_checkins.append(stored["id"])
+                if was_new:
+                    inserted_this_attempt["checkins"].append(stored["id"])
+
+        # 7. Cadence + target updates (deadline / notes / commitment_type only).
+        cadence = proposal.get("checkin_cadence")
+        if isinstance(cadence, str) and cadence.strip().lower() in VALID_CADENCES:
+            target_updates["checkin_cadence"] = cadence.strip().lower()
+        tu = proposal.get("target_updates") or {}
+        if isinstance(tu, dict):
+            deadline = _iso_date(tu.get("deadline"))
+            if deadline:
+                target_updates["deadline" if target_type == "goal" else "target_end_date"] = deadline
+            notes = tu.get("notes")
+            if isinstance(notes, str) and notes.strip():
+                notes_field = "notes" if target_type == "goal" else "description"
+                target_updates[notes_field] = notes.strip()
+            ct = (tu.get("commitment_type") or "").strip().lower() if isinstance(tu.get("commitment_type"), str) else ""
+            if ct in VALID_COMMITMENT_TYPES:
+                target_updates["commitment_type"] = ct
+        if target_updates:
+            target_updates["updated_at"] = now
+            coll = "goals" if target_type == "goal" else "projects"
+            await db[coll].update_one(
+                {"id": target_id, "user_id": user_id}, {"$set": target_updates},
+            )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Best-effort compensation — only for records inserted THIS attempt.
+        for tid in inserted_this_attempt["tasks"]:
+            await db.tasks.delete_one({"id": tid, "user_id": user_id})
+        for eid in inserted_this_attempt["expected_outcomes"]:
+            await db.expected_outcomes.delete_one({"id": eid, "user_id": user_id})
+        for tcid in inserted_this_attempt["time_commitments"]:
+            await db.time_commitments.delete_one({"id": tcid, "user_id": user_id})
+        for cid in inserted_this_attempt["checkins"]:
+            await db.checkins.delete_one({"id": cid, "user_id": user_id})
+        # Batch 2B7 — compensation for plan hierarchy inserts.
+        for rcid in inserted_this_attempt["required_checkins"]:
+            await db.required_checkins.delete_one({"id": rcid, "user_id": user_id})
+        for mid in inserted_this_attempt["plan_milestones"]:
+            await db.plan_milestones.delete_one({"id": mid, "user_id": user_id})
+        for phid in inserted_this_attempt["plan_phases"]:
+            await db.plan_phases.delete_one({"id": phid, "user_id": user_id})
+        for pid in inserted_this_attempt["plans"]:
+            await db.plans.delete_one({"id": pid, "user_id": user_id})
+        raise HTTPException(status_code=500,
+                            detail=f"Failed to apply proposal: {type(exc).__name__}")
+
+    return {
+        "created_outcomes": created_outcomes,
+        "created_tasks": created_tasks,
+        "created_time_commitments": created_time_commitments,
+        "created_checkins": created_checkins,
+        "target_updated": bool(target_updates),
+        # Batch 2B7 — durable Plan hierarchy artifacts (empty for legacy proposals).
+        "plan": plan_document,
+        "phases": phase_documents,
+        "milestones": milestone_documents,
+        "tasks": hierarchical_task_documents,
+        "required_checkins": required_checkin_documents,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
+
+
+class MessageRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class MaterializeRequest(BaseModel):
+    message_id: str
+    # Batch 2B8 — required for editable plan proposals so that a concurrent
+    # edit cannot slip in between reading and materializing the draft. Legacy
+    # proposals (no plan hierarchy) may still omit this.
+    expected_proposal_revision: Optional[int] = Field(default=None, ge=1)
+
+
+class HierarchyOperationRequest(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=64)
+    expected_revision: int = Field(ge=1)
+    action: Literal["add", "update", "delete", "move", "duplicate"]
+    entity_type: Literal[
+        "plan",
+        "phase",
+        "milestone",
+        "task",
+        "required_checkin",
+    ]
+    entity_id: Optional[str] = None
+    parent_id: Optional[str] = None
+    position: Optional[int] = Field(default=None, ge=1)
+    values: Optional[Dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+
+@planning_router.get("/{target_type}/{target_id}/conversation")
+async def get_conversation(
+    target_type: str, target_id: str,
+    current_user: dict = Depends(get_current_user),
 ):
     db = get_db()
-    proposal = await _load_proposal(db, current_user["id"], proposal_id)
-    _require_in(body.future_allocations, ("retain", "reduce", "release"), "future_allocations")
-    committed = proposal.get("committed_action_ids") or []
-    if body.future_allocations == "release" and committed:
-        today = _today_iso()
-        await db.resource_allocations.update_many(
-            {"id": {"$in": committed},
-             "$or": [{"date": {"$gte": today}}, {"due_date": {"$gte": today}}]},
-            {"$set": {"status": "released", "state": "cancelled", "updated_at": _now()}},
+    conv = await _get_or_create_conversation(db, current_user["id"], target_type, target_id)
+    return _public_conversation(conv)
+
+
+@planning_router.post("/{target_type}/{target_id}/messages")
+async def post_message(
+    target_type: str, target_id: str, body: MessageRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    conv = await _get_or_create_conversation(db, current_user["id"], target_type, target_id)
+    ctx = await _read_context(db, current_user["id"], target_type, target_id)
+
+    now = _now()
+    user_msg = {
+        "id": _uuid(), "role": "user",
+        "content": body.content.strip(),
+        "created_at": now,
+    }
+    # LLM call uses in-memory copy of history including this user_msg.
+    conv_messages_for_llm = list(conv.get("messages") or []) + [user_msg]
+    raw = await _call_llm(conv_messages_for_llm, body.content.strip(), ctx)
+    prose, proposal = _split_message(raw)
+    if not prose and proposal:
+        prose = proposal.get("summary") or "Here are some proposed changes for your plan."
+
+    # Batch 2B8 — generate the assistant message id up front so that when
+    # the proposal carries a durable Plan hierarchy we can normalise it with
+    # stable draft node ids anchored to this message id before storing.
+    assistant_message_id = _uuid()
+    if isinstance(proposal, dict) and isinstance(proposal.get("plan"), dict):
+        _validate_plan_hierarchy(proposal["plan"])
+        proposal["plan"] = _normalise_draft_hierarchy(proposal["plan"], assistant_message_id)
+        asst_msg = {
+            "id": assistant_message_id, "role": "assistant",
+            "content": raw,
+            "proposal": proposal,
+            "proposal_revision": 1,
+            "proposal_operation_ids": [],
+            "created_at": _now(),
+        }
+    else:
+        asst_msg = {
+            "id": assistant_message_id, "role": "assistant",
+            "content": raw,
+            "proposal": proposal,
+            "created_at": _now(),
+        }
+
+    # Batch 2B6 — atomic $push instead of a whole-document replace so a
+    # concurrent write can't erase materialization state.
+    r = await db.plan_conversations.update_one(
+        {"id": conv["id"], "user_id": current_user["id"]},
+        {"$push": {"messages": {"$each": [user_msg, asst_msg]}},
+         "$set": {"updated_at": _now()}},
+    )
+    if r.modified_count == 0:
+        raise HTTPException(status_code=409, detail="Conversation changed; reload and try again.")
+    fresh = await db.plan_conversations.find_one(
+        {"id": conv["id"], "user_id": current_user["id"]}, {"_id": 0},
+    )
+    return _public_conversation(fresh or conv)
+
+
+@planning_router.post("/{target_type}/{target_id}/reset")
+async def reset_conversation(
+    target_type: str, target_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    _require(target_type in TARGET_TYPES, f"target_type must be one of {list(TARGET_TYPES)}")
+    await _read_target(db, current_user["id"], target_type, target_id)
+    # Batch 2B6 — refuse to delete while a materialization is in flight.
+    r = await db.plan_conversations.delete_one({
+        "user_id": current_user["id"],
+        "target_type": target_type,
+        "target_id": target_id,
+        "messages": {"$not": {"$elemMatch": {"materialization_state": "applying"}}},
+    })
+    if r.deleted_count == 0:
+        still = await db.plan_conversations.find_one(
+            {"user_id": current_user["id"], "target_type": target_type, "target_id": target_id},
+            {"_id": 0, "id": 1},
         )
-    elif body.future_allocations == "reduce" and committed:
-        for alloc_id in committed:
-            alloc = await db.resource_allocations.find_one({"id": alloc_id}, {"_id": 0})
-            if not alloc or alloc.get("resource_type") != "money":
-                continue
-            current_qty = _decimal_from_stored(alloc.get("quantity"))
-            new_qty = current_qty / 2
-            await db.resource_allocations.update_one(
-                {"id": alloc_id},
-                {"$set": {"quantity": Decimal128(new_qty), "amount": Decimal128(new_qty),
-                          "updated_at": _now()}},
+        if still:
+            raise HTTPException(
+                status_code=409,
+                detail="A proposal is currently being applied. Try again after it finishes.",
             )
-    proposal["status"] = "paused"
-    proposal["pause_policy"] = body.future_allocations
-    proposal["updated_at"] = _now()
-    await _store_proposal(db, proposal)
-    return {"status": "paused", "future_allocations": body.future_allocations}
+    conv = await _get_or_create_conversation(db, current_user["id"], target_type, target_id)
+    return _public_conversation(conv)
 
 
-@planning_router.post("/reassess")
-async def reassess(body: AnalyzeRequest, current_user: dict = Depends(get_current_user)):
-    return await analyze(body, current_user)
+@planning_router.post("/conversations/{conversation_id}/materialize")
+async def materialize(
+    conversation_id: str, body: MaterializeRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    conv = await db.plan_conversations.find_one(
+        {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    target_msg: Optional[dict] = None
+    for m in conv.get("messages") or []:
+        if m.get("id") == body.message_id:
+            target_msg = m
+            break
+    if not target_msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if target_msg.get("materialized_at"):
+        # Already applied — return stored result idempotently.
+        return {
+            "conversation": _public_conversation(conv),
+            "result": target_msg.get("materialization_result") or {},
+        }
+    proposal = target_msg.get("proposal")
+    if not proposal:
+        raise HTTPException(status_code=400, detail="This message has no proposal to apply.")
+
+    # Batch 2B8 — revision guard for editable plan proposals.
+    has_plan = isinstance(proposal, dict) and isinstance(proposal.get("plan"), dict)
+    if has_plan:
+        if body.expected_proposal_revision is None:
+            raise HTTPException(
+                status_code=400,
+                detail="expected_proposal_revision is required for an editable plan",
+            )
+        stored_rev = target_msg.get("proposal_revision")
+        if not isinstance(stored_rev, int) or stored_rev != body.expected_proposal_revision:
+            raise HTTPException(
+                status_code=409,
+                detail="The draft changed; refresh it before applying",
+            )
+
+    # Batch 2B6 — atomic claim on the embedded message. Batch 2B8 adds a
+    # proposal_revision predicate so that any edit racing this claim is
+    # forced to fail with a revision-mismatch 409.
+    claim_id = _uuid()
+    claim_started_at = _now()
+    claim_elem_match: Dict[str, Any] = {
+        "id": body.message_id,
+        "materialized_at": {"$exists": False},
+        "$or": [
+            {"materialization_state": {"$exists": False}},
+            {"materialization_state": "failed"},
+        ],
+    }
+    if has_plan:
+        claim_elem_match["proposal_revision"] = body.expected_proposal_revision
+    claim = await db.plan_conversations.update_one(
+        {
+            "id": conversation_id,
+            "user_id": current_user["id"],
+            "messages": {"$elemMatch": claim_elem_match},
+        },
+        {
+            "$set": {
+                "messages.$.materialization_state": "applying",
+                "messages.$.materialization_claim_id": claim_id,
+                "messages.$.materialization_started_at": claim_started_at,
+                "updated_at": _now(),
+            },
+        },
+    )
+    if claim.modified_count == 0:
+        fresh = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        if fresh:
+            for m in fresh.get("messages") or []:
+                if m.get("id") == body.message_id:
+                    if m.get("materialization_state") == "applied" and m.get("materialized_at"):
+                        return {
+                            "conversation": _public_conversation(fresh),
+                            "result": m.get("materialization_result") or {},
+                        }
+                    if m.get("materialization_state") == "applying":
+                        raise HTTPException(status_code=409, detail="This proposal is already being applied.")
+                    if has_plan and m.get("proposal_revision") != body.expected_proposal_revision:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="The draft changed; refresh it before applying",
+                        )
+                    break
+        raise HTTPException(status_code=409, detail="This proposal could not be claimed for application.")
+
+    try:
+        # Batch 2B8.1 — reread + claim verification are now INSIDE the try
+        # block so that any failure here runs the existing except-cleanup
+        # and clears the "applying" state. This matches the guarantee that
+        # a claim once set is always released (either to "applied" or to
+        # "failed") no matter which downstream step raises.
+        claimed_conv = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        ) or conv
+        claimed_msg: Optional[dict] = None
+        for m in claimed_conv.get("messages") or []:
+            if m.get("id") == body.message_id and m.get("materialization_claim_id") == claim_id:
+                claimed_msg = m
+                break
+        if claimed_msg is None or not isinstance(claimed_msg.get("proposal"), dict):
+            raise HTTPException(
+                status_code=409,
+                detail="This proposal could not be claimed for application.",
+            )
+        proposal = claimed_msg["proposal"]
+
+        result = await _materialize_proposal(
+            db, current_user["id"], conv["target_type"], conv["target_id"], proposal,
+            conversation_id=conversation_id, message_id=body.message_id,
+        )
+        bits: List[str] = []
+        if result.get("created_outcomes"):
+            n = len(result["created_outcomes"]); bits.append(f"{n} outcome{'s' if n != 1 else ''}")
+        if result.get("created_tasks"):
+            n = len(result["created_tasks"]); bits.append(f"{n} task{'s' if n != 1 else ''}")
+        if result.get("created_checkins"):
+            n = len(result["created_checkins"]); bits.append(f"{n} check-in{'s' if n != 1 else ''}")
+        if result.get("created_time_commitments"):
+            n = len(result["created_time_commitments"]); bits.append(f"{n} time commitment{'s' if n != 1 else ''}")
+        summary = "Added " + ", ".join(bits) + "." if bits else "Applied."
+
+        finalise = await db.plan_conversations.update_one(
+            {
+                "id": conversation_id,
+                "user_id": current_user["id"],
+                "messages": {"$elemMatch": {
+                    "id": body.message_id,
+                    "materialization_claim_id": claim_id,
+                }},
+            },
+            {
+                "$set": {
+                    "messages.$.materialization_state": "applied",
+                    "messages.$.materialized_at": _now(),
+                    "messages.$.materialized_summary": summary,
+                    "messages.$.materialization_result": result,
+                    "updated_at": _now(),
+                },
+                "$unset": {
+                    "messages.$.materialization_claim_id": "",
+                    "messages.$.materialization_started_at": "",
+                    "messages.$.materialization_error": "",
+                },
+            },
+        )
+        if finalise.modified_count == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Proposal application completed but its conversation state could not be finalized.",
+            )
+        fresh = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        return {"conversation": _public_conversation(fresh or conv), "result": result}
+    except Exception as exc:
+        await db.plan_conversations.update_one(
+            {
+                "id": conversation_id,
+                "user_id": current_user["id"],
+                "messages": {"$elemMatch": {
+                    "id": body.message_id,
+                    "materialization_claim_id": claim_id,
+                }},
+            },
+            {
+                "$set": {
+                    "messages.$.materialization_state": "failed",
+                    "messages.$.materialization_error": type(exc).__name__,
+                    "updated_at": _now(),
+                },
+                "$unset": {
+                    "messages.$.materialization_claim_id": "",
+                    "messages.$.materialization_started_at": "",
+                },
+            },
+        )
+        raise
 
 
-# ============================================================================
+# ---------------------------------------------------------------------------
+# Batch 2B8 — draft (in-conversation) hierarchy editing endpoints.
+# These operate ONLY on the proposal.plan embedded in the assistant message
+# in plan_conversations. They MUST NEVER edit permanent hierarchy records.
+# No LLM call happens here.
+# ---------------------------------------------------------------------------
+
+
+def _get_assistant_hierarchy_message(conv: dict, message_id: str) -> dict:
+    """Return the assistant message with an editable plan hierarchy, or
+    raise the appropriate error (404 / 400 / 409)."""
+    target_msg: Optional[dict] = None
+    for m in conv.get("messages") or []:
+        if m.get("id") == message_id:
+            target_msg = m
+            break
+    if not target_msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if target_msg.get("role") != "assistant":
+        raise HTTPException(status_code=400, detail="This message has no editable plan hierarchy")
+    proposal = target_msg.get("proposal")
+    if not isinstance(proposal, dict) or not isinstance(proposal.get("plan"), dict):
+        raise HTTPException(status_code=400, detail="This message has no editable plan hierarchy")
+    if target_msg.get("materialized_at"):
+        raise HTTPException(status_code=409, detail="This proposal has already been applied")
+    if target_msg.get("materialization_state") == "applied":
+        raise HTTPException(status_code=409, detail="This proposal has already been applied")
+    if target_msg.get("materialization_state") == "applying":
+        raise HTTPException(status_code=409, detail="This proposal is currently being applied")
+    return target_msg
+
+
+def _valid_uuid(v: Any) -> bool:
+    if not isinstance(v, str) or not v:
+        return False
+    try:
+        uuid.UUID(v)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
+@planning_router.get("/conversations/{conversation_id}/proposals/{message_id}/hierarchy")
+async def read_draft_hierarchy(
+    conversation_id: str, message_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    conv = await db.plan_conversations.find_one(
+        {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    msg = _get_assistant_hierarchy_message(conv, message_id)
+
+    # Batch 2B8.2 — strict presence/validity checks. `type(x) is int` (not
+    # ``isinstance``) rejects booleans, which are ``int`` subclass instances
+    # in Python but must never be treated as revisions.
+    stored_revision_raw = msg.get("proposal_revision")
+    stored_operations_raw = msg.get("proposal_operation_ids")
+    needs_backfill = not (
+        type(stored_revision_raw) is int
+        and stored_revision_raw >= 1
+        and isinstance(stored_operations_raw, list)
+    )
+    plan = msg["proposal"].get("plan") or {}
+    # Also backfill if any node is missing an id.
+    try:
+        _collect_draft_ids(plan)
+        ids_ok = True
+    except HTTPException:
+        ids_ok = False
+
+    if needs_backfill or not ids_ok:
+        normalised = _normalise_draft_hierarchy(plan, message_id)
+
+        # Batch 2B8.1 / 2B8.2 — compare-and-set predicate.
+        # Field PRESENCE and field VALIDITY are captured separately: the
+        # predicate must match the exact stored raw value when the field is
+        # present, even if that value is malformed (null, 0, True/False, a
+        # string, or a wrong-typed list). Only if the field is truly absent
+        # do we match ``{"$exists": False}``. This lets a subsequent write
+        # repair malformed fields instead of stalling forever.
+        snapshot_plan = plan
+        revision_field_present = "proposal_revision" in msg
+        operations_field_present = "proposal_operation_ids" in msg
+        snapshot_rev_raw = stored_revision_raw  # raw, unconverted
+        snapshot_ops_raw = stored_operations_raw  # raw, unconverted
+
+        # Writing values are normalised strictly.
+        new_revision = (
+            snapshot_rev_raw
+            if type(snapshot_rev_raw) is int and snapshot_rev_raw >= 1
+            else 1
+        )
+        new_ops = (
+            list(snapshot_ops_raw)
+            if isinstance(snapshot_ops_raw, list)
+            else []
+        )
+
+        elem_match: Dict[str, Any] = {
+            "id": message_id,
+            "materialized_at": {"$exists": False},
+            "materialization_state": {"$nin": ["applying", "applied"]},
+            "proposal.plan": snapshot_plan,
+        }
+        if revision_field_present:
+            elem_match["proposal_revision"] = snapshot_rev_raw
+        else:
+            elem_match["proposal_revision"] = {"$exists": False}
+        if operations_field_present:
+            elem_match["proposal_operation_ids"] = snapshot_ops_raw
+        else:
+            elem_match["proposal_operation_ids"] = {"$exists": False}
+
+        r = await db.plan_conversations.update_one(
+            {
+                "id": conversation_id,
+                "user_id": current_user["id"],
+                "messages": {"$elemMatch": elem_match},
+            },
+            {
+                "$set": {
+                    "messages.$.proposal.plan": normalised,
+                    "messages.$.proposal_revision": new_revision,
+                    "messages.$.proposal_operation_ids": new_ops,
+                    "updated_at": _now(),
+                },
+            },
+        )
+        # Whether the CAS write hit or not, always re-read and re-check the
+        # message. modified_count == 0 might just mean another request
+        # (concurrent normalise, edit, apply) already put the message into
+        # a healthier state — in which case we should serve THAT hierarchy,
+        # not our stale one.
+        conv = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        # _get_assistant_hierarchy_message raises the state-specific 409s
+        # (applied / applying) — those responses must be preserved.
+        msg = _get_assistant_hierarchy_message(conv, message_id)
+
+        fresh_plan = (msg.get("proposal") or {}).get("plan")
+        fresh_rev = msg.get("proposal_revision")
+        fresh_ops = msg.get("proposal_operation_ids")
+        fresh_is_valid = False
+        # Batch 2B8.2 — exact int type check so booleans do not sneak in as
+        # revisions.
+        if (
+            isinstance(fresh_plan, dict)
+            and type(fresh_rev) is int
+            and fresh_rev >= 1
+            and isinstance(fresh_ops, list)
+        ):
+            try:
+                _validate_plan_hierarchy(fresh_plan)
+                _collect_draft_ids(fresh_plan)
+                fresh_is_valid = True
+            except HTTPException:
+                fresh_is_valid = False
+        if not fresh_is_valid:
+            # Do NOT persist or return the stale in-memory hierarchy.
+            raise HTTPException(status_code=409, detail="The draft changed; refresh it and try again")
+
+    return {
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "proposal_revision": msg.get("proposal_revision") or 1,
+        "plan": (msg.get("proposal") or {}).get("plan") or {},
+    }
+
+
+@planning_router.post(
+    "/conversations/{conversation_id}/proposals/{message_id}/hierarchy/operations"
+)
+async def apply_hierarchy_operation(
+    conversation_id: str, message_id: str, body: HierarchyOperationRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if not _valid_uuid(body.operation_id):
+        raise HTTPException(status_code=400, detail="operation_id must be a valid UUID")
+
+    db = get_db()
+    conv = await db.plan_conversations.find_one(
+        {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not conv:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    msg = _get_assistant_hierarchy_message(conv, message_id)
+
+    # Idempotency — the same operation id must not be applied twice.
+    existing_ops = list(msg.get("proposal_operation_ids") or [])
+    if body.operation_id in existing_ops:
+        return {
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "operation_id": body.operation_id,
+            "proposal_revision": msg.get("proposal_revision") or 1,
+            "plan": (msg.get("proposal") or {}).get("plan") or {},
+        }
+
+    stored_rev = msg.get("proposal_revision")
+    if not isinstance(stored_rev, int) or stored_rev != body.expected_revision:
+        raise HTTPException(status_code=409, detail="The draft changed; refresh it and try again")
+
+    current_plan = (msg.get("proposal") or {}).get("plan") or {}
+    updated_plan = _apply_draft_hierarchy_operation(current_plan, message_id, body)
+
+    r = await db.plan_conversations.update_one(
+        {
+            "id": conversation_id,
+            "user_id": current_user["id"],
+            "messages": {"$elemMatch": {
+                "id": message_id,
+                "proposal_revision": body.expected_revision,
+                "materialized_at": {"$exists": False},
+                "materialization_state": {"$nin": ["applying", "applied"]},
+                "proposal_operation_ids": {"$ne": body.operation_id},
+            }},
+        },
+        {
+            "$set": {
+                "messages.$.proposal.plan": updated_plan,
+                "messages.$.proposal_revision": body.expected_revision + 1,
+                "updated_at": _now(),
+            },
+            "$push": {"messages.$.proposal_operation_ids": body.operation_id},
+            "$unset": {
+                "messages.$.materialization_state": "",
+                "messages.$.materialization_error": "",
+            },
+        },
+    )
+
+    if r.modified_count == 0:
+        fresh = await db.plan_conversations.find_one(
+            {"id": conversation_id, "user_id": current_user["id"]}, {"_id": 0},
+        )
+        if fresh:
+            for m in fresh.get("messages") or []:
+                if m.get("id") == message_id:
+                    if body.operation_id in (m.get("proposal_operation_ids") or []):
+                        return {
+                            "conversation_id": conversation_id,
+                            "message_id": message_id,
+                            "operation_id": body.operation_id,
+                            "proposal_revision": m.get("proposal_revision") or 1,
+                            "plan": (m.get("proposal") or {}).get("plan") or {},
+                        }
+                    if m.get("materialized_at") or m.get("materialization_state") == "applied":
+                        raise HTTPException(status_code=409, detail="This proposal has already been applied")
+                    if m.get("materialization_state") == "applying":
+                        raise HTTPException(status_code=409, detail="This proposal is currently being applied")
+                    break
+        raise HTTPException(status_code=409, detail="The draft changed; refresh it and try again")
+
+    return {
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "operation_id": body.operation_id,
+        "proposal_revision": body.expected_revision + 1,
+        "plan": updated_plan,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Durable Plan hierarchy — read-only endpoints (Batch 2B7)
+# ---------------------------------------------------------------------------
+
+
+@planning_router.get("/hierarchy/targets/{target_type}/{target_id}")
+async def list_target_plans(
+    target_type: str, target_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    _require(target_type in TARGET_TYPES, f"target_type must be one of {list(TARGET_TYPES)}")
+    db = get_db()
+    plans = await db.plans.find(
+        {
+            "user_id": current_user["id"],
+            "target_type": target_type,
+            "target_id": target_id,
+        },
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(length=500)
+    return {"plans": plans}
+
+
+@planning_router.get("/hierarchy/plans/{plan_id}")
+async def read_plan_hierarchy(
+    plan_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    db = get_db()
+    plan = await db.plans.find_one(
+        {"id": plan_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+
+    phases = await db.plan_phases.find(
+        {"user_id": current_user["id"], "plan_id": plan_id}, {"_id": 0},
+    ).sort("position", 1).to_list(length=1000)
+    milestones = await db.plan_milestones.find(
+        {"user_id": current_user["id"], "plan_id": plan_id}, {"_id": 0},
+    ).sort("position", 1).to_list(length=5000)
+    tasks = await db.tasks.find(
+        {"user_id": current_user["id"], "plan_id": plan_id}, {"_id": 0},
+    ).sort("plan_position", 1).to_list(length=20000)
+    required_checkins = await db.required_checkins.find(
+        {"user_id": current_user["id"], "plan_id": plan_id}, {"_id": 0},
+    ).sort("position", 1).to_list(length=50000)
+
+    tasks_by_milestone: Dict[str, List[dict]] = {}
+    for t in tasks:
+        tasks_by_milestone.setdefault(t.get("milestone_id") or "", []).append(t)
+    for lst in tasks_by_milestone.values():
+        lst.sort(key=lambda x: int(x.get("plan_position") or 0))
+
+    rcs_by_task: Dict[str, List[dict]] = {}
+    for rc in required_checkins:
+        rcs_by_task.setdefault(rc.get("task_id") or "", []).append(rc)
+    for lst in rcs_by_task.values():
+        lst.sort(key=lambda x: int(x.get("position") or 0))
+
+    milestones_by_phase: Dict[str, List[dict]] = {}
+    for m in milestones:
+        milestones_by_phase.setdefault(m.get("phase_id") or "", []).append(m)
+    for lst in milestones_by_phase.values():
+        lst.sort(key=lambda x: int(x.get("position") or 0))
+
+    phases.sort(key=lambda x: int(x.get("position") or 0))
+    nested_phases: List[dict] = []
+    for phase in phases:
+        phase_out = dict(phase)
+        phase_milestones = milestones_by_phase.get(phase["id"], [])
+        nested_milestones: List[dict] = []
+        for m in phase_milestones:
+            m_out = dict(m)
+            m_tasks = tasks_by_milestone.get(m["id"], [])
+            nested_tasks: List[dict] = []
+            for t in m_tasks:
+                t_out = dict(t)
+                t_out["required_checkins"] = rcs_by_task.get(t["id"], [])
+                nested_tasks.append(t_out)
+            m_out["tasks"] = nested_tasks
+            nested_milestones.append(m_out)
+        phase_out["milestones"] = nested_milestones
+        nested_phases.append(phase_out)
+
+    plan_out = dict(plan)
+    plan_out["phases"] = nested_phases
+    return {"plan": plan_out}
+
+
+# ---------------------------------------------------------------------------
 # Index bootstrap
-# ============================================================================
+# ---------------------------------------------------------------------------
+
 
 async def ensure_planning_indexes(database) -> None:
-    await database.plan_proposals.create_index("id", unique=True)
-    await database.plan_proposals.create_index("user_id")
-    await database.plan_proposals.create_index(
-        [("user_id", 1), ("target_type", 1), ("target_id", 1)])
-    await database.plan_proposals.create_index([("user_id", 1), ("created_at", -1)])
-    await database.plan_action_log.create_index(
-        [("proposal_id", 1), ("version", 1), ("action_id", 1)], unique=True)
-    await database.plan_action_log.create_index([("user_id", 1), ("proposal_id", 1)])
+    await database.plan_conversations.create_index("id", unique=True)
+    await database.plan_conversations.create_index(
+        [("user_id", 1), ("target_type", 1), ("target_id", 1)], unique=True,
+    )
+    await database.plan_conversations.create_index([("user_id", 1), ("updated_at", -1)])
+    # Batch 2B6 — per-collection partial unique indexes on the
+    # materialization key so retries cannot create duplicates even if
+    # the app-level upsert loses the race with a concurrent writer.
+    await database.expected_outcomes.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="expected_outcomes_planning_mat_key_uniq",
+    )
+    await database.tasks.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="tasks_planning_mat_key_uniq",
+    )
+    await database.time_commitments.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="time_commitments_planning_mat_key_uniq",
+    )
+    await database.checkins.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="checkins_planning_mat_key_uniq",
+    )
+    # Batch 2B7 — durable Plan hierarchy: partial unique indexes on
+    # planning_materialization_key so retries cannot duplicate plan,
+    # phase, milestone, or required-check-in records.
+    await database.plans.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="plans_planning_mat_key_uniq",
+    )
+    await database.plan_phases.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="plan_phases_planning_mat_key_uniq",
+    )
+    await database.plan_milestones.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="plan_milestones_planning_mat_key_uniq",
+    )
+    await database.required_checkins.create_index(
+        [("user_id", 1), ("planning_materialization_key", 1)],
+        unique=True,
+        partialFilterExpression={"planning_materialization_key": {"$type": "string"}},
+        name="required_checkins_planning_mat_key_uniq",
+    )
+    # Batch 2B7 — non-unique lookup indexes for hierarchy reads.
+    await database.plans.create_index(
+        [("user_id", 1), ("target_type", 1), ("target_id", 1)],
+        name="plans_user_target_lookup",
+    )
+    await database.plan_phases.create_index(
+        [("user_id", 1), ("plan_id", 1), ("position", 1)],
+        name="plan_phases_user_plan_position",
+    )
+    await database.plan_milestones.create_index(
+        [("user_id", 1), ("plan_id", 1), ("phase_id", 1), ("position", 1)],
+        name="plan_milestones_user_plan_phase_position",
+    )
+    await database.tasks.create_index(
+        [("user_id", 1), ("plan_id", 1), ("phase_id", 1), ("milestone_id", 1), ("plan_position", 1)],
+        name="tasks_user_plan_phase_milestone_position",
+    )
+    await database.required_checkins.create_index(
+        [("user_id", 1), ("plan_id", 1), ("task_id", 1), ("position", 1)],
+        name="required_checkins_user_plan_task_position",
+    )

@@ -1,46 +1,41 @@
-"""Pytest configuration.
+"""Pytest configuration — strict test-mode guard.
 
-Ensures the backend .env file is loaded so tests can rely on
-``EXPO_PUBLIC_BACKEND_URL``, ``MONGO_URL`` and ``DB_NAME`` regardless of how
-pytest was invoked.
+Delegates validation to the pure :mod:`test_environment` module. The
+guard runs at ``pytest_configure`` time so no test module can create
+a user, record, HTTP client, or database connection before the checks
+have passed.
+
+This file deliberately:
+  * Does NOT call ``load_dotenv`` — the runner must export the
+    required variables. Reading ``backend/.env`` here would allow a
+    developer's local defaults to silently satisfy the guard.
+  * Does NOT read ``frontend/.env`` — the backend URL must be supplied
+    directly by the test runner.
+  * Does NOT construct any Mongo / HTTP client at import time.
 """
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from urllib.parse import urlparse
+import sys
 
-from dotenv import load_dotenv
+import pytest
 
+# Make the pure validator importable when pytest is invoked from the
+# repo root. The module lives in backend/ next to this file.
 _BACKEND_DIR = Path(__file__).resolve().parent
-load_dotenv(_BACKEND_DIR / ".env", override=False)
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
 
-# The public backend URL lives in the frontend .env, not backend/.env.
-if "EXPO_PUBLIC_BACKEND_URL" not in os.environ:
-    _frontend_env = _BACKEND_DIR.parent / "frontend" / ".env"
-    if _frontend_env.exists():
-        load_dotenv(_frontend_env, override=False)
+from test_environment import TestEnvironmentError, validate  # noqa: E402
 
 
-def _require_local_test_configuration() -> None:
-    required = ("EXPO_PUBLIC_BACKEND_URL", "MONGO_URL", "DB_NAME", "HYMN_RUNTIME_MODE")
-    missing = [name for name in required if not os.environ.get(name)]
-    if missing:
-        raise RuntimeError(
-            "Local tests require explicit configuration for: " + ", ".join(missing)
-        )
-
-    backend = urlparse(os.environ["EXPO_PUBLIC_BACKEND_URL"])
-    mongo = urlparse(os.environ["MONGO_URL"])
-    local_hosts = {"127.0.0.1", "localhost", "::1"}
-    if backend.scheme != "http" or backend.hostname not in local_hosts:
-        raise RuntimeError("Tests refuse non-local EXPO_PUBLIC_BACKEND_URL")
-    if mongo.hostname not in local_hosts:
-        raise RuntimeError("Tests refuse non-local MONGO_URL")
-    if os.environ["DB_NAME"] != "hymn_test":
-        raise RuntimeError("Tests require DB_NAME=hymn_test")
-    if os.environ["HYMN_RUNTIME_MODE"] != "test":
-        raise RuntimeError("Tests require HYMN_RUNTIME_MODE=test")
+def pytest_configure(config: pytest.Config) -> None:  # noqa: ARG001
+    """Fail collection when the environment is not test-safe."""
+    try:
+        validate(os.environ)
+    except TestEnvironmentError as exc:
+        raise pytest.UsageError(f"[hymn-test-guard] {exc}") from exc
 
 
-_require_local_test_configuration()
+__all__ = ["pytest_configure"]

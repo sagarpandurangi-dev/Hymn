@@ -8,10 +8,9 @@ import logging
 import re
 import uuid
 from pathlib import Path
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field
 from typing import Any, List, Optional
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
@@ -21,52 +20,19 @@ load_dotenv(ROOT_DIR / ".env")
 # ---------- Config ----------
 MONGO_URL = os.environ["MONGO_URL"]
 DB_NAME = os.environ["DB_NAME"]
-RUNTIME_MODE = os.environ.get("HYMN_RUNTIME_MODE", "production").strip().lower()
+# JWT secret is resolved through the runtime module which enforces the
+# per-mode policy (preview/production must supply JWT_SECRET; test may
+# fall back to a deterministic secret that is never returned in any
+# other mode). See backend/runtime.py.
+from runtime import get_jwt_secret  # noqa: E402
+import auth_throttle  # noqa: E402
+JWT_SECRET = get_jwt_secret()
 JWT_ALG = "HS256"
-# Long-lived token; client-side logout controls session end.
+# Long-lived token. Each token carries the user's ``token_version``;
+# logout and password reset bump it, revoking every issued token.
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 days
-_TEST_JWT_SECRET = "hymn-foundation-deterministic-test-secret"
-_LOCAL_CORS_DEFAULTS = (
-    "http://127.0.0.1:8081",
-    "http://localhost:8081",
-    "http://127.0.0.1:19006",
-    "http://localhost:19006",
-)
-
-
-def _resolve_jwt_secret(runtime_mode: str, configured: Optional[str]) -> str:
-    if configured and configured.strip():
-        return configured.strip()
-    if runtime_mode == "test":
-        return _TEST_JWT_SECRET
-    raise RuntimeError("JWT_SECRET is required outside HYMN_RUNTIME_MODE=test")
-
-
-def _resolve_cors_allowed_origins(
-    runtime_mode: str,
-    configured: Optional[str],
-) -> List[str]:
-    if configured and configured.strip():
-        origins = [item.strip().rstrip("/") for item in configured.split(",") if item.strip()]
-    elif runtime_mode in {"local", "test"}:
-        origins = list(_LOCAL_CORS_DEFAULTS)
-    else:
-        raise RuntimeError("CORS_ALLOWED_ORIGINS is required outside local/test mode")
-
-    if not origins or "*" in origins:
-        raise RuntimeError("CORS_ALLOWED_ORIGINS must list explicit origins; '*' is not allowed")
-    for origin in origins:
-        parsed = urlparse(origin)
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path not in {"", "/"}:
-            raise RuntimeError(f"Invalid CORS origin: {origin}")
-    return origins
-
-
-JWT_SECRET = _resolve_jwt_secret(RUNTIME_MODE, os.environ.get("JWT_SECRET"))
-CORS_ALLOWED_ORIGINS = _resolve_cors_allowed_origins(
-    RUNTIME_MODE,
-    os.environ.get("CORS_ALLOWED_ORIGINS"),
-)
+MIN_PASSWORD_LENGTH = 10
+MAX_PASSWORD_LENGTH = 128
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -79,26 +45,16 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
 # ---------- Models ----------
-def _normalize_display_name(value: str) -> str:
-    normalized = " ".join(value.split())
-    if not normalized:
-        raise ValueError("Name is required")
-    if len(normalized) > 80:
-        raise ValueError("Name must be 80 characters or fewer")
-    return normalized
-
-
 class SignUpRequest(BaseModel):
-    display_name: str = Field(min_length=1, max_length=80)
+    name: str
     email: EmailStr
-    password: str = Field(min_length=6)
+    password: str
     security_question: str = Field(min_length=1)
     security_answer: str = Field(min_length=1)
 
-    @field_validator("display_name")
-    @classmethod
-    def validate_display_name(cls, value: str) -> str:
-        return _normalize_display_name(value)
+
+class ProfileUpdateRequest(BaseModel):
+    name: str
 
 
 class LoginRequest(BaseModel):
@@ -109,7 +65,7 @@ class LoginRequest(BaseModel):
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
     security_answer: str
-    new_password: str = Field(min_length=6)
+    new_password: str
 
 
 class SecurityQuestionResponse(BaseModel):
@@ -122,19 +78,10 @@ POST_CREATION_DECOMPOSITION_PREFERENCES = ("always_ask", "always_decompose", "al
 class UserResponse(BaseModel):
     id: str
     email: EmailStr
-    display_name: Optional[str] = None
+    name: Optional[str] = None
     portfolio_setup_completed_at: Optional[str] = None
     portfolio_reporting_currency: Optional[str] = None
     post_creation_decomposition_preference: str = "always_ask"
-
-
-class UserProfileUpdate(BaseModel):
-    display_name: str = Field(min_length=1, max_length=80)
-
-    @field_validator("display_name")
-    @classmethod
-    def validate_display_name(cls, value: str) -> str:
-        return _normalize_display_name(value)
 
 
 class PostCreationDecompositionPreferenceUpdate(BaseModel):
@@ -164,8 +111,22 @@ class DomainResponse(BaseModel):
 
 GOAL_STATUSES = {"active", "paused", "completed", "abandoned"}
 DEFAULT_DOMAIN_NAMES = ["Knowledge", "Health", "Money", "Soul"]
+# Legacy check-in cadence set retained for backward compatibility. The full
+# recurrence vocabulary (adding alternate_day, fortnightly, quarterly,
+# half_yearly, yearly) lives in `backend.recurrence` and is imported below.
 CHECKIN_CADENCES = {"daily", "weekly", "monthly", "manual"}
+from recurrence import (  # noqa: E402  (import kept next to constants for locality)
+    EXTENDED_CHECKIN_CADENCES,
+    RECURRENCE_CADENCES,
+    END_TYPES,
+    parse_iso_date as _parse_iso_date,
+    next_date_str as _next_date_str,
+    normalise_recurrence as _normalise_recurrence,
+    should_spawn_next as _should_spawn_next,
+    is_active_period as _is_active_period,
+)
 KNOWLEDGE_DOMAIN_NAME = "Knowledge"
+COMMITMENT_TYPES = {"postponable", "exclusive"}
 
 
 class GoalCreate(BaseModel):
@@ -175,7 +136,14 @@ class GoalCreate(BaseModel):
     deadline: str = ""  # YYYY-MM-DD (optional)
     status: str = "active"
     notes: str = ""
-    checkin_cadence: str = ""  # "" | daily | weekly | monthly | manual
+    # Extended cadence vocabulary (see backend/recurrence.py). Empty string
+    # keeps a goal without a scheduled check-in.
+    checkin_cadence: str = ""
+    # Anchor day the cadence is computed from (YYYY-MM-DD). Optional; when
+    # empty, the goal's creation date is used at read time.
+    checkin_anchor_date: str = ""
+    journey_type: str = ""  # optional tag surfaced in Knowledge domain UIs
+    commitment_type: str = "postponable"  # postponable | exclusive
 
 
 class GoalUpdate(BaseModel):
@@ -186,6 +154,9 @@ class GoalUpdate(BaseModel):
     status: Optional[str] = None
     notes: Optional[str] = None
     checkin_cadence: Optional[str] = None
+    checkin_anchor_date: Optional[str] = None
+    journey_type: Optional[str] = None
+    commitment_type: Optional[str] = None
 
 
 class GoalResponse(BaseModel):
@@ -198,6 +169,9 @@ class GoalResponse(BaseModel):
     status: str
     notes: str
     checkin_cadence: str
+    checkin_anchor_date: str = ""
+    journey_type: str = ""
+    commitment_type: str = "postponable"
     created_at: str
     updated_at: str
     expected_outcomes_total: int = 0
@@ -337,6 +311,7 @@ class ProjectCreate(BaseModel):
     start_date: str = ""
     target_end_date: str = ""
     notes: str = ""
+    commitment_type: str = "postponable"
 
 
 class ProjectUpdate(BaseModel):
@@ -346,6 +321,7 @@ class ProjectUpdate(BaseModel):
     start_date: Optional[str] = None
     target_end_date: Optional[str] = None
     notes: Optional[str] = None
+    commitment_type: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -356,6 +332,7 @@ class ProjectResponse(BaseModel):
     start_date: str
     target_end_date: str
     notes: str
+    commitment_type: str = "postponable"
     created_at: str
     updated_at: str
 
@@ -364,6 +341,28 @@ class ProjectResponse(BaseModel):
 TASK_STATUSES = {"todo", "done", "deferred"}
 TASK_PRIORITIES = {"low", "medium", "high"}
 TASK_ORIGINS = {"expected_outcome", "project", "standalone"}
+
+
+class TaskRecurrenceSpec(BaseModel):
+    """Recurrence attached to a single task.
+
+    Fields mirror `recurrence.normalise_recurrence` output. Kept on the
+    task document as a nested object; when set, completing the task auto-
+    spawns the next occurrence per §recurrence-engine (option A, default).
+    An optional `pre_generate_count` fans out N future occurrences at once
+    (option B).
+    """
+    # `cadence` is Optional at the Pydantic level so the endpoint can emit a
+    # 400 with a friendly message (via `_normalise_recurrence`) rather than
+    # Pydantic's 422 when the field is missing. `normalise_recurrence` still
+    # rejects it with 400.
+    cadence: Optional[str] = None
+    anchor_date: Optional[str] = None
+    end_type: str = "never"
+    end_date: Optional[str] = None
+    occurrences_remaining: Optional[int] = None
+    series_id: Optional[str] = None
+    pre_generate_count: int = 0
 
 
 class TaskCreate(BaseModel):
@@ -379,6 +378,8 @@ class TaskCreate(BaseModel):
     assigned_to_type: str = "self"
     assigned_to_name: str = ""
     assigned_to_phone: str = ""
+    commitment_type: str = "postponable"
+    recurrence: Optional[TaskRecurrenceSpec] = None
 
 
 class TaskUpdate(BaseModel):
@@ -391,6 +392,13 @@ class TaskUpdate(BaseModel):
     assigned_to_type: Optional[str] = None
     assigned_to_name: Optional[str] = None
     assigned_to_phone: Optional[str] = None
+    commitment_type: Optional[str] = None
+    # Set recurrence via PUT — pass null (or DELETE the recurrence endpoint)
+    # to remove it. `set_recurrence` is a discriminator on the wire so we can
+    # tell "leave alone" (field omitted) from "clear" (`set_recurrence=True`
+    # with `recurrence=None`).
+    recurrence: Optional[TaskRecurrenceSpec] = None
+    set_recurrence: Optional[bool] = None
 
 
 class TaskDefer(BaseModel):
@@ -415,15 +423,31 @@ class TaskResponse(BaseModel):
     expected_outcome_id: Optional[str] = None
     project_id: Optional[str] = None
     component_id: Optional[str] = None
+    # Batch 2B7 — durable Plan hierarchy back-references. These are
+    # read-only on the task response and cannot be supplied via the
+    # ordinary task-create endpoint; only the conversational planning
+    # materializer sets them.
+    goal_id: Optional[str] = None
+    plan_id: Optional[str] = None
+    phase_id: Optional[str] = None
+    milestone_id: Optional[str] = None
+    plan_position: Optional[int] = None
     assigned_to_type: str
     assigned_to_name: str
     assigned_to_phone: str
+    commitment_type: str = "postponable"
     # Deferment fields — nullable / zero on newly created tasks. `original_due_date`
     # is captured on the FIRST defer (or seeded from due_date if present) so the
     # 14-day cap can be applied consistently across subsequent defers.
     deferred_until: Optional[str] = None
     original_due_date: Optional[str] = None
     defer_count: int = 0
+    # Recurrence — full spec when the task is part of a series, else None.
+    # `series_id` groups sibling occurrences; `occurrence_index` is 1-based
+    # for the current instance and is set at spawn-time.
+    recurrence: Optional[TaskRecurrenceSpec] = None
+    series_id: Optional[str] = None
+    occurrence_index: int = 1
     created_at: str
     updated_at: str
 
@@ -457,11 +481,22 @@ class CheckInCreate(BaseModel):
     source: str = "manual"
     data: dict = Field(default_factory=dict)  # type-specific dynamic fields
     # Money spent while performing the check-in. Optional. When present it
-    # counts as an *actual* expense for the check-in's month/currency and is
-    # subtracted from `available_for_flexible_spending` in the money-position
-    # endpoint. Currency is ISO 4217; amount is a decimal string.
+    # is counted as an *actual* expense flowing through the finance event
+    # pipeline. Batch 2A: money-bearing check-ins carry an ``account_id``
+    # so the resulting financial event is linked to the authoritative
+    # account snapshot. If no account is supplied but the user has valid
+    # accounts, the event is created in ``pending_account_assignment`` so
+    # balances are never silently mutated.
     money_spent: Optional[Any] = None
     money_currency: Optional[str] = None
+    account_id: Optional[str] = None
+    # Batch 2A Correction 1: authoritative transaction timestamp
+    # (tz-aware ISO 8601). If the client cannot supply this we derive
+    # from ``date`` + ``time`` treated as UTC (documented fallback) —
+    # the resulting occurred_at is used only when the check-in has an
+    # account. Legacy backdated entries entered today MUST NOT be
+    # silently placed after the current snapshot.
+    occurred_at: Optional[str] = None
     # If true and task_id is set, the linked task is marked done atomically
     # with the check-in write. Otherwise the task is only updated
     # (`updated_at` bumped) but its status is preserved — a check-in on a
@@ -479,6 +514,8 @@ class CheckInUpdate(BaseModel):
     data: Optional[dict] = None
     money_spent: Optional[Any] = None
     money_currency: Optional[str] = None
+    account_id: Optional[str] = None
+    occurred_at: Optional[str] = None
 
 
 class CheckInResponse(BaseModel):
@@ -500,6 +537,8 @@ class CheckInResponse(BaseModel):
     data: dict
     money_spent: Optional[str] = None
     money_currency: Optional[str] = None
+    # Batch 2A: authoritative account linkage for money-bearing check-ins.
+    account_id: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -509,13 +548,60 @@ def hash_password(p: str) -> str:
     return pwd_context.hash(p)
 
 
-def verify_password(p: str, h: str) -> bool:
-    return pwd_context.verify(p, h)
+def verify_password(password: str, stored_hash) -> bool:
+    """Batch 2B5 — fail-closed hash verification.
+
+    A malformed / missing / non-string stored hash used to reach
+    Passlib and raise ``ValueError`` / ``TypeError`` at request time.
+    We now short-circuit those cases and return ``False`` (same
+    result as an incorrect password) so the caller can surface the
+    normal generic credentials error.
+    """
+    if not isinstance(stored_hash, str) or not stored_hash:
+        return False
+    try:
+        return pwd_context.verify(password, stored_hash)
+    except (ValueError, TypeError):
+        return False
 
 
-def create_access_token(subject: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode = {"sub": subject, "exp": expire}
+def _validate_new_password(password: str) -> None:
+    """400 with a readable message (the client shows ``detail`` as-is)."""
+    if not (MIN_PASSWORD_LENGTH <= len(password) <= MAX_PASSWORD_LENGTH):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be between {MIN_PASSWORD_LENGTH} and {MAX_PASSWORD_LENGTH} characters",
+        )
+
+
+def _normalise_account_name(value: str) -> str:
+    """Canonical name normaliser used by signup and profile update.
+
+    * Collapse every whitespace run into a single space.
+    * Strip leading and trailing whitespace.
+    * Reject empty / >100 chars with the exact 400 the spec requires.
+    * Case and Unicode characters are preserved as-is.
+    """
+    if not isinstance(value, str):
+        raise HTTPException(
+            status_code=400, detail="Name must be between 1 and 100 characters",
+        )
+    cleaned = " ".join(value.split())
+    if not (1 <= len(cleaned) <= 100):
+        raise HTTPException(
+            status_code=400, detail="Name must be between 1 and 100 characters",
+        )
+    return cleaned
+
+
+def create_access_token(user: dict) -> str:
+    now = datetime.now(timezone.utc)
+    to_encode = {
+        "sub": user["id"],
+        "tv": user.get("token_version", 0),
+        "iat": now,
+        "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    }
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALG)
 
 
@@ -525,6 +611,32 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
         detail="Invalid or expired token",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    # Batch 2B4: temporary compatibility for previously issued stored
+    # sessions. No new sessions are created through any auth endpoint
+    # (the Google/Emergent path was removed). This branch performs a
+    # local DB lookup only — no HTTP request, no external provider —
+    # and never extends the recorded expiry. The row is honoured
+    # until its recorded ``expires_at`` elapses.
+    session = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if session:
+        # Batch 2B5 — fail closed: only sessions with a valid future
+        # ``expires_at`` and a non-empty ``user_id`` may authenticate.
+        # Missing / malformed values behave as 401 without any
+        # expiry extension or session write.
+        expires_at = session.get("expires_at")
+        if not isinstance(expires_at, datetime):
+            raise credentials_exc
+        exp = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+        if exp <= datetime.now(timezone.utc):
+            raise credentials_exc
+        session_user_id = session.get("user_id")
+        if not isinstance(session_user_id, str) or not session_user_id:
+            raise credentials_exc
+        user = await db.users.find_one({"id": session_user_id})
+        if not user:
+            raise credentials_exc
+        return user
+    # Fallback: JWT (email/password flow).
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
         user_id: str = payload.get("sub")
@@ -535,20 +647,27 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     user = await db.users.find_one({"id": user_id})
     if not user:
         raise credentials_exc
+    # Tokens issued before versioning carry no ``tv``; they stay valid
+    # until the first logout / reset bumps the user's version.
+    if payload.get("tv", 0) != user.get("token_version", 0):
+        raise credentials_exc
     return user
 
 
 def user_to_response(u: dict) -> UserResponse:
-    stored_name = u.get("display_name")
-    display_name = (
-        " ".join(stored_name.split())
-        if isinstance(stored_name, str) and stored_name.strip()
-        else None
-    )
+    # Batch 2B5 — return the canonical stored name. Never derive a
+    # name from the email; never fall back to a provider-specific
+    # display name.
+    stored_name = u.get("name")
+    resolved_name: Optional[str]
+    if isinstance(stored_name, str) and stored_name.strip():
+        resolved_name = stored_name.strip()
+    else:
+        resolved_name = None
     return UserResponse(
         id=u["id"],
         email=u["email"],
-        display_name=display_name,
+        name=resolved_name,
         portfolio_setup_completed_at=u.get("portfolio_setup_completed_at"),
         portfolio_reporting_currency=u.get("portfolio_reporting_currency"),
         post_creation_decomposition_preference=u.get(
@@ -581,6 +700,9 @@ def goal_to_response(g: dict, domain_name: str, stats: Optional[dict] = None) ->
         status=g.get("status", "active"),
         notes=g.get("notes", "") or "",
         checkin_cadence=g.get("checkin_cadence", "") or "",
+        checkin_anchor_date=g.get("checkin_anchor_date", "") or "",
+        journey_type=g.get("journey_type", "") or "",
+        commitment_type=g.get("commitment_type", "postponable") or "postponable",
         created_at=g.get("created_at", ""),
         updated_at=g.get("updated_at", ""),
         expected_outcomes_total=total,
@@ -623,12 +745,25 @@ def project_to_response(p: dict) -> ProjectResponse:
         start_date=p.get("start_date", "") or "",
         target_end_date=p.get("target_end_date", "") or "",
         notes=p.get("notes", "") or "",
+        commitment_type=p.get("commitment_type", "postponable") or "postponable",
         created_at=p.get("created_at", ""),
         updated_at=p.get("updated_at", ""),
     )
 
 
 def task_to_response(t: dict) -> TaskResponse:
+    rec_raw = t.get("recurrence")
+    rec_spec: Optional[TaskRecurrenceSpec] = None
+    if isinstance(rec_raw, dict) and rec_raw.get("cadence"):
+        rec_spec = TaskRecurrenceSpec(
+            cadence=rec_raw.get("cadence", ""),
+            anchor_date=rec_raw.get("anchor_date", "") or "",
+            end_type=rec_raw.get("end_type", "never") or "never",
+            end_date=rec_raw.get("end_date"),
+            occurrences_remaining=rec_raw.get("occurrences_remaining"),
+            series_id=rec_raw.get("series_id"),
+            pre_generate_count=int(rec_raw.get("pre_generate_count") or 0),
+        )
     return TaskResponse(
         id=t["id"],
         title=t.get("title", ""),
@@ -640,12 +775,21 @@ def task_to_response(t: dict) -> TaskResponse:
         expected_outcome_id=t.get("expected_outcome_id"),
         project_id=t.get("project_id"),
         component_id=t.get("component_id"),
+        goal_id=t.get("goal_id"),
+        plan_id=t.get("plan_id"),
+        phase_id=t.get("phase_id"),
+        milestone_id=t.get("milestone_id"),
+        plan_position=(int(t["plan_position"]) if t.get("plan_position") is not None else None),
         assigned_to_type=t.get("assigned_to_type", "self"),
         assigned_to_name=t.get("assigned_to_name", "") or "",
         assigned_to_phone=t.get("assigned_to_phone", "") or "",
+        commitment_type=t.get("commitment_type", "postponable") or "postponable",
         deferred_until=t.get("deferred_until"),
         original_due_date=t.get("original_due_date"),
         defer_count=int(t.get("defer_count") or 0),
+        recurrence=rec_spec,
+        series_id=t.get("series_id"),
+        occurrence_index=int(t.get("occurrence_index") or 1),
         created_at=t.get("created_at", ""),
         updated_at=t.get("updated_at", ""),
     )
@@ -684,6 +828,7 @@ def checkin_to_response(c: dict) -> CheckInResponse:
         data=c.get("data") or {},
         money_spent=_money_str(c.get("money_spent")),
         money_currency=c.get("money_currency"),
+        account_id=c.get("account_id"),
         created_at=c.get("created_at", ""),
         updated_at=c.get("updated_at", ""),
     )
@@ -726,20 +871,24 @@ async def signup(body: SignUpRequest):
     existing = await db.users.find_one({"email": email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
+    # Batch 2B5 — canonical display name.
+    name = _normalise_account_name(body.name)
+    _validate_new_password(body.password)
     user_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     user_doc = {
         "id": user_id,
         "email": email,
-        "display_name": body.display_name,
+        "name": name,
         "hashed_password": hash_password(body.password),
         "security_question": body.security_question.strip(),
         "hashed_security_answer": hash_password(body.security_answer.strip().lower()),
+        "token_version": 0,
         "created_at": now,
         "updated_at": now,
     }
     await db.users.insert_one(user_doc)
-    token = create_access_token(user_id)
+    token = create_access_token(user_doc)
     return TokenResponse(
         access_token=token,
         user=user_to_response(user_doc),
@@ -750,14 +899,18 @@ async def signup(body: SignUpRequest):
 async def login(body: LoginRequest):
     email = body.email.lower().strip()
     user = await db.users.find_one({"email": email})
-    if not user:
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
-    password_hash = user.get("hashed_password")
-    if not isinstance(password_hash, str) or not password_hash:
-        raise HTTPException(status_code=401, detail="Incorrect email or password")
-    if not verify_password(body.password, password_hash):
-        raise HTTPException(status_code=400, detail="Incorrect email or password")
-    token = create_access_token(user["id"])
+    # Batch 2B4: safely reject legacy provider-only users whose
+    # ``hashed_password`` is missing / null / non-string. Every
+    # invalid-credential branch returns the same 400 so we never
+    # reveal whether the email belongs to such an account.
+    invalid_credentials = HTTPException(status_code=400, detail="Incorrect email or password")
+    await auth_throttle.check(db, "login", email)
+    hashed = user.get("hashed_password") if user else None
+    if not isinstance(hashed, str) or not hashed or not verify_password(body.password, hashed):
+        await auth_throttle.record_failure(db, "login", email)
+        raise invalid_credentials
+    await auth_throttle.clear(db, "login", email)
+    token = create_access_token(user)
     return TokenResponse(access_token=token, user=user_to_response(user))
 
 
@@ -777,16 +930,26 @@ async def get_security_question(payload: dict):
 async def forgot_password(body: ForgotPasswordRequest):
     email = body.email.lower().strip()
     user = await db.users.find_one({"email": email})
-    if not user:
-        raise HTTPException(status_code=400, detail="Invalid email or security answer")
-    if not verify_password(body.security_answer.strip().lower(), user["hashed_security_answer"]):
-        raise HTTPException(status_code=400, detail="Invalid email or security answer")
+    invalid = HTTPException(status_code=400, detail="Invalid email or security answer")
+    await auth_throttle.check(db, "forgot_password", email)
+    # Batch 2B5 — missing / empty / non-string / malformed hashes now
+    # behave exactly like an incorrect answer via the hardened
+    # verify_password helper.
+    if not user or not verify_password(
+        body.security_answer.strip().lower(), user.get("hashed_security_answer"),
+    ):
+        await auth_throttle.record_failure(db, "forgot_password", email)
+        raise invalid
+    _validate_new_password(body.new_password)
+    # Successful resets are not cleared from the throttle, so a guessed
+    # answer can't be reused to keep resetting the password freely.
     await db.users.update_one(
         {"id": user["id"]},
         {"$set": {
             "hashed_password": hash_password(body.new_password),
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }},
+        },
+         "$inc": {"token_version": 1}},
     )
     return {"detail": "Password updated"}
 
@@ -796,20 +959,19 @@ async def me(current_user: dict = Depends(get_current_user)):
     return user_to_response(current_user)
 
 
-@api_router.patch("/auth/me", response_model=UserResponse)
-async def update_me(
-    body: UserProfileUpdate,
+@api_router.patch("/auth/profile", response_model=UserResponse)
+async def update_profile(
+    body: ProfileUpdateRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    """Batch 2B5 — update the canonical display name."""
+    name = _normalise_account_name(body.name)
     now = datetime.now(timezone.utc).isoformat()
     await db.users.update_one(
         {"id": current_user["id"]},
-        {"$set": {
-            "display_name": body.display_name,
-            "updated_at": now,
-        }},
+        {"$set": {"name": name, "updated_at": now}},
     )
-    updated = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
+    updated = await db.users.find_one({"id": current_user["id"]})
     if not updated:
         raise HTTPException(status_code=404, detail="User not found")
     return user_to_response(updated)
@@ -840,8 +1002,11 @@ async def update_post_creation_decomposition_preference(
 
 
 @api_router.post("/auth/logout")
-async def logout(current_user: dict = Depends(get_current_user)):
-    # JWTs are stateless. The client completes logout by deleting its token.
+async def logout(current_user: dict = Depends(get_current_user), token: str = Depends(oauth2_scheme)):
+    # Bumping token_version revokes every JWT issued to this user (all
+    # devices). The delete also revokes a matching legacy stored session.
+    await db.users.update_one({"id": current_user["id"]}, {"$inc": {"token_version": 1}})
+    await db.user_sessions.delete_one({"session_token": token})
     return {"detail": "Logged out"}
 
 
@@ -930,10 +1095,21 @@ async def list_goals(current_user: dict = Depends(get_current_user)):
 
 @api_router.post("/goals", response_model=GoalResponse, status_code=201)
 async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current_user)):
+    if body.commitment_type not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     if body.status not in GOAL_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
-    if body.checkin_cadence and body.checkin_cadence not in CHECKIN_CADENCES:
-        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)} or empty")
+    if body.checkin_cadence and body.checkin_cadence not in EXTENDED_CHECKIN_CADENCES:
+        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(EXTENDED_CHECKIN_CADENCES)} or empty")
+    # Optional anchor date — validated when a non-manual cadence is set. When
+    # the caller does not supply one we fall back to the goal's creation date
+    # at read time (see list_required_checkins). This keeps the field purely
+    # additive and back-compat with existing rows.
+    if body.checkin_anchor_date:
+        try:
+            _parse_iso_date(body.checkin_anchor_date)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"checkin_anchor_date must be YYYY-MM-DD: {exc}") from exc
     domain = await db.domains.find_one({"id": body.domain_id, "user_id": current_user["id"]})
     if not domain:
         raise HTTPException(status_code=400, detail="Invalid domain")
@@ -948,6 +1124,9 @@ async def create_goal(body: GoalCreate, current_user: dict = Depends(get_current
         "status": body.status,
         "notes": (body.notes or "").strip(),
         "checkin_cadence": (body.checkin_cadence or "").strip(),
+        "checkin_anchor_date": (body.checkin_anchor_date or "").strip(),
+        "journey_type": (body.journey_type or "").strip(),
+        "commitment_type": body.commitment_type if body.commitment_type in COMMITMENT_TYPES else "postponable",
         "created_at": now,
         "updated_at": now,
     }
@@ -974,13 +1153,20 @@ async def update_goal(goal_id: str, body: GoalUpdate, current_user: dict = Depen
     updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
     if "status" in updates and updates["status"] not in GOAL_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(GOAL_STATUSES)}")
-    if "checkin_cadence" in updates and updates["checkin_cadence"] and updates["checkin_cadence"] not in CHECKIN_CADENCES:
-        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)} or empty")
+    if "checkin_cadence" in updates and updates["checkin_cadence"] and updates["checkin_cadence"] not in EXTENDED_CHECKIN_CADENCES:
+        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(EXTENDED_CHECKIN_CADENCES)} or empty")
+    if "checkin_anchor_date" in updates and updates["checkin_anchor_date"]:
+        try:
+            _parse_iso_date(updates["checkin_anchor_date"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"checkin_anchor_date must be YYYY-MM-DD: {exc}") from exc
+    if "commitment_type" in updates and updates["commitment_type"] not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     if "domain_id" in updates:
         d = await db.domains.find_one({"id": updates["domain_id"], "user_id": current_user["id"]})
         if not d:
             raise HTTPException(status_code=400, detail="Invalid domain")
-    for k in ("title", "target_outcome", "deadline", "notes", "checkin_cadence"):
+    for k in ("title", "target_outcome", "deadline", "notes", "checkin_cadence", "checkin_anchor_date", "journey_type"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -1094,6 +1280,8 @@ async def list_projects(current_user: dict = Depends(get_current_user)):
 async def create_project(body: ProjectCreate, current_user: dict = Depends(get_current_user)):
     if body.status not in PROJECT_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(PROJECT_STATUSES)}")
+    if body.commitment_type not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     now = datetime.now(timezone.utc).isoformat()
     doc = {
         "id": str(uuid.uuid4()),
@@ -1104,6 +1292,7 @@ async def create_project(body: ProjectCreate, current_user: dict = Depends(get_c
         "start_date": (body.start_date or "").strip(),
         "target_end_date": (body.target_end_date or "").strip(),
         "notes": (body.notes or "").strip(),
+        "commitment_type": body.commitment_type if body.commitment_type in COMMITMENT_TYPES else "postponable",
         "created_at": now,
         "updated_at": now,
     }
@@ -1128,6 +1317,8 @@ async def update_project(project_id: str, body: ProjectUpdate, current_user: dic
     updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
     if "status" in updates and updates["status"] not in PROJECT_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(PROJECT_STATUSES)}")
+    if "commitment_type" in updates and updates["commitment_type"] not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     for k in ("title", "description", "start_date", "target_end_date", "notes"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
@@ -1168,6 +1359,7 @@ async def list_tasks(
     current_user: dict = Depends(get_current_user),
     goal_id: Optional[str] = None,
     component_id: Optional[str] = None,
+    project_id: Optional[str] = None,
     include_completed: bool = True,
 ):
     q: dict = {"user_id": current_user["id"]}
@@ -1178,6 +1370,8 @@ async def list_tasks(
         q["status"] = {"$nin": ["done", "cancelled"]}
     if component_id:
         q["component_id"] = component_id
+    if project_id:
+        q["project_id"] = project_id
     if goal_id:
         # Tasks whose Expected Outcome belongs to this goal.
         eo_ids = [
@@ -1214,17 +1408,32 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         raise HTTPException(status_code=400, detail=f"assigned_to_type must be one of {sorted(TASK_ASSIGNMENT_TYPES)}")
     if body.assigned_to_type == "external" and not (body.assigned_to_name or body.assigned_to_phone):
         raise HTTPException(status_code=400, detail="External assignment requires assigned_to_name or assigned_to_phone")
+    if body.commitment_type not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     await _validate_task_origin(current_user["id"], body.origin, body.expected_outcome_id, body.project_id)
-    # Optional Knowledge Component link.
+    # component_id is deprecated — always null after the Decomposition Engine reform.
     validated_component_id: Optional[str] = None
-    if body.component_id:
-        comp = await db.knowledge_components.find_one({"id": body.component_id, "user_id": current_user["id"]})
-        if not comp:
-            raise HTTPException(status_code=400, detail="Invalid component_id")
-        validated_component_id = comp["id"]
     now = datetime.now(timezone.utc).isoformat()
+    task_id = str(uuid.uuid4())
+
+    # Recurrence — validate up-front; when set we assign this task the head
+    # of a new series (series_id + occurrence_index=1). Pre-generation of
+    # additional occurrences happens after insert.
+    rec_dict: Optional[dict] = None
+    series_id: Optional[str] = None
+    if body.recurrence is not None:
+        try:
+            rec_dict = _normalise_recurrence(
+                body.recurrence.dict(),
+                fallback_anchor=(body.due_date or "").strip() or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"recurrence: {exc}") from exc
+        series_id = rec_dict.get("series_id") or str(uuid.uuid4())
+        rec_dict["series_id"] = series_id
+
     doc = {
-        "id": str(uuid.uuid4()),
+        "id": task_id,
         "user_id": current_user["id"],
         "title": body.title.strip(),
         "due_date": (body.due_date or "").strip(),
@@ -1238,6 +1447,7 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         "assigned_to_type": body.assigned_to_type,
         "assigned_to_name": (body.assigned_to_name or "").strip() if body.assigned_to_type == "external" else "",
         "assigned_to_phone": (body.assigned_to_phone or "").strip() if body.assigned_to_type == "external" else "",
+        "commitment_type": body.commitment_type if body.commitment_type in COMMITMENT_TYPES else "postponable",
         # Deferment state. `original_due_date` is seeded from the initial
         # `due_date` (if present) so subsequent defers compare against the
         # user's original intent, not the last-deferred date. `defer_count`
@@ -1245,12 +1455,158 @@ async def create_task(body: TaskCreate, current_user: dict = Depends(get_current
         "deferred_until": None,
         "original_due_date": (body.due_date or "").strip() or None,
         "defer_count": 0,
+        "recurrence": rec_dict,
+        "series_id": series_id,
+        "occurrence_index": 1 if rec_dict else 1,
         "created_at": now,
         "updated_at": now,
     }
     await db.tasks.insert_one(doc)
+
+    # Pre-generate upcoming occurrences when the user requested option B
+    # (up to 12 to bound the write burst). Each future task is a full clone
+    # with its own id, due_date walked forward, and occurrence_index bumped.
+    if rec_dict and int(rec_dict.get("pre_generate_count") or 0) > 0:
+        await _pre_generate_series(
+            base_task=doc,
+            count=int(rec_dict["pre_generate_count"]),
+        )
+
     doc.pop("_id", None)
     return task_to_response(doc)
+
+
+# ---------------------------------------------------------------------------
+# Recurrence helpers — series expansion & auto-spawn on completion.
+# ---------------------------------------------------------------------------
+_RECURRENCE_MAX_SPAWN = 12
+
+
+async def _pre_generate_series(*, base_task: dict, count: int) -> list:
+    """Materialise up to `count` future occurrences of `base_task`.
+
+    The base task remains occurrence 1. Each spawned task inherits every
+    scalar field, gets a new `id`, `due_date` advanced by one cadence step
+    per iteration, `occurrence_index` incremented, and its own `recurrence`
+    copy (with pre_generate_count zeroed so it doesn't recursively fan out).
+
+    Returns the list of inserted task dicts. Silently stops early when the
+    series reaches its end condition.
+    """
+    if count <= 0 or not base_task.get("recurrence"):
+        return []
+    count = min(count, _RECURRENCE_MAX_SPAWN)
+    now = datetime.now(timezone.utc).isoformat()
+    rec = dict(base_task["recurrence"])
+    rec["pre_generate_count"] = 0  # child occurrences don't re-fan
+    remaining = rec.get("occurrences_remaining")
+    cursor_due = base_task.get("due_date") or rec.get("anchor_date") or ""
+    spawned: list = []
+    for i in range(count):
+        # End-condition checks BEFORE spawning the next.
+        if rec.get("end_type") == "count":
+            try:
+                if int(remaining or 0) <= 1:
+                    break
+            except (TypeError, ValueError):
+                break
+        next_due = _next_date_str(cursor_due, rec)
+        if not next_due:
+            break
+        # Idempotency guard: if a sibling in this series already has the
+        # target due_date, do not create a duplicate. This lets callers
+        # invoke `/recurrence/generate` repeatedly without piling up.
+        if base_task.get("series_id"):
+            dupe = await db.tasks.find_one(
+                {
+                    "user_id": base_task["user_id"],
+                    "series_id": base_task["series_id"],
+                    "due_date": next_due,
+                },
+                {"_id": 0, "id": 1},
+            )
+            if dupe:
+                cursor_due = next_due
+                continue
+        if remaining is not None:
+            try:
+                remaining = int(remaining) - 1
+            except (TypeError, ValueError):
+                remaining = None
+        child_rec = dict(rec)
+        child_rec["occurrences_remaining"] = remaining
+        new_task = {
+            **{k: v for k, v in base_task.items() if k not in {"_id"}},
+            "id": str(uuid.uuid4()),
+            "due_date": next_due,
+            "status": "todo",
+            "original_due_date": next_due,
+            "defer_count": 0,
+            "deferred_until": None,
+            "recurrence": child_rec,
+            "series_id": base_task.get("series_id"),
+            "occurrence_index": int(base_task.get("occurrence_index") or 1) + i + 1,
+            "created_at": now,
+            "updated_at": now,
+        }
+        await db.tasks.insert_one(new_task)
+        spawned.append(new_task)
+        cursor_due = next_due
+    return spawned
+
+
+async def _maybe_spawn_next_occurrence(task_doc: dict) -> Optional[dict]:
+    """When a recurring task transitions to done, spawn the next occurrence.
+
+    Returns the spawned task dict, or None when no spawn happened (either
+    the task has no recurrence, the end condition has been reached, or the
+    next occurrence has already been pre-generated in the same series).
+    """
+    rec = task_doc.get("recurrence") or {}
+    if not rec.get("cadence"):
+        return None
+    if not _should_spawn_next(rec):
+        return None
+    next_due = _next_date_str(task_doc.get("due_date") or "", rec)
+    if not next_due:
+        return None
+    # If a sibling occurrence already exists in this series with the same
+    # due_date, do not spawn again — the pre-generation path has us covered.
+    if task_doc.get("series_id"):
+        existing = await db.tasks.find_one(
+            {
+                "user_id": task_doc["user_id"],
+                "series_id": task_doc["series_id"],
+                "due_date": next_due,
+            },
+            {"_id": 0, "id": 1},
+        )
+        if existing:
+            return None
+    child_rec = dict(rec)
+    child_rec["pre_generate_count"] = 0
+    if rec.get("end_type") == "count":
+        try:
+            child_rec["occurrences_remaining"] = int(rec.get("occurrences_remaining") or 0) - 1
+        except (TypeError, ValueError):
+            child_rec["occurrences_remaining"] = None
+    now = datetime.now(timezone.utc).isoformat()
+    new_task = {
+        **{k: v for k, v in task_doc.items() if k not in {"_id"}},
+        "id": str(uuid.uuid4()),
+        "due_date": next_due,
+        "status": "todo",
+        "original_due_date": next_due,
+        "defer_count": 0,
+        "deferred_until": None,
+        "recurrence": child_rec,
+        "series_id": task_doc.get("series_id"),
+        "occurrence_index": int(task_doc.get("occurrence_index") or 1) + 1,
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db.tasks.insert_one(new_task)
+    return new_task
 
 
 # --- Task deferment ---------------------------------------------------------
@@ -1342,13 +1698,44 @@ async def update_task(task_id: str, body: TaskUpdate, current_user: dict = Depen
     t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
     if not t:
         raise HTTPException(status_code=404, detail="Task not found")
-    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+    raw_updates = body.dict(exclude_unset=True)
+    updates = {k: v for k, v in raw_updates.items() if v is not None}
+
+    # ---- Recurrence handling (accept via PUT for simplicity) ------------
+    # `set_recurrence` is the discriminator: if it is True and `recurrence`
+    # is None, we CLEAR the recurrence. If `recurrence` is a dict, we set/
+    # replace it. Absent field means "no change".
+    should_touch_rec = ("set_recurrence" in raw_updates) or ("recurrence" in raw_updates)
+    rec_dict: Optional[dict] = None
+    clear_rec = False
+    if should_touch_rec:
+        rec_incoming = raw_updates.get("recurrence")
+        set_flag = raw_updates.get("set_recurrence")
+        if rec_incoming is None and (set_flag is True):
+            clear_rec = True
+        elif isinstance(rec_incoming, dict):
+            try:
+                rec_dict = _normalise_recurrence(
+                    rec_incoming,
+                    fallback_anchor=(updates.get("due_date") or t.get("due_date") or "") or None,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"recurrence: {exc}") from exc
+            # Preserve existing series_id when the caller didn't supply one.
+            existing_series = t.get("series_id") or (t.get("recurrence") or {}).get("series_id")
+            rec_dict["series_id"] = rec_dict.get("series_id") or existing_series or str(uuid.uuid4())
+    # Strip from updates dict so we don't try to $set a Pydantic model.
+    updates.pop("recurrence", None)
+    updates.pop("set_recurrence", None)
+
     if "status" in updates and updates["status"] not in TASK_STATUSES:
         raise HTTPException(status_code=400, detail=f"Status must be one of {sorted(TASK_STATUSES)}")
     if "priority" in updates and updates["priority"] not in TASK_PRIORITIES:
         raise HTTPException(status_code=400, detail=f"Priority must be one of {sorted(TASK_PRIORITIES)}")
     if "assigned_to_type" in updates and updates["assigned_to_type"] not in TASK_ASSIGNMENT_TYPES:
         raise HTTPException(status_code=400, detail=f"assigned_to_type must be one of {sorted(TASK_ASSIGNMENT_TYPES)}")
+    if "commitment_type" in updates and updates["commitment_type"] not in COMMITMENT_TYPES:
+        raise HTTPException(status_code=400, detail=f"commitment_type must be one of {sorted(COMMITMENT_TYPES)}")
     if updates.get("assigned_to_type") == "self":
         # Clear external contact when switching back to self.
         updates["assigned_to_name"] = ""
@@ -1356,10 +1743,140 @@ async def update_task(task_id: str, body: TaskUpdate, current_user: dict = Depen
     for k in ("title", "due_date", "notes", "assigned_to_name", "assigned_to_phone"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
+
+    # Apply recurrence mutation.
+    if clear_rec:
+        updates["recurrence"] = None
+        updates["series_id"] = None
+        updates["occurrence_index"] = 1
+    elif rec_dict is not None:
+        updates["recurrence"] = rec_dict
+        updates["series_id"] = rec_dict["series_id"]
+        if not t.get("occurrence_index"):
+            updates["occurrence_index"] = 1
+
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.tasks.update_one({"id": task_id, "user_id": current_user["id"]}, {"$set": updates})
     updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+
+    # Auto-spawn next occurrence on completion (option A). This runs after
+    # the update commits so the just-completed task remains as history.
+    prev_status = t.get("status", "todo")
+    new_status = updates.get("status", prev_status)
+    if prev_status != "done" and new_status == "done":
+        try:
+            await _maybe_spawn_next_occurrence(updated)
+        except Exception:  # noqa: BLE001 — best-effort; do not break the PUT.
+            pass
+
+    # If pre_generate_count was set on this PUT (via a fresh recurrence),
+    # materialise siblings now.
+    if rec_dict and int(rec_dict.get("pre_generate_count") or 0) > 0:
+        try:
+            await _pre_generate_series(base_task=updated, count=int(rec_dict["pre_generate_count"]))
+        except Exception:  # noqa: BLE001
+            pass
+
     return task_to_response(updated)
+
+
+# ---------------------------------------------------------------------------
+# Dedicated recurrence endpoints
+# ---------------------------------------------------------------------------
+class RecurrenceSetBody(BaseModel):
+    """Payload for POST /tasks/{id}/recurrence — a fully-specified spec."""
+    cadence: str
+    anchor_date: Optional[str] = None
+    end_type: str = "never"
+    end_date: Optional[str] = None
+    occurrences_remaining: Optional[int] = None
+    pre_generate_count: int = 0
+
+
+@api_router.post("/tasks/{task_id}/recurrence", response_model=TaskResponse)
+async def set_task_recurrence(task_id: str, body: RecurrenceSetBody, current_user: dict = Depends(get_current_user)):
+    """Attach or replace the recurrence configuration on a task.
+
+    When `pre_generate_count > 0` we materialise that many upcoming siblings
+    (option B). Otherwise the task will auto-spawn the next occurrence at
+    completion (option A).
+    """
+    t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    try:
+        rec = _normalise_recurrence(
+            body.dict(),
+            fallback_anchor=(t.get("due_date") or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"recurrence: {exc}") from exc
+    rec["series_id"] = rec.get("series_id") or t.get("series_id") or str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    await db.tasks.update_one(
+        {"id": task_id, "user_id": current_user["id"]},
+        {"$set": {
+            "recurrence": rec,
+            "series_id": rec["series_id"],
+            "occurrence_index": int(t.get("occurrence_index") or 1),
+            "updated_at": now,
+        }},
+    )
+    updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    if int(rec.get("pre_generate_count") or 0) > 0:
+        try:
+            await _pre_generate_series(base_task=updated, count=int(rec["pre_generate_count"]))
+        except Exception:  # noqa: BLE001
+            pass
+    return task_to_response(updated)
+
+
+@api_router.delete("/tasks/{task_id}/recurrence", response_model=TaskResponse)
+async def clear_task_recurrence(task_id: str, current_user: dict = Depends(get_current_user)):
+    """Remove recurrence from a task. Sibling occurrences remain untouched
+    (delete them individually if desired). The current task loses its
+    `recurrence`, `series_id` and resets `occurrence_index=1`.
+    """
+    t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await db.tasks.update_one(
+        {"id": task_id, "user_id": current_user["id"]},
+        {"$set": {
+            "recurrence": None,
+            "series_id": None,
+            "occurrence_index": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }},
+    )
+    updated = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    return task_to_response(updated)
+
+
+class RecurrenceGenerateBody(BaseModel):
+    """Payload for POST /tasks/{id}/recurrence/generate — walk N forward."""
+    count: int = 1
+
+
+@api_router.post("/tasks/{task_id}/recurrence/generate", response_model=List[TaskResponse])
+async def generate_upcoming_occurrences(
+    task_id: str,
+    body: RecurrenceGenerateBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Fan out the next `count` occurrences of a recurring task (option B).
+
+    Existing siblings on the same due_date are NOT duplicated. Returns the
+    newly created tasks (empty list when the series has reached its end).
+    """
+    t = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]})
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not (t.get("recurrence") or {}).get("cadence"):
+        raise HTTPException(status_code=400, detail="Task has no recurrence configured")
+    count = max(1, min(int(body.count or 1), _RECURRENCE_MAX_SPAWN))
+    spawned = await _pre_generate_series(base_task=t, count=count)
+    return [task_to_response(s) for s in spawned]
 
 
 @api_router.delete("/tasks/{task_id}", status_code=200)
@@ -1409,6 +1926,7 @@ async def list_checkins(
     current_user: dict = Depends(get_current_user),
     goal_id: Optional[str] = None,
     component_id: Optional[str] = None,
+    project_id: Optional[str] = None,
     q: Optional[str] = Query(None, description="Case-insensitive search across title and notes"),
     limit: int = Query(1000, ge=1, le=5000),
 ):
@@ -1425,6 +1943,8 @@ async def list_checkins(
         query["goal_id"] = goal_id
     if component_id:
         query["component_id"] = component_id
+    if project_id:
+        query["project_id"] = project_id
     if q and q.strip():
         # Anchor the search on user_id first so the query planner never scans
         # rows outside the authenticated user's collection, then apply an
@@ -1508,11 +2028,6 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
             task_id = t["id"]
 
     validated_component_id: Optional[str] = None
-    if body.component_id:
-        comp = await db.knowledge_components.find_one({"id": body.component_id, "user_id": current_user["id"]})
-        if not comp:
-            raise HTTPException(status_code=400, detail="Invalid component_id")
-        validated_component_id = comp["id"]
 
     # Money spent — optional. Validated as a non-negative finite Decimal and
     # stored as Decimal128. Requires currency when present. `available_for_
@@ -1522,6 +2037,7 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
     from decimal import Decimal as _Dec, InvalidOperation as _InvOp
     stored_money_spent = None
     stored_money_currency: Optional[str] = None
+    resolved_account_id: Optional[str] = None
     if body.money_spent is not None and body.money_spent != "":
         raw = body.money_spent
         if isinstance(raw, bool):
@@ -1538,6 +2054,14 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
             raise HTTPException(status_code=400, detail="money_currency must be an ISO 4217 code when money_spent is set")
         stored_money_spent = _D128(d)
         stored_money_currency = body.money_currency
+        # Batch 2A + Correction 1: account linkage for money-bearing
+        # check-ins. Uses the finance_manager helper so liability
+        # accounts are rejected too. Raises 400/404 on cross-user,
+        # currency mismatch, or liability.
+        if body.account_id:
+            from finance_manager import _resolve_event_account  # noqa: WPS433
+            await _resolve_event_account(db, current_user["id"], body.account_id, stored_money_currency)
+            resolved_account_id = body.account_id
 
     follow_up_task_id: Optional[str] = None
     if body.follow_up_task:
@@ -1566,21 +2090,51 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         "data": body.data or {},
         "money_spent": stored_money_spent,
         "money_currency": stored_money_currency,
+        # Batch 2A: preserve the account linkage for money-bearing
+        # check-ins (may be None; the derived event is then created in
+        # pending_account_assignment).
+        "account_id": resolved_account_id,
         "created_at": now,
         "updated_at": now,
     }
     await db.checkins.insert_one(doc)
 
-    # Feed the Finance Event Pipeline: any check-in carrying money_spent
-    # generates a confirmed outflow event so Finance reflects the spend
-    # exactly once. Deduplication protects against a subsequent SMS/bank
-    # import for the same transaction.
+    # Batch 2A: Feed the Finance Event Pipeline with best-effort
+    # cross-collection consistency. The database in this environment
+    # does NOT guarantee transactional atomicity; instead we roll each
+    # document back manually on failure so no orphan lingers. Creating
+    # a money-bearing check-in and its financial event succeed or fail
+    # together at the endpoint level.
     if stored_money_spent is not None and stored_money_currency:
+        _created_event_id: Optional[str] = None
+        _created_dedupe_id: Optional[str] = None
         try:
             from finance_manager import (  # noqa: WPS433 local import
-                _dedupe_check, _now as _fnow, _money_from_stored,
+                _dedupe_check,
+                _now as _fnow,
+                _money_from_stored,
+                _normalise_occurred_at,
+                LIFECYCLE_STATUS_PENDING_ACCOUNT,
+                LIFECYCLE_STATUS_AWAITING_RECON,
             )
-            from bson.decimal128 import Decimal128 as _D128
+            lifecycle_status = (
+                LIFECYCLE_STATUS_AWAITING_RECON if resolved_account_id
+                else LIFECYCLE_STATUS_PENDING_ACCOUNT
+            )
+            # Batch 2A Correction 1: derive the authoritative
+            # ``occurred_at`` for the linked event.
+            # 1. Prefer the client's explicit tz-aware ``occurred_at``.
+            # 2. Otherwise interpret the check-in ``date+time`` as UTC
+            #    (documented fallback — no per-user timezone is stored).
+            occurred_at_iso = _normalise_occurred_at(body.occurred_at)
+            # Correction 3: NEVER invent a UTC time from a naive date+time.
+            # If the client didn't send a tz-aware ``occurred_at`` we
+            # keep the moment unknown and tag the event with
+            # ``occurred_at_precision='date_only'`` so ``money_service``
+            # applies it via calendar-date rules and surfaces a review
+            # prompt only when same-day ordering could affect a
+            # balance.
+            occurred_at_precision = "exact" if occurred_at_iso else "date_only"
             fev = {
                 "id": str(uuid.uuid4()),
                 "user_id": current_user["id"],
@@ -1592,19 +2146,31 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                 "source": "checkin",
                 "source_reference": f"checkin:{doc['id']}",
                 "confirmation_status": "confirmed",
-                # The event is already the canonical actual expense used by
-                # Finance. Reconciliation only decides whether that actual
-                # belongs to a planned commitment or is accepted as unplanned.
-                "reconciliation_status": "awaiting_reconciliation",
                 "checkin_id": doc["id"],
                 "commitment_id": None,
+                "account_id": resolved_account_id,
+                "lifecycle_status": lifecycle_status,
+                "occurred_at": occurred_at_iso,
+                "occurred_at_precision": occurred_at_precision,
+                "allocations": [],
                 "created_at": _fnow(),
             }
             dup_id = await _dedupe_check(db, current_user["id"], fev)
             if dup_id:
+                # Correction 2: duplicates remain FINANCIALLY UNAPPLIED
+                # in a status that reflects their true blocker. If the
+                # incoming event carries an account, it is a dedupe
+                # candidate (``pending_deduplication``); otherwise it
+                # still needs account assignment first
+                # (``pending_account_assignment``).
                 fev["confirmation_status"] = "pending"
+                fev["lifecycle_status"] = (
+                    "pending_deduplication" if resolved_account_id
+                    else LIFECYCLE_STATUS_PENDING_ACCOUNT
+                )
                 await db.financial_events.insert_one(dict(fev))
-                await db.financial_dedupe_candidates.insert_one({
+                _created_event_id = fev["id"]
+                _dedupe = {
                     "id": str(uuid.uuid4()),
                     "user_id": current_user["id"],
                     "event_a_id": dup_id,
@@ -1612,9 +2178,12 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                     "status": "pending",
                     "created_at": _fnow(),
                     "resolved_at": None,
-                })
+                }
+                await db.financial_dedupe_candidates.insert_one(_dedupe)
+                _created_dedupe_id = _dedupe["id"]
             else:
                 await db.financial_events.insert_one(dict(fev))
+                _created_event_id = fev["id"]
             await db.financial_audit.insert_one({
                 "id": str(uuid.uuid4()),
                 "user_id": current_user["id"],
@@ -1628,6 +2197,9 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                     "amount": _money_from_stored(fev["amount"]),
                     "currency": fev["currency"],
                     "checkin_id": doc["id"],
+                    "account_id": resolved_account_id,
+                    "occurred_at": occurred_at_iso,
+                    "lifecycle_status": fev["lifecycle_status"],
                     "pending_dedupe_with": dup_id,
                 },
                 "related_checkin_id": doc["id"],
@@ -1636,8 +2208,31 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
                 "related_import_id": None,
                 "notes": "",
             })
-        except Exception as _fx:  # pragma: no cover — never block check-in save
+        except HTTPException:
+            # Best-effort rollback so no orphan lingers. The database
+            # does not guarantee cross-collection atomicity in this
+            # environment, so we roll back document-by-document.
+            if _created_dedupe_id:
+                await db.financial_dedupe_candidates.delete_one({"id": _created_dedupe_id})
+            if _created_event_id:
+                await db.financial_events.delete_one({"id": _created_event_id})
+            await db.checkins.delete_one({"id": doc["id"]})
+            if follow_up_task_id:
+                await db.tasks.delete_one({"id": follow_up_task_id, "user_id": current_user["id"]})
+            raise
+        except Exception as _fx:
+            if _created_dedupe_id:
+                await db.financial_dedupe_candidates.delete_one({"id": _created_dedupe_id})
+            if _created_event_id:
+                await db.financial_events.delete_one({"id": _created_event_id})
+            await db.checkins.delete_one({"id": doc["id"]})
+            if follow_up_task_id:
+                await db.tasks.delete_one({"id": follow_up_task_id, "user_id": current_user["id"]})
             logger.warning("finance-event-hook failed: %s", _fx)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to record the linked financial event: {_fx}",
+            ) from _fx
 
     # A check-in on a task is an "update", not a completion — bump the task's
     # updated_at so the tasks list surfaces recent activity. Only flip status
@@ -1649,6 +2244,14 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         await db.tasks.update_one(
             {"id": task_id, "user_id": current_user["id"]}, {"$set": task_updates},
         )
+        # If the check-in completed a recurring task, spawn the next occurrence.
+        if body.complete_task:
+            try:
+                fresh = await db.tasks.find_one({"id": task_id, "user_id": current_user["id"]}, {"_id": 0})
+                if fresh and (fresh.get("recurrence") or {}).get("cadence"):
+                    await _maybe_spawn_next_occurrence(fresh)
+            except Exception as _rx:  # pragma: no cover
+                logger.warning("recurrence auto-spawn from checkin failed: %s", _rx)
 
     doc.pop("_id", None)
     return checkin_to_response(doc)
@@ -1702,15 +2305,16 @@ async def list_required_checkins(
 
     user_id = current_user["id"]
 
-    # Only active goals that have a schedulable cadence are candidates. We
-    # filter out manual up front so the response is compact.
+    # All goals with a recurrence-based cadence are candidates. "manual" is
+    # excluded (user drives it themselves). Empty cadence is excluded too.
     goals = await db.goals.find(
         {
             "user_id": user_id,
             "status": "active",
-            "checkin_cadence": {"$in": ["daily", "weekly", "monthly"]},
+            "checkin_cadence": {"$in": sorted(RECURRENCE_CADENCES)},
         },
-        {"_id": 0, "id": 1, "title": 1, "domain_id": 1, "checkin_cadence": 1},
+        {"_id": 0, "id": 1, "title": 1, "domain_id": 1, "checkin_cadence": 1,
+         "checkin_anchor_date": 1, "created_at": 1},
     ).to_list(length=5000)
     if not goals:
         return []
@@ -1726,14 +2330,17 @@ async def list_required_checkins(
     eo_to_goal = {e["id"]: e["goal_id"] for e in eos}
     all_eo_ids = list(eo_to_goal.keys())
 
-    # Pull every relevant checkin for the union of the three periods in one
-    # trip. The daily bound is inside the weekly bound, which is inside the
-    # month prefix — so a week-bounded date range covers all three.
+    # Widened lookup window: yearly cadence needs to look back up to 12
+    # months. We fetch a full year to keep the query bound small — the
+    # per-goal period comparison happens in-process.
+    from datetime import timedelta as _td
+    lookup_lo = (anchor - _td(days=400)).isoformat()
+    lookup_hi = anchor.isoformat()
+
     checkins = await db.checkins.find(
         {
             "user_id": user_id,
-            "date": {"$gte": min(week_start_str, month_prefix + "-01"),
-                     "$lte": max(week_end_str, month_prefix + "-31")},
+            "date": {"$gte": lookup_lo, "$lte": lookup_hi},
             "$or": [
                 {"goal_id": {"$in": goal_ids}},
                 {"expected_outcome_id": {"$in": all_eo_ids}} if all_eo_ids else {"goal_id": None},
@@ -1743,14 +2350,14 @@ async def list_required_checkins(
     ).to_list(length=20000)
 
     # Build per-goal sets of the dates on which a check-in exists.
-    goal_checkin_dates: dict = {gid: set() for gid in goal_ids}
+    goal_checkin_dates: dict = {gid: [] for gid in goal_ids}
     for c in checkins:
         gid = c.get("goal_id") or eo_to_goal.get(c.get("expected_outcome_id") or "")
         if not gid or gid not in goal_checkin_dates:
             continue
         d_val = c.get("date") or ""
         if d_val:
-            goal_checkin_dates[gid].add(d_val)
+            goal_checkin_dates[gid].append(d_val)
 
     # Domain names in one lookup.
     domain_ids = list({g["domain_id"] for g in goals if g.get("domain_id")})
@@ -1759,21 +2366,55 @@ async def list_required_checkins(
     ).to_list(length=1000) if domain_ids else []
     domain_name_by_id = {d["id"]: d["name"] for d in domain_docs}
 
-    def _completed(gid: str, cadence: str) -> bool:
-        dates = goal_checkin_dates.get(gid) or set()
+    def _resolve_anchor(g: dict):
+        """Anchor priority: explicit checkin_anchor_date > goal.created_at date."""
+        raw = (g.get("checkin_anchor_date") or "").strip()
+        if raw:
+            try:
+                return _parse_iso_date(raw)
+            except ValueError:
+                pass
+        created_raw = (g.get("created_at") or "")[:10]
+        if created_raw:
+            try:
+                return _parse_iso_date(created_raw)
+            except ValueError:
+                pass
+        return anchor  # fallback: today
+
+    def _completed(gid: str, cadence: str, g: dict) -> bool:
+        dates = goal_checkin_dates.get(gid) or []
+        # Legacy fast-paths preserve identical semantics to the pre-recurrence
+        # scheduler for the three original cadences.
         if cadence == "daily":
             return day_str in dates
         if cadence == "weekly":
             return any(week_start_str <= x <= week_end_str for x in dates)
         if cadence == "monthly":
             return any((x or "").startswith(month_prefix) for x in dates)
-        return False
+        # Extended cadences: compute the period containing `anchor` and check
+        # for any check-in inside it.
+        anc = _resolve_anchor(g)
+        try:
+            active, p_start, p_end = _is_active_period(anc, cadence, anchor)
+        except ValueError:
+            return False
+        if not active:
+            # Period hasn't started yet — treat as "not due", so it should not
+            # be returned as required either. We express this via `completed`
+            # so the caller skips it.
+            return True
+        ps, pe = p_start.isoformat(), p_end.isoformat()
+        return any(ps <= (x or "") <= pe for x in dates)
 
-    cadence_rank = {"daily": 0, "weekly": 1, "monthly": 2}
+    cadence_rank = {
+        "daily": 0, "alternate_day": 1, "weekly": 2, "fortnightly": 3,
+        "monthly": 4, "quarterly": 5, "half_yearly": 6, "yearly": 7,
+    }
     result = []
     for g in goals:
         cadence = g.get("checkin_cadence") or ""
-        completed = _completed(g["id"], cadence)
+        completed = _completed(g["id"], cadence, g)
         if completed:
             # Spec: return only goals that still need a checkin for the period.
             continue
@@ -1884,18 +2525,292 @@ async def update_checkin(checkin_id: str, body: CheckInUpdate, current_user: dic
     c = await db.checkins.find_one({"id": checkin_id, "user_id": current_user["id"]})
     if not c:
         raise HTTPException(status_code=404, detail="Check-in not found")
-    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
+
+    incoming = body.dict(exclude_unset=True)
+    updates = {k: v for k, v in incoming.items() if v is not None}
     for k in ("title", "date", "time", "notes", "attachment"):
         if k in updates and isinstance(updates[k], str):
             updates[k] = updates[k].strip()
+
+    # Batch 2A: reject destructive money edits on a check-in whose event
+    # already completed a commitment (lifecycle_status='matched'). The
+    # actual has flowed into the reservation ledger; the user must first
+    # adjust the reconciliation.
+    money_field_touched = any(k in incoming for k in ("money_spent", "money_currency", "account_id", "date", "occurred_at"))
+    # Locate the canonical event (may include a previously-voided one so
+    # we can reactivate instead of duplicating).
+    linked_event_any = await db.financial_events.find_one(
+        {"checkin_id": checkin_id, "user_id": current_user["id"]}, {"_id": 0},
+        sort=[("created_at", -1)],
+    ) if money_field_touched else None
+    if linked_event_any and linked_event_any.get("lifecycle_status") == "matched":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This check-in's financial event has been reconciled with a commitment. "
+                "Reverse the reconciliation before editing money fields."
+            ),
+        )
+
+    # Batch 2A: validate money-related fields together.
+    from bson.decimal128 import Decimal128 as _D128
+    from decimal import Decimal as _Dec, InvalidOperation as _InvOp
+    from finance_manager import (  # noqa: WPS433 local import
+        _now as _fnow,
+        _resolve_event_account,
+        _normalise_occurred_at,
+    )
+
+    resolved_account_id_update = incoming.get("account_id") if "account_id" in incoming else c.get("account_id")
+    if "money_spent" in incoming:
+        raw = incoming["money_spent"]
+        if raw is None or raw == "":
+            updates["money_spent"] = None
+        else:
+            try:
+                d = _Dec(str(raw))
+            except (_InvOp, ValueError, TypeError) as _e:
+                raise HTTPException(status_code=400, detail=f"money_spent must be a valid decimal: {_e}") from _e
+            if d.is_nan() or d.is_infinite():
+                raise HTTPException(status_code=400, detail="money_spent must be a finite number")
+            if d < 0:
+                raise HTTPException(status_code=400, detail="money_spent must be zero or positive")
+            updates["money_spent"] = _D128(d)
+    if "money_currency" in incoming and incoming["money_currency"]:
+        if not re.match(r"^[A-Z]{3}$", incoming["money_currency"]):
+            raise HTTPException(status_code=400, detail="money_currency must be an ISO 4217 code")
+        updates["money_currency"] = incoming["money_currency"]
+
+    effective_amount = updates.get("money_spent") if "money_spent" in updates else c.get("money_spent")
+    effective_currency = updates.get("money_currency") if "money_currency" in updates else c.get("money_currency")
+    if effective_amount is not None and effective_currency:
+        if resolved_account_id_update:
+            # Correction 1: reject cross-user, cross-currency AND
+            # liability accounts via the shared helper.
+            await _resolve_event_account(db, current_user["id"], resolved_account_id_update, effective_currency)
+        updates["account_id"] = resolved_account_id_update
+    elif "account_id" in incoming:
+        updates["account_id"] = incoming["account_id"]
+
+    prev_snapshot = {k: c.get(k) for k in ("money_spent", "money_currency", "account_id", "date", "time")}
+    # Correction 2: snapshot the linked event's mutable fields BEFORE
+    # any write so we can restore them atomically if a later step
+    # fails.
+    prev_event_snapshot: Optional[dict] = None
+    if linked_event_any:
+        prev_event_snapshot = {
+            k: linked_event_any.get(k)
+            for k in ("amount", "currency", "event_date", "description",
+                       "account_id", "occurred_at", "confirmation_status", "lifecycle_status")
+        }
     updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     await db.checkins.update_one({"id": checkin_id, "user_id": current_user["id"]}, {"$set": updates})
-    updated = await db.checkins.find_one({"id": checkin_id}, {"_id": 0})
+    # Track anything we created inside the try/except so we can roll it
+    # back on failure.
+    _created_new_event_id: Optional[str] = None
+    _created_audit_id: Optional[str] = None
+    try:
+        updated = await db.checkins.find_one({"id": checkin_id}, {"_id": 0})
+
+        if money_field_touched:
+            new_amount = updated.get("money_spent")
+            new_currency = updated.get("money_currency")
+            new_account_id = updated.get("account_id")
+            has_money = new_amount is not None and bool(new_currency)
+
+            # Correction 2: never silently interpret naive check-in
+            # date+time as UTC. Only accept an explicit tz-aware
+            # ``occurred_at`` from the caller; if absent, leave the
+            # event unapplied by setting occurred_at to None so the
+            # money service refuses to place it.
+            occurred_at_iso: Optional[str] = None
+            if "occurred_at" in incoming:
+                occurred_at_iso = _normalise_occurred_at(incoming.get("occurred_at"))
+                if incoming.get("occurred_at") and occurred_at_iso is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="occurred_at must be a timezone-aware ISO 8601 timestamp",
+                    )
+            else:
+                # Preserve the previous occurred_at when the caller did
+                # not touch it — a description or amount edit shouldn't
+                # invalidate the moment we already trusted.
+                occurred_at_iso = (linked_event_any or {}).get("occurred_at")
+
+            new_lifecycle = (
+                "awaiting_reconciliation"
+                if new_account_id and occurred_at_iso
+                else "pending_account_assignment"
+            )
+
+            if linked_event_any and linked_event_any.get("lifecycle_status") != "void":
+                # Sync existing non-void event.
+                if not has_money:
+                    # Money cleared — void the canonical event.
+                    await db.financial_events.update_one(
+                        {"id": linked_event_any["id"]},
+                        {"$set": {
+                            "lifecycle_status": "void",
+                            "confirmation_status": "rejected",
+                        }},
+                    )
+                else:
+                    await db.financial_events.update_one(
+                        {"id": linked_event_any["id"]},
+                        {"$set": {
+                            "amount": new_amount if isinstance(new_amount, _D128) else _D128(_Dec(str(new_amount))),
+                            "currency": new_currency,
+                            "event_date": updated.get("date") or linked_event_any.get("event_date"),
+                            "description": (updated.get("notes") or updated.get("title") or "").strip()[:200],
+                            "account_id": new_account_id,
+                            "occurred_at": occurred_at_iso,
+                            "lifecycle_status": new_lifecycle,
+                        }},
+                    )
+            elif linked_event_any and linked_event_any.get("lifecycle_status") == "void" and has_money:
+                # Correction 1: money re-added after a prior void —
+                # reactivate the existing canonical event in place so no
+                # duplicate is created and the unique index remains
+                # satisfied.
+                await db.financial_events.update_one(
+                    {"id": linked_event_any["id"]},
+                    {"$set": {
+                        "amount": new_amount if isinstance(new_amount, _D128) else _D128(_Dec(str(new_amount))),
+                        "currency": new_currency,
+                        "event_date": updated.get("date") or linked_event_any.get("event_date"),
+                        "description": (updated.get("notes") or updated.get("title") or "").strip()[:200],
+                        "account_id": new_account_id,
+                        "occurred_at": occurred_at_iso,
+                        "confirmation_status": "confirmed",
+                        "lifecycle_status": new_lifecycle,
+                    }},
+                )
+            elif not linked_event_any and has_money:
+                # Correction 1: money added to a check-in that had no
+                # canonical event — create it now so Finance reflects
+                # the spend exactly once.
+                fev_id = str(uuid.uuid4())
+                fev = {
+                    "id": fev_id,
+                    "user_id": current_user["id"],
+                    "amount": new_amount if isinstance(new_amount, _D128) else _D128(_Dec(str(new_amount))),
+                    "currency": new_currency,
+                    "direction": "outflow",
+                    "event_date": updated.get("date") or "",
+                    "description": (updated.get("notes") or updated.get("title") or "").strip()[:200],
+                    "source": "checkin",
+                    "source_reference": f"checkin:{checkin_id}",
+                    "confirmation_status": "confirmed",
+                    "checkin_id": checkin_id,
+                    "commitment_id": None,
+                    "account_id": new_account_id,
+                    "lifecycle_status": new_lifecycle,
+                    "occurred_at": occurred_at_iso,
+                    "created_at": _fnow(),
+                }
+                await db.financial_events.insert_one(dict(fev))
+                _created_new_event_id = fev_id
+
+            # Audit trail (append-only). Correction 2: reference the
+            # newly-created event ID when we created one, otherwise the
+            # existing event's ID.
+            _audit_id = str(uuid.uuid4())
+            _audit_record_id = (
+                _created_new_event_id or (linked_event_any or {}).get("id")
+            )
+            await db.financial_audit.insert_one({
+                "id": _audit_id,
+                "user_id": current_user["id"],
+                "record_type": "financial_event",
+                "record_id": _audit_record_id,
+                "action": "updated" if linked_event_any else "created",
+                "timestamp": _fnow(),
+                "source": "checkin",
+                "previous_value": {**prev_snapshot, "event": prev_event_snapshot},
+                "new_value": {
+                    "money_spent": new_amount if isinstance(new_amount, (str, type(None))) else str(new_amount),
+                    "money_currency": new_currency,
+                    "account_id": new_account_id,
+                    "occurred_at": occurred_at_iso,
+                    "has_money": has_money,
+                    "lifecycle_status": (
+                        "void" if (linked_event_any and not has_money)
+                        else new_lifecycle if has_money else None
+                    ),
+                },
+                "related_checkin_id": checkin_id,
+                "related_task_id": c.get("task_id"),
+                "related_event_id": _audit_record_id,
+                "related_import_id": None,
+                "notes": "",
+            })
+            _created_audit_id = _audit_id
+    except Exception:
+        # Correction 2: complete rollback. Restore the check-in AND
+        # the linked event's previous state, remove anything we
+        # created solely for this failed operation.
+        await db.checkins.update_one(
+            {"id": checkin_id, "user_id": current_user["id"]},
+            {"$set": {**prev_snapshot, "updated_at": c.get("updated_at")}},
+        )
+        if _created_new_event_id:
+            await db.financial_events.delete_one({"id": _created_new_event_id, "user_id": current_user["id"]})
+        elif linked_event_any and prev_event_snapshot is not None:
+            await db.financial_events.update_one(
+                {"id": linked_event_any["id"], "user_id": current_user["id"]},
+                {"$set": prev_event_snapshot},
+            )
+        if _created_audit_id:
+            await db.financial_audit.delete_one({"id": _created_audit_id})
+        raise
+
     return checkin_to_response(updated)
 
 
 @api_router.delete("/checkins/{checkin_id}", status_code=200)
 async def delete_checkin(checkin_id: str, current_user: dict = Depends(get_current_user)):
+    # Batch 2A: preserve audit history by reversing/rejecting the linked
+    # event instead of deleting it. If the event has already been matched
+    # to a commitment we refuse the delete so reconciliation ledger stays
+    # coherent — the user is told to reverse the reconciliation first.
+    from finance_manager import _now as _fnow  # noqa: WPS433 local import
+    existing = await db.checkins.find_one({"id": checkin_id, "user_id": current_user["id"]}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Check-in not found")
+    linked_event = await db.financial_events.find_one(
+        {"checkin_id": checkin_id, "user_id": current_user["id"]}, {"_id": 0},
+    )
+    if linked_event and linked_event.get("lifecycle_status") == "matched":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This check-in's financial event has been reconciled with a commitment. "
+                "Reverse the reconciliation before deleting the check-in."
+            ),
+        )
+    if linked_event and linked_event.get("lifecycle_status") not in ("void",):
+        # Reverse the event so it no longer counts against the balance.
+        await db.financial_events.update_one(
+            {"id": linked_event["id"]},
+            {"$set": {"lifecycle_status": "void", "confirmation_status": "rejected"}},
+        )
+        await db.financial_audit.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": current_user["id"],
+            "record_type": "financial_event",
+            "record_id": linked_event["id"],
+            "action": "updated",
+            "timestamp": _fnow(),
+            "source": "checkin",
+            "previous_value": {"lifecycle_status": linked_event.get("lifecycle_status")},
+            "new_value": {"lifecycle_status": "void", "reason": "checkin_deleted"},
+            "related_checkin_id": checkin_id,
+            "related_task_id": existing.get("task_id"),
+            "related_event_id": linked_event["id"],
+            "related_import_id": None,
+            "notes": "",
+        })
+
     result = await db.checkins.delete_one({"id": checkin_id, "user_id": current_user["id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Check-in not found")
@@ -1907,666 +2822,6 @@ async def delete_checkin(checkin_id: str, current_user: dict = Depends(get_curre
 async def get_outcome_types():
     """Returns the metadata-driven Expected Outcome type registry."""
     return {"types": OUTCOME_TYPE_REGISTRY}
-
-
-# ============================================================================
-# Knowledge Engine — Hierarchical (Journey → Stage → Component → …)
-# ============================================================================
-# The execution engine (Goal → Expected Outcome → Task → Check-in) is untouched
-# and remains domain-agnostic. Knowledge-specific state lives in three separate
-# collections:
-#   * knowledge_journeys   — one row per Learning Journey, points at ONE Goal
-#   * knowledge_stages     — optional level groupings inside a Journey
-#   * knowledge_components — unlimited-depth tree of learning components
-# Tasks and Check-ins may optionally attach to a component via component_id.
-# The Goal, Task and Check-in engines gained only nullable foreign-key fields;
-# their CRUD semantics did not change.
-
-JOURNEY_TYPES = {
-    "professional_qualification",
-    "skill",
-    "course",
-    "subject",
-    "book",
-    "custom",
-}
-COMPONENT_STATUSES = {"not_started", "in_progress", "completed", "paused"}
-
-
-class KnowledgeStageInput(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-
-
-class KnowledgeFirstOutcome(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
-    target_value: str = ""
-    unit: str = ""
-    outcome_type: str = "generic"
-
-
-class KnowledgeFirstTask(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
-    due_date: str = ""
-    priority: str = "medium"
-
-
-class KnowledgeJourneyCreate(BaseModel):
-    # --- Knowledge hierarchy (steps 1-4) ---
-    journey_type: str  # Step 1
-    title: str = Field(min_length=1, max_length=200)  # Step 2
-    has_stages: bool = False  # Step 3
-    stages: List[KnowledgeStageInput] = Field(default_factory=list)  # Step 4 (if has_stages)
-    # --- Execution engine (steps 5-9) ---
-    why: str = Field(min_length=1, max_length=2000)  # Step 5
-    target_completion_date: str = ""  # Step 6
-    first_outcome: KnowledgeFirstOutcome  # Step 7 (required)
-    first_task: KnowledgeFirstTask  # Step 8 (required)
-    checkin_cadence: str  # Step 9: daily | weekly | monthly | manual
-
-
-class KnowledgeJourneyUpdate(BaseModel):
-    journey_type: Optional[str] = None
-    has_stages: Optional[bool] = None
-
-
-class KnowledgeJourneyResponse(BaseModel):
-    id: str
-    goal_id: str
-    journey_type: str
-    has_stages: bool
-    # Denormalised, read-only projections from the linked Goal for convenience —
-    # the Goal remains the source of truth for execution data.
-    title: str
-    notes: str
-    deadline: str
-    status: str
-    checkin_cadence: str
-    domain_id: str
-    domain_name: str
-    expected_outcomes_total: int = 0
-    expected_outcomes_completed: int = 0
-    completion_pct: float = 0.0
-    created_at: str
-    updated_at: str
-
-
-class KnowledgeStageCreate(BaseModel):
-    journey_id: str
-    name: str = Field(min_length=1, max_length=200)
-
-
-class KnowledgeStageUpdate(BaseModel):
-    name: Optional[str] = None
-
-
-class KnowledgeStageResponse(BaseModel):
-    id: str
-    journey_id: str
-    name: str
-    sequence: int
-    created_at: str
-    updated_at: str
-
-
-class KnowledgeComponentCreate(BaseModel):
-    journey_id: str
-    stage_id: Optional[str] = None
-    parent_component_id: Optional[str] = None
-    name: str = Field(min_length=1, max_length=200)
-    type: str = ""  # user-supplied label — never hardcoded
-    status: str = "not_started"
-    progress: int = 0  # 0..100
-    notes: str = ""
-
-
-class KnowledgeComponentUpdate(BaseModel):
-    name: Optional[str] = None
-    type: Optional[str] = None
-    status: Optional[str] = None
-    progress: Optional[int] = None
-    notes: Optional[str] = None
-
-
-class KnowledgeComponentResponse(BaseModel):
-    id: str
-    journey_id: str
-    stage_id: Optional[str]
-    parent_component_id: Optional[str]
-    name: str
-    type: str
-    sequence: int
-    status: str
-    progress: int
-    notes: str
-    created_at: str
-    updated_at: str
-
-
-async def _get_or_create_knowledge_domain(user_id: str) -> dict:
-    """Return the Knowledge domain for this user, seeding it if missing."""
-    await ensure_default_domains(user_id)
-    d = await db.domains.find_one({"user_id": user_id, "name": KNOWLEDGE_DOMAIN_NAME}, {"_id": 0})
-    if d:
-        return d
-    now = datetime.now(timezone.utc).isoformat()
-    doc = {
-        "id": str(uuid.uuid4()),
-        "user_id": user_id,
-        "name": KNOWLEDGE_DOMAIN_NAME,
-        "is_default": True,
-        "created_at": now,
-    }
-    await db.domains.insert_one(doc)
-    doc.pop("_id", None)
-    return doc
-
-
-async def _backfill_legacy_journeys(user_id: str, knowledge_domain_id: str) -> None:
-    """Legacy compatibility.
-
-    Prior Knowledge Journeys were stored as plain Goals in the Knowledge domain
-    with no `knowledge_journeys` row. On any read call we lazily upsert a
-    default row so those journeys continue to appear. Idempotent.
-    """
-    goal_ids = {
-        g["id"]
-        for g in await db.goals.find(
-            {"user_id": user_id, "domain_id": knowledge_domain_id}, {"_id": 0, "id": 1}
-        ).to_list(length=5000)
-    }
-    if not goal_ids:
-        return
-    existing = {
-        j["goal_id"]
-        for j in await db.knowledge_journeys.find(
-            {"user_id": user_id, "goal_id": {"$in": list(goal_ids)}},
-            {"_id": 0, "goal_id": 1},
-        ).to_list(length=5000)
-    }
-    missing = [gid for gid in goal_ids if gid not in existing]
-    if not missing:
-        return
-    now = datetime.now(timezone.utc).isoformat()
-    docs = [
-        {
-            "id": str(uuid.uuid4()),
-            "user_id": user_id,
-            "goal_id": gid,
-            "journey_type": "",
-            "has_stages": False,
-            "created_at": now,
-            "updated_at": now,
-        }
-        for gid in missing
-    ]
-    await db.knowledge_journeys.insert_many(docs)
-
-
-def _journey_to_response(j: dict, goal: dict, domain_name: str, stats: dict) -> KnowledgeJourneyResponse:
-    total = int(stats.get("total", 0))
-    completed = int(stats.get("completed", 0))
-    pct = round((completed / total) * 100, 1) if total > 0 else 0.0
-    return KnowledgeJourneyResponse(
-        id=j["id"],
-        goal_id=j["goal_id"],
-        journey_type=j.get("journey_type", "") or "",
-        has_stages=bool(j.get("has_stages", False)),
-        title=goal.get("title", ""),
-        notes=goal.get("notes", "") or "",
-        deadline=goal.get("deadline", "") or "",
-        status=goal.get("status", "active"),
-        checkin_cadence=goal.get("checkin_cadence", "") or "",
-        domain_id=goal.get("domain_id", ""),
-        domain_name=domain_name,
-        expected_outcomes_total=total,
-        expected_outcomes_completed=completed,
-        completion_pct=pct,
-        created_at=j.get("created_at", ""),
-        updated_at=j.get("updated_at", ""),
-    )
-
-
-def _stage_to_response(s: dict) -> KnowledgeStageResponse:
-    return KnowledgeStageResponse(
-        id=s["id"],
-        journey_id=s["journey_id"],
-        name=s.get("name", ""),
-        sequence=int(s.get("sequence", 0)),
-        created_at=s.get("created_at", ""),
-        updated_at=s.get("updated_at", ""),
-    )
-
-
-def _component_to_response(c: dict) -> KnowledgeComponentResponse:
-    return KnowledgeComponentResponse(
-        id=c["id"],
-        journey_id=c["journey_id"],
-        stage_id=c.get("stage_id"),
-        parent_component_id=c.get("parent_component_id"),
-        name=c.get("name", ""),
-        type=c.get("type", "") or "",
-        sequence=int(c.get("sequence", 0)),
-        status=c.get("status", "not_started"),
-        progress=int(c.get("progress", 0)),
-        notes=c.get("notes", "") or "",
-        created_at=c.get("created_at", ""),
-        updated_at=c.get("updated_at", ""),
-    )
-
-
-async def _get_own_journey(user_id: str, journey_id: str) -> dict:
-    j = await db.knowledge_journeys.find_one({"id": journey_id, "user_id": user_id}, {"_id": 0})
-    if not j:
-        raise HTTPException(status_code=404, detail="Knowledge journey not found")
-    return j
-
-
-async def _next_sequence(collection, filter_q: dict) -> int:
-    top = await collection.find(filter_q, {"_id": 0, "sequence": 1}).sort("sequence", -1).limit(1).to_list(length=1)
-    return (int(top[0]["sequence"]) + 1) if top else 0
-
-
-async def _cascade_delete_component(user_id: str, component_id: str) -> None:
-    """Delete this component and every descendant. Also detaches Tasks/Check-ins."""
-    stack = [component_id]
-    to_delete: List[str] = []
-    while stack:
-        current = stack.pop()
-        to_delete.append(current)
-        children = await db.knowledge_components.find(
-            {"user_id": user_id, "parent_component_id": current}, {"_id": 0, "id": 1}
-        ).to_list(length=1000)
-        stack.extend(c["id"] for c in children)
-    if to_delete:
-        await db.knowledge_components.delete_many({"user_id": user_id, "id": {"$in": to_delete}})
-        # Detach (do NOT delete) linked tasks and check-ins.
-        await db.tasks.update_many(
-            {"user_id": user_id, "component_id": {"$in": to_delete}},
-            {"$set": {"component_id": None}},
-        )
-        await db.checkins.update_many(
-            {"user_id": user_id, "component_id": {"$in": to_delete}},
-            {"$set": {"component_id": None}},
-        )
-
-
-# ---------------------- Knowledge Journey Routes ----------------------
-@api_router.get("/knowledge/journeys", response_model=List[KnowledgeJourneyResponse])
-async def list_knowledge_journeys(current_user: dict = Depends(get_current_user)):
-    domain = await _get_or_create_knowledge_domain(current_user["id"])
-    await _backfill_legacy_journeys(current_user["id"], domain["id"])
-    journeys = await db.knowledge_journeys.find(
-        {"user_id": current_user["id"]}, {"_id": 0}
-    ).to_list(length=1000)
-    if not journeys:
-        return []
-    goal_ids = [j["goal_id"] for j in journeys]
-    goals = {
-        g["id"]: g
-        for g in await db.goals.find(
-            {"user_id": current_user["id"], "id": {"$in": goal_ids}}, {"_id": 0}
-        ).to_list(length=1000)
-    }
-    journeys.sort(key=lambda j: j.get("created_at", ""), reverse=True)
-    result = []
-    for j in journeys:
-        goal = goals.get(j["goal_id"])
-        if not goal:
-            continue  # Orphan journey — skip silently.
-        stats = await compute_goal_stats(current_user["id"], goal["id"])
-        result.append(_journey_to_response(j, goal, domain["name"], stats))
-    return result
-
-
-@api_router.post("/knowledge/journeys", response_model=KnowledgeJourneyResponse, status_code=201)
-async def create_knowledge_journey(
-    body: KnowledgeJourneyCreate, current_user: dict = Depends(get_current_user)
-):
-    """Atomic wizard: KnowledgeJourney + Goal + optional Stages + first EO + first Task."""
-    # -- Validate -----------------------------------------------------------
-    if body.journey_type not in JOURNEY_TYPES:
-        raise HTTPException(status_code=400, detail=f"journey_type must be one of {sorted(JOURNEY_TYPES)}")
-    if body.checkin_cadence not in CHECKIN_CADENCES:
-        raise HTTPException(status_code=400, detail=f"checkin_cadence must be one of {sorted(CHECKIN_CADENCES)}")
-    outcome_type = body.first_outcome.outcome_type or "generic"
-    if outcome_type not in OUTCOME_TYPE_REGISTRY:
-        raise HTTPException(status_code=400, detail=f"Invalid outcome_type '{outcome_type}'")
-    priority = body.first_task.priority or "medium"
-    if priority not in TASK_PRIORITIES:
-        raise HTTPException(status_code=400, detail=f"Task priority must be one of {sorted(TASK_PRIORITIES)}")
-    if body.has_stages and len(body.stages) == 0:
-        raise HTTPException(status_code=400, detail="At least one stage is required when has_stages is true")
-
-    domain = await _get_or_create_knowledge_domain(current_user["id"])
-    now = datetime.now(timezone.utc).isoformat()
-
-    # -- Prepare docs (no writes yet) --------------------------------------
-    goal_id = str(uuid.uuid4())
-    goal_doc = {
-        "id": goal_id, "user_id": current_user["id"],
-        "title": body.title.strip(), "domain_id": domain["id"],
-        "target_outcome": "", "deadline": (body.target_completion_date or "").strip(),
-        "status": "active", "notes": body.why.strip(),
-        "checkin_cadence": body.checkin_cadence,
-        "created_at": now, "updated_at": now,
-    }
-    journey_id = str(uuid.uuid4())
-    journey_doc = {
-        "id": journey_id, "user_id": current_user["id"], "goal_id": goal_id,
-        "journey_type": body.journey_type, "has_stages": body.has_stages,
-        "created_at": now, "updated_at": now,
-    }
-    stage_docs = [
-        {
-            "id": str(uuid.uuid4()), "user_id": current_user["id"], "journey_id": journey_id,
-            "name": s.name.strip(), "sequence": i,
-            "created_at": now, "updated_at": now,
-        }
-        for i, s in enumerate(body.stages)
-    ] if body.has_stages else []
-    eo_id = str(uuid.uuid4())
-    eo_doc = {
-        "id": eo_id, "user_id": current_user["id"], "goal_id": goal_id,
-        "title": body.first_outcome.title.strip(),
-        "target_value": (body.first_outcome.target_value or "").strip(),
-        "current_value": "", "unit": (body.first_outcome.unit or "").strip(),
-        "deadline": "", "status": "active", "notes": "",
-        "outcome_type": outcome_type,
-        "created_at": now, "updated_at": now,
-    }
-    task_doc = {
-        "id": str(uuid.uuid4()), "user_id": current_user["id"],
-        "title": body.first_task.title.strip(),
-        "due_date": (body.first_task.due_date or "").strip(),
-        "priority": priority, "status": "todo", "notes": "",
-        "origin": "expected_outcome", "expected_outcome_id": eo_id,
-        "project_id": None, "component_id": None,
-        "assigned_to_type": "self", "assigned_to_name": "", "assigned_to_phone": "",
-        "created_at": now, "updated_at": now,
-    }
-
-    # -- Persist with cascading rollback -----------------------------------
-    # Track each insertion so we can roll back in reverse order on failure.
-    # Each entry is a tuple (collection, filter, is_many).
-    inserted: List[tuple] = []
-    try:
-        await db.goals.insert_one(goal_doc); inserted.append((db.goals, {"id": goal_id}, False))
-        await db.knowledge_journeys.insert_one(journey_doc); inserted.append((db.knowledge_journeys, {"id": journey_id}, False))
-        if stage_docs:
-            await db.knowledge_stages.insert_many(stage_docs)
-            inserted.append((db.knowledge_stages, {"id": {"$in": [s["id"] for s in stage_docs]}}, True))
-        await db.expected_outcomes.insert_one(eo_doc); inserted.append((db.expected_outcomes, {"id": eo_id}, False))
-        await db.tasks.insert_one(task_doc); inserted.append((db.tasks, {"id": task_doc["id"]}, False))
-    except Exception:
-        for coll, f, is_many in reversed(inserted):
-            try:
-                if is_many:
-                    await coll.delete_many(f)
-                else:
-                    await coll.delete_one(f)
-            except Exception:
-                pass
-        raise
-
-    journey_doc.pop("_id", None); goal_doc.pop("_id", None)
-    return _journey_to_response(journey_doc, goal_doc, domain["name"], {"total": 1, "completed": 0})
-
-
-@api_router.get("/knowledge/journeys/{journey_id}", response_model=KnowledgeJourneyResponse)
-async def get_knowledge_journey(journey_id: str, current_user: dict = Depends(get_current_user)):
-    domain = await _get_or_create_knowledge_domain(current_user["id"])
-    await _backfill_legacy_journeys(current_user["id"], domain["id"])
-    j = await _get_own_journey(current_user["id"], journey_id)
-    goal = await db.goals.find_one({"id": j["goal_id"], "user_id": current_user["id"]}, {"_id": 0})
-    if not goal:
-        raise HTTPException(status_code=404, detail="Underlying goal missing")
-    stats = await compute_goal_stats(current_user["id"], goal["id"])
-    return _journey_to_response(j, goal, domain["name"], stats)
-
-
-@api_router.put("/knowledge/journeys/{journey_id}", response_model=KnowledgeJourneyResponse)
-async def update_knowledge_journey(
-    journey_id: str, body: KnowledgeJourneyUpdate, current_user: dict = Depends(get_current_user)
-):
-    j = await _get_own_journey(current_user["id"], journey_id)
-    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
-    if "journey_type" in updates and updates["journey_type"] not in JOURNEY_TYPES:
-        raise HTTPException(status_code=400, detail=f"journey_type must be one of {sorted(JOURNEY_TYPES)}")
-    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.knowledge_journeys.update_one({"id": journey_id, "user_id": current_user["id"]}, {"$set": updates})
-    updated = await db.knowledge_journeys.find_one({"id": journey_id}, {"_id": 0})
-    goal = await db.goals.find_one({"id": j["goal_id"]}, {"_id": 0})
-    domain = await _get_or_create_knowledge_domain(current_user["id"])
-    stats = await compute_goal_stats(current_user["id"], goal["id"])
-    return _journey_to_response(updated, goal, domain["name"], stats)
-
-
-@api_router.delete("/knowledge/journeys/{journey_id}", status_code=200)
-async def delete_knowledge_journey(journey_id: str, current_user: dict = Depends(get_current_user)):
-    j = await _get_own_journey(current_user["id"], journey_id)
-    # Cascade: components (which cascades tasks/checkins detach), stages, journey, goal.
-    comps = await db.knowledge_components.find(
-        {"user_id": current_user["id"], "journey_id": journey_id}, {"_id": 0, "id": 1}
-    ).to_list(length=5000)
-    if comps:
-        comp_ids = [c["id"] for c in comps]
-        await db.knowledge_components.delete_many({"user_id": current_user["id"], "id": {"$in": comp_ids}})
-        await db.tasks.update_many(
-            {"user_id": current_user["id"], "component_id": {"$in": comp_ids}},
-            {"$set": {"component_id": None}},
-        )
-        await db.checkins.update_many(
-            {"user_id": current_user["id"], "component_id": {"$in": comp_ids}},
-            {"$set": {"component_id": None}},
-        )
-    await db.knowledge_stages.delete_many({"user_id": current_user["id"], "journey_id": journey_id})
-    await db.knowledge_journeys.delete_one({"id": journey_id, "user_id": current_user["id"]})
-    # Before deleting the goal + its EOs, detach any tasks/check-ins that referenced them
-    # so those rows don't end up with dangling foreign keys.
-    eos = await db.expected_outcomes.find(
-        {"user_id": current_user["id"], "goal_id": j["goal_id"]}, {"_id": 0, "id": 1}
-    ).to_list(length=5000)
-    if eos:
-        eo_ids = [e["id"] for e in eos]
-        await db.tasks.update_many(
-            {"user_id": current_user["id"], "expected_outcome_id": {"$in": eo_ids}},
-            {"$set": {"expected_outcome_id": None, "origin": "standalone"}},
-        )
-        await db.checkins.update_many(
-            {"user_id": current_user["id"], "expected_outcome_id": {"$in": eo_ids}},
-            {"$set": {"expected_outcome_id": None}},
-        )
-    # Also detach check-ins that referenced the goal directly.
-    await db.checkins.update_many(
-        {"user_id": current_user["id"], "goal_id": j["goal_id"]},
-        {"$set": {"goal_id": None}},
-    )
-    await db.goals.delete_one({"id": j["goal_id"], "user_id": current_user["id"]})
-    await db.expected_outcomes.delete_many({"user_id": current_user["id"], "goal_id": j["goal_id"]})
-    return {"detail": "Knowledge journey deleted"}
-
-
-# ---------------------- Knowledge Stage Routes ----------------------
-@api_router.get("/knowledge/journeys/{journey_id}/stages", response_model=List[KnowledgeStageResponse])
-async def list_stages(journey_id: str, current_user: dict = Depends(get_current_user)):
-    await _get_own_journey(current_user["id"], journey_id)
-    docs = await db.knowledge_stages.find(
-        {"user_id": current_user["id"], "journey_id": journey_id}, {"_id": 0}
-    ).to_list(length=1000)
-    docs.sort(key=lambda s: int(s.get("sequence", 0)))
-    return [_stage_to_response(d) for d in docs]
-
-
-@api_router.post("/knowledge/stages", response_model=KnowledgeStageResponse, status_code=201)
-async def create_stage(body: KnowledgeStageCreate, current_user: dict = Depends(get_current_user)):
-    await _get_own_journey(current_user["id"], body.journey_id)
-    now = datetime.now(timezone.utc).isoformat()
-    seq = await _next_sequence(db.knowledge_stages, {"user_id": current_user["id"], "journey_id": body.journey_id})
-    doc = {
-        "id": str(uuid.uuid4()), "user_id": current_user["id"], "journey_id": body.journey_id,
-        "name": body.name.strip(), "sequence": seq,
-        "created_at": now, "updated_at": now,
-    }
-    await db.knowledge_stages.insert_one(doc)
-    doc.pop("_id", None)
-    return _stage_to_response(doc)
-
-
-@api_router.put("/knowledge/stages/{stage_id}", response_model=KnowledgeStageResponse)
-async def update_stage(stage_id: str, body: KnowledgeStageUpdate, current_user: dict = Depends(get_current_user)):
-    s = await db.knowledge_stages.find_one({"id": stage_id, "user_id": current_user["id"]})
-    if not s:
-        raise HTTPException(status_code=404, detail="Stage not found")
-    updates = {k: v.strip() if isinstance(v, str) else v for k, v in body.dict(exclude_unset=True).items() if v is not None}
-    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.knowledge_stages.update_one({"id": stage_id, "user_id": current_user["id"]}, {"$set": updates})
-    updated = await db.knowledge_stages.find_one({"id": stage_id}, {"_id": 0})
-    return _stage_to_response(updated)
-
-
-@api_router.delete("/knowledge/stages/{stage_id}", status_code=200)
-async def delete_stage(stage_id: str, current_user: dict = Depends(get_current_user)):
-    s = await db.knowledge_stages.find_one({"id": stage_id, "user_id": current_user["id"]})
-    if not s:
-        raise HTTPException(status_code=404, detail="Stage not found")
-    # Cascade: delete every component whose stage_id is this stage (and their descendants).
-    top_level = await db.knowledge_components.find(
-        {"user_id": current_user["id"], "stage_id": stage_id, "parent_component_id": None},
-        {"_id": 0, "id": 1},
-    ).to_list(length=1000)
-    for c in top_level:
-        await _cascade_delete_component(current_user["id"], c["id"])
-    # Anything still attached (nested rows directly under the stage without top parent) — nuke.
-    await db.knowledge_components.delete_many({"user_id": current_user["id"], "stage_id": stage_id})
-    await db.knowledge_stages.delete_one({"id": stage_id, "user_id": current_user["id"]})
-    return {"detail": "Stage deleted"}
-
-
-@api_router.post("/knowledge/stages/{stage_id}/move")
-async def move_stage(stage_id: str, direction: str, current_user: dict = Depends(get_current_user)):
-    if direction not in {"up", "down"}:
-        raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'")
-    s = await db.knowledge_stages.find_one({"id": stage_id, "user_id": current_user["id"]})
-    if not s:
-        raise HTTPException(status_code=404, detail="Stage not found")
-    siblings = await db.knowledge_stages.find(
-        {"user_id": current_user["id"], "journey_id": s["journey_id"]}, {"_id": 0}
-    ).to_list(length=1000)
-    siblings.sort(key=lambda x: int(x.get("sequence", 0)))
-    idx = next((i for i, x in enumerate(siblings) if x["id"] == stage_id), -1)
-    swap_idx = idx - 1 if direction == "up" else idx + 1
-    if idx < 0 or swap_idx < 0 or swap_idx >= len(siblings):
-        return {"detail": "No move"}
-    a, b = siblings[idx], siblings[swap_idx]
-    now = datetime.now(timezone.utc).isoformat()
-    await db.knowledge_stages.update_one({"id": a["id"]}, {"$set": {"sequence": b["sequence"], "updated_at": now}})
-    await db.knowledge_stages.update_one({"id": b["id"]}, {"$set": {"sequence": a["sequence"], "updated_at": now}})
-    return {"detail": "moved"}
-
-
-# ---------------------- Knowledge Component Routes ----------------------
-@api_router.get("/knowledge/journeys/{journey_id}/components", response_model=List[KnowledgeComponentResponse])
-async def list_components(journey_id: str, current_user: dict = Depends(get_current_user)):
-    await _get_own_journey(current_user["id"], journey_id)
-    docs = await db.knowledge_components.find(
-        {"user_id": current_user["id"], "journey_id": journey_id}, {"_id": 0}
-    ).to_list(length=5000)
-    docs.sort(key=lambda c: int(c.get("sequence", 0)))
-    return [_component_to_response(d) for d in docs]
-
-
-@api_router.post("/knowledge/components", response_model=KnowledgeComponentResponse, status_code=201)
-async def create_component(body: KnowledgeComponentCreate, current_user: dict = Depends(get_current_user)):
-    await _get_own_journey(current_user["id"], body.journey_id)
-    if body.status not in COMPONENT_STATUSES:
-        raise HTTPException(status_code=400, detail=f"status must be one of {sorted(COMPONENT_STATUSES)}")
-    if body.progress < 0 or body.progress > 100:
-        raise HTTPException(status_code=400, detail="progress must be between 0 and 100")
-    if body.stage_id:
-        st = await db.knowledge_stages.find_one({"id": body.stage_id, "user_id": current_user["id"], "journey_id": body.journey_id})
-        if not st:
-            raise HTTPException(status_code=400, detail="Invalid stage_id")
-    if body.parent_component_id:
-        pc = await db.knowledge_components.find_one({"id": body.parent_component_id, "user_id": current_user["id"], "journey_id": body.journey_id})
-        if not pc:
-            raise HTTPException(status_code=400, detail="Invalid parent_component_id")
-        # A child inherits the parent's stage_id.
-        body.stage_id = pc.get("stage_id")
-    seq = await _next_sequence(
-        db.knowledge_components,
-        {
-            "user_id": current_user["id"], "journey_id": body.journey_id,
-            "stage_id": body.stage_id, "parent_component_id": body.parent_component_id,
-        },
-    )
-    now = datetime.now(timezone.utc).isoformat()
-    doc = {
-        "id": str(uuid.uuid4()), "user_id": current_user["id"], "journey_id": body.journey_id,
-        "stage_id": body.stage_id, "parent_component_id": body.parent_component_id,
-        "name": body.name.strip(), "type": (body.type or "").strip(),
-        "sequence": seq, "status": body.status, "progress": int(body.progress),
-        "notes": (body.notes or "").strip(),
-        "created_at": now, "updated_at": now,
-    }
-    await db.knowledge_components.insert_one(doc)
-    doc.pop("_id", None)
-    return _component_to_response(doc)
-
-
-@api_router.put("/knowledge/components/{component_id}", response_model=KnowledgeComponentResponse)
-async def update_component(component_id: str, body: KnowledgeComponentUpdate, current_user: dict = Depends(get_current_user)):
-    c = await db.knowledge_components.find_one({"id": component_id, "user_id": current_user["id"]})
-    if not c:
-        raise HTTPException(status_code=404, detail="Component not found")
-    updates = {k: v for k, v in body.dict(exclude_unset=True).items() if v is not None}
-    if "status" in updates and updates["status"] not in COMPONENT_STATUSES:
-        raise HTTPException(status_code=400, detail=f"status must be one of {sorted(COMPONENT_STATUSES)}")
-    if "progress" in updates and not (0 <= int(updates["progress"]) <= 100):
-        raise HTTPException(status_code=400, detail="progress must be between 0 and 100")
-    for k in ("name", "type", "notes"):
-        if k in updates and isinstance(updates[k], str):
-            updates[k] = updates[k].strip()
-    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.knowledge_components.update_one({"id": component_id, "user_id": current_user["id"]}, {"$set": updates})
-    updated = await db.knowledge_components.find_one({"id": component_id}, {"_id": 0})
-    return _component_to_response(updated)
-
-
-@api_router.delete("/knowledge/components/{component_id}", status_code=200)
-async def delete_component(component_id: str, current_user: dict = Depends(get_current_user)):
-    c = await db.knowledge_components.find_one({"id": component_id, "user_id": current_user["id"]})
-    if not c:
-        raise HTTPException(status_code=404, detail="Component not found")
-    await _cascade_delete_component(current_user["id"], component_id)
-    return {"detail": "Component deleted"}
-
-
-@api_router.post("/knowledge/components/{component_id}/move")
-async def move_component(component_id: str, direction: str, current_user: dict = Depends(get_current_user)):
-    if direction not in {"up", "down"}:
-        raise HTTPException(status_code=400, detail="direction must be 'up' or 'down'")
-    c = await db.knowledge_components.find_one({"id": component_id, "user_id": current_user["id"]})
-    if not c:
-        raise HTTPException(status_code=404, detail="Component not found")
-    siblings = await db.knowledge_components.find(
-        {
-            "user_id": current_user["id"],
-            "journey_id": c["journey_id"],
-            "stage_id": c.get("stage_id"),
-            "parent_component_id": c.get("parent_component_id"),
-        },
-        {"_id": 0},
-    ).to_list(length=1000)
-    siblings.sort(key=lambda x: int(x.get("sequence", 0)))
-    idx = next((i for i, x in enumerate(siblings) if x["id"] == component_id), -1)
-    swap_idx = idx - 1 if direction == "up" else idx + 1
-    if idx < 0 or swap_idx < 0 or swap_idx >= len(siblings):
-        return {"detail": "No move"}
-    a, b = siblings[idx], siblings[swap_idx]
-    now = datetime.now(timezone.utc).isoformat()
-    await db.knowledge_components.update_one({"id": a["id"]}, {"$set": {"sequence": b["sequence"], "updated_at": now}})
-    await db.knowledge_components.update_one({"id": b["id"]}, {"$set": {"sequence": a["sequence"], "updated_at": now}})
-    return {"detail": "moved"}
 
 
 # ---------- App wiring ----------
@@ -2581,19 +2836,25 @@ from finance_manager import (
 )  # noqa: E402
 from finance_advanced import advanced_router as finance_advanced_router, ensure_finance_advanced_indexes  # noqa: E402
 from planning_engine import planning_router, ensure_planning_indexes  # noqa: E402
-from intent_engine import intent_router, ensure_intent_indexes  # noqa: E402
+from planning_space import planning_space_router  # noqa: E402
+from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
+import goal_merge  # noqa: F401,E402  (registers merge endpoints on planning_router)
 
 api_router.include_router(portfolio_router)
 api_router.include_router(finance_router)
 api_router.include_router(finance_advanced_router)
 api_router.include_router(planning_router)
-api_router.include_router(intent_router)
+api_router.include_router(planning_space_router)
+api_router.include_router(inbox_router)
 app.include_router(api_router)
 
+# Auth is a bearer header, never a cookie, so credentialed CORS is not
+# needed. CORS_ORIGINS (comma-separated) narrows the allowed origins.
+_cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_origins=_cors_origins or ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -2609,11 +2870,15 @@ logger = logging.getLogger(__name__)
 async def startup_indexes():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id", unique=True)
+    await db.user_sessions.create_index("session_token", unique=True)
+    await db.user_sessions.create_index("user_id")
+    await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await auth_throttle.ensure_indexes(db)
     await ensure_portfolio_indexes(db)
     await ensure_finance_indexes(db)
     await ensure_finance_advanced_indexes(db)
     await ensure_planning_indexes(db)
-    await ensure_intent_indexes(db)
+    await ensure_inbox_indexes(db)
     try:
         touched = await backfill_fc_into_allocations(db)
         if touched:

@@ -89,6 +89,35 @@ LIQUIDITY_TYPES = ("liquid", "semi_liquid", "illiquid")
 MONEY_COMMITMENT_TYPES = ("income", "expense", "saving", "investment", "debt_payment", "other")
 
 RESOURCE_TYPES = ("time", "money")
+
+# Batch 2B3 — the exact HTTP 400 message the generic Portfolio
+# resource-allocation API must return whenever the caller asks for
+# ``resource_type="money"``. Money reservations are owned by Finance
+# commitments and MUST NOT be created, listed, updated or deleted via
+# this generic route.
+_PORTFOLIO_MONEY_ALLOCATION_ERROR = (
+    "Money reservations are managed by Finance commitments; "
+    "use the Finance commitment endpoints"
+)
+
+
+def _portfolio_time_allocation_scope(user_id: str) -> dict:
+    """Return the mandatory MongoDB base filter for the generic
+    Portfolio resource-allocation endpoints.
+
+    Portfolio only manages TIME allocations that were not created by
+    Finance. Finance-owned rows carry ``financial_commitment_id`` and
+    live in the same collection; they are excluded here so the
+    generic list/update/delete surface can never mutate them.
+    """
+    return {
+        "user_id": user_id,
+        "resource_type": "time",
+        "$or": [
+            {"financial_commitment_id": {"$exists": False}},
+            {"financial_commitment_id": None},
+        ],
+    }
 ALLOCATION_MODES = ("one_time", "recurring")
 ALLOCATION_UNITS = ("minutes", "currency")
 ALLOCATION_STATUSES = ("proposed", "reserved", "consumed", "released", "cancelled")
@@ -105,8 +134,12 @@ _OWNER_COLLECTIONS = {
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
-# Strict 24-hour clock time: 00:00 through 23:59.
-_TIME_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+# `_TIME_RE` accepts standard HH:MM plus the special "24:00" sentinel which
+# is only meaningful as an end_time (represents "end of day"). Combined with
+# the strict `end_m > start_m` and `end_m <= 24 * 60` checks, this lets a
+# cross-midnight block be stored as two records (day D 22:30 → 24:00, day
+# D+1 00:00 → 06:30) without losing minutes.
+_TIME_RE = re.compile(r"^(?:(?:[01]\d|2[0-3]):[0-5]\d|24:00)$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 # Quantum used only for serialising *derived* money aggregates so JSON does
@@ -297,29 +330,15 @@ def _quantize_out(d: Decimal) -> str:
 
 
 def compute_time_union_and_overlap(intervals: List[Tuple[int, int]]) -> Tuple[int, int]:
-    """Return (union_minutes, overlap_minutes) for a list of [start, end) minute intervals.
+    """Backwards-compatible re-export of the canonical implementation.
 
-    overlap_minutes is the sum of individual lengths minus the union length —
-    i.e. the total minutes that get double-counted when intervals overlap. It
-    is NOT the length of the intersection.
+    Batch 2B2 moved the union/overlap logic to ``time_service``. Any
+    module that historically imported this name from
+    ``portfolio_manager`` keeps working; this trivial wrapper just
+    forwards to the single source of truth.
     """
-    if not intervals:
-        return 0, 0
-    ivs = [(int(s), int(e)) for s, e in intervals if int(e) > int(s)]
-    if not ivs:
-        return 0, 0
-    total = sum(e - s for s, e in ivs)
-    ivs.sort()
-    merged: List[List[int]] = [[ivs[0][0], ivs[0][1]]]
-    for s, e in ivs[1:]:
-        if s <= merged[-1][1]:
-            if e > merged[-1][1]:
-                merged[-1][1] = e
-        else:
-            merged.append([s, e])
-    union = sum(e - s for s, e in merged)
-    overlap = total - union
-    return union, overlap
+    from time_service import compute_time_union_and_overlap as _canonical  # noqa: WPS433
+    return _canonical(intervals)
 
 
 # ============================================================================
@@ -404,6 +423,12 @@ class FinancialAccountResponse(BaseModel):
     name: str
     currency: str
     current_value: str  # decimal string; never a binary float
+    # ``balance_as_of`` is the authoritative snapshot timestamp for
+    # current_value (Batch 2A). Confirmed events created strictly AFTER
+    # this timestamp are applied on top of the snapshot to produce the
+    # effective balance; events created before are already reflected in
+    # the snapshot and MUST NOT be re-applied.
+    balance_as_of: str
     liquidity_type: str
     fixed_or_flexible: str
     notes: str
@@ -521,6 +546,17 @@ class DailyCommitmentSummary(BaseModel):
     flexibility: str
 
 
+class DailyReservationSummary(BaseModel):
+    id: str
+    owner_type: str
+    owner_id: Optional[str] = None
+    start_time: str
+    end_time: str
+    allocation_mode: str
+    status: str
+    fixed_or_flexible: str
+
+
 class DailyTimeCapacityResponse(BaseModel):
     date: str
     day_of_week: str
@@ -528,12 +564,27 @@ class DailyTimeCapacityResponse(BaseModel):
     committed_minutes: int
     available_minutes: int
     overlapping_minutes: int
+    # Batch 2B2 — canonical decomposition.
+    baseline_committed_minutes: int = 0
+    reserved_minutes: int = 0
     commitments: List[DailyCommitmentSummary]
+    reservations: List[DailyReservationSummary] = []
 
 
 class WeeklyTimeCapacityResponse(BaseModel):
     week_start_date: str
     days: List[DailyTimeCapacityResponse]
+    # Batch 2B2 — weekly aggregates + description of the calculation
+    # basis so callers can render "recorded uncommitted time" rather
+    # than misleading "free time".
+    total_minutes: int = 10080
+    committed_minutes: int = 0
+    available_minutes: int = 0
+    overlapping_minutes: int = 0
+    baseline_committed_minutes: int = 0
+    reserved_minutes: int = 0
+    capacity_basis: str = "recorded_commitments_and_active_reservations"
+    is_estimate: bool = True
 
 
 class MonthlyMoneyPositionResponse(BaseModel):
@@ -647,8 +698,13 @@ def _validate_financial_account(body, *, is_create: bool, existing: dict | None 
 
     # Only touch current_value if the caller sent one (or we're creating).
     # On updates that omit current_value we keep the existing Decimal128.
+    # Batch 2A: when current_value is set (create OR update), we refresh
+    # ``balance_as_of`` to *now* so past events are NOT reapplied to the
+    # new snapshot. When the caller omits current_value we preserve the
+    # existing snapshot timestamp untouched.
     if is_create or "current_value" in incoming:
         merged["current_value"] = _money_to_stored(merged.get("current_value"), "current_value")
+        merged["balance_as_of"] = _now()
     merged["notes"] = merged.get("notes") or ""
     return merged
 
@@ -697,6 +753,11 @@ def _validate_allocation(body, *, is_create: bool, existing: dict | None = None)
             _require(merged.get(req) is not None and merged.get(req) != "", f"{req} is required")
 
     _require_in(merged["resource_type"], RESOURCE_TYPES, "resource_type")
+    # Batch 2B3 — Portfolio manages only TIME allocations. Money
+    # reservations are Finance's exclusive domain and MUST NOT reach
+    # this validator.
+    if merged["resource_type"] != "time":
+        raise HTTPException(status_code=400, detail=_PORTFOLIO_MONEY_ALLOCATION_ERROR)
     _require_in(merged["owner_type"], OWNER_TYPES, "owner_type")
     _require_in(merged["allocation_mode"], ALLOCATION_MODES, "allocation_mode")
     _require_in(merged["unit"], ALLOCATION_UNITS, "unit")
@@ -711,54 +772,34 @@ def _validate_allocation(body, *, is_create: bool, existing: dict | None = None)
     else:
         _require(merged.get("owner_id"), f"owner_type={merged['owner_type']} requires owner_id")
 
-    # Resource-type-specific rules
-    if merged["resource_type"] == "time":
-        _require(merged["unit"] == "minutes", "resource_type=time requires unit=minutes")
-        _require(merged.get("currency") in (None, ""), "resource_type=time requires currency=null")
-        merged["currency"] = None
-        _require_time_str(merged.get("start_time"), "start_time")
-        _require_time_str(merged.get("end_time"), "end_time")
-        s = _hhmm_to_minutes(merged["start_time"])
-        e = _hhmm_to_minutes(merged["end_time"])
-        _require(e > s, "end_time must be later than start_time")
-        expected_qty = e - s
-        try:
-            qty_int = int(merged["quantity"])
-        except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="quantity must be numeric")
-        _require(
-            qty_int == expected_qty,
-            f"quantity must equal duration in minutes (expected {expected_qty})",
-        )
-        merged["quantity"] = qty_int  # stored as int minutes
-        if merged["allocation_mode"] == "one_time":
-            _require_date_str(merged.get("date"), "date")
-            _require(merged.get("day_of_week") in (None, ""), "one_time time allocation requires day_of_week=null")
-            merged["day_of_week"] = None
-        else:  # recurring
-            _require(merged.get("date") in (None, ""), "recurring time allocation requires date=null")
-            merged["date"] = None
-            _require(merged.get("day_of_week"), "recurring time allocation requires day_of_week")
-            _require_in(merged["day_of_week"], DAY_OF_WEEK, "day_of_week")
-    else:  # money
-        _require(merged["unit"] == "currency", "resource_type=money requires unit=currency")
-        _require_currency(merged.get("currency"), "currency")
-        _require(merged.get("start_time") in (None, ""), "resource_type=money requires start_time=null")
-        _require(merged.get("end_time") in (None, ""), "resource_type=money requires end_time=null")
-        merged["start_time"] = None
-        merged["end_time"] = None
-        # Money quantity: Decimal128 with full validation.
-        if is_create or "quantity" in incoming:
-            merged["quantity"] = _money_to_stored(merged.get("quantity"), "quantity")
-        if merged["allocation_mode"] == "one_time":
-            _require_date_str(merged.get("date"), "date")
-        else:  # recurring — date may be null
-            if merged.get("date"):
-                _require_date_str(merged["date"], "date")
-        if merged.get("day_of_week"):
-            _require_in(merged["day_of_week"], DAY_OF_WEEK, "day_of_week")
-        else:
-            merged["day_of_week"] = None
+    # Time-allocation-only rules (Batch 2B3 removed the money branch).
+    _require(merged["unit"] == "minutes", "resource_type=time requires unit=minutes")
+    _require(merged.get("currency") in (None, ""), "resource_type=time requires currency=null")
+    merged["currency"] = None
+    _require_time_str(merged.get("start_time"), "start_time")
+    _require_time_str(merged.get("end_time"), "end_time")
+    s = _hhmm_to_minutes(merged["start_time"])
+    e = _hhmm_to_minutes(merged["end_time"])
+    _require(e > s, "end_time must be later than start_time")
+    expected_qty = e - s
+    try:
+        qty_int = int(merged["quantity"])
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="quantity must be numeric")
+    _require(
+        qty_int == expected_qty,
+        f"quantity must equal duration in minutes (expected {expected_qty})",
+    )
+    merged["quantity"] = qty_int  # stored as int minutes
+    if merged["allocation_mode"] == "one_time":
+        _require_date_str(merged.get("date"), "date")
+        _require(merged.get("day_of_week") in (None, ""), "one_time time allocation requires day_of_week=null")
+        merged["day_of_week"] = None
+    else:  # recurring
+        _require(merged.get("date") in (None, ""), "recurring time allocation requires date=null")
+        merged["date"] = None
+        _require(merged.get("day_of_week"), "recurring time allocation requires day_of_week")
+        _require_in(merged["day_of_week"], DAY_OF_WEEK, "day_of_week")
 
     return merged
 
@@ -770,6 +811,11 @@ def _validate_allocation(body, *, is_create: bool, existing: dict | None = None)
 def _project_account(doc: dict) -> dict:
     doc = dict(doc)
     doc["current_value"] = _money_from_stored(doc.get("current_value"))
+    # Batch 2A: expose the snapshot timestamp so consumers can reason
+    # about which events are already inside ``current_value``. Legacy
+    # rows may lack the field (backfill covers them at startup); guard
+    # anyway so response serialisation never fails.
+    doc["balance_as_of"] = doc.get("balance_as_of") or doc.get("updated_at") or doc.get("created_at") or ""
     return doc
 
 
@@ -870,7 +916,7 @@ async def update_time_commitment(commitment_id: str, body: TimeCommitmentUpdate,
     await db.time_commitments.update_one(
         {"id": commitment_id, "user_id": current_user["id"]}, {"$set": merged},
     )
-    updated = await db.time_commitments.find_one({"id": commitment_id}, {"_id": 0})
+    updated = await db.time_commitments.find_one({"id": commitment_id, "user_id": current_user["id"]}, {"_id": 0})
     return updated
 
 
@@ -885,34 +931,41 @@ async def delete_time_commitment(commitment_id: str, current_user: dict = Depend
 # ---------------- Time capacity (derived) ----------------
 async def _daily_capacity(user_id: str, day: str) -> DailyTimeCapacityResponse:
     _require_date_str(day, "date")
-    d = _parse_date(day)
-    wd = _weekday_name(d)
-    docs = await db.time_commitments.find(
-        {
-            "user_id": user_id,
-            "day_of_week": wd,
-            "effective_from": {"$lte": day},
-            "$or": [{"effective_until": None}, {"effective_until": {"$gte": day}}],
-        },
-        {"_id": 0},
-    ).to_list(length=5000)
-    intervals = [(_hhmm_to_minutes(x["start_time"]), _hhmm_to_minutes(x["end_time"])) for x in docs]
-    committed, overlap = compute_time_union_and_overlap(intervals)
-    docs.sort(key=lambda x: x.get("start_time", ""))
+    from time_service import load_day_time_capacity  # noqa: WPS433
+    try:
+        cap = await load_day_time_capacity(db, user_id, day)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
     return DailyTimeCapacityResponse(
-        date=day,
-        day_of_week=wd,
-        total_minutes=1440,
-        committed_minutes=committed,
-        available_minutes=1440 - committed,
-        overlapping_minutes=overlap,
+        date=cap["date"],
+        day_of_week=cap["day_of_week"],
+        total_minutes=cap["total_minutes"],
+        committed_minutes=cap["committed_minutes"],
+        available_minutes=cap["available_minutes"],
+        overlapping_minutes=cap["overlapping_minutes"],
+        baseline_committed_minutes=cap["baseline_committed_minutes"],
+        reserved_minutes=cap["reserved_minutes"],
         commitments=[
             DailyCommitmentSummary(
                 id=x["id"], title=x["title"],
                 start_time=x["start_time"], end_time=x["end_time"],
                 commitment_type=x["commitment_type"], flexibility=x["flexibility"],
             )
-            for x in docs
+            for x in cap["commitments"]
+        ],
+        reservations=[
+            DailyReservationSummary(
+                id=x["id"],
+                owner_type=x.get("owner_type") or "",
+                owner_id=x.get("owner_id"),
+                start_time=x.get("start_time") or "",
+                end_time=x.get("end_time") or "",
+                allocation_mode=x.get("allocation_mode") or "",
+                status=x.get("status") or "",
+                fixed_or_flexible=x.get("fixed_or_flexible") or "flexible",
+            )
+            for x in cap["reservations"]
+            if x.get("start_time") and x.get("end_time")
         ],
     )
 
@@ -931,13 +984,57 @@ async def get_weekly_time_capacity(
     current_user: dict = Depends(get_current_user),
 ):
     _require_date_str(week_start_date, "week_start_date")
-    d = _parse_date(week_start_date)
-    _require(d.weekday() == 0, "week_start_date must be a Monday")
+    from time_service import load_week_time_capacity  # noqa: WPS433
+    try:
+        cap = await load_week_time_capacity(db, current_user["id"], week_start_date)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex))
     days: List[DailyTimeCapacityResponse] = []
-    for i in range(7):
-        di = d + timedelta(days=i)
-        days.append(await _daily_capacity(current_user["id"], di.isoformat()))
-    return WeeklyTimeCapacityResponse(week_start_date=week_start_date, days=days)
+    for daycap in cap["days"]:
+        days.append(DailyTimeCapacityResponse(
+            date=daycap["date"],
+            day_of_week=daycap["day_of_week"],
+            total_minutes=daycap["total_minutes"],
+            committed_minutes=daycap["committed_minutes"],
+            available_minutes=daycap["available_minutes"],
+            overlapping_minutes=daycap["overlapping_minutes"],
+            baseline_committed_minutes=daycap["baseline_committed_minutes"],
+            reserved_minutes=daycap["reserved_minutes"],
+            commitments=[
+                DailyCommitmentSummary(
+                    id=x["id"], title=x["title"],
+                    start_time=x["start_time"], end_time=x["end_time"],
+                    commitment_type=x["commitment_type"], flexibility=x["flexibility"],
+                )
+                for x in daycap["commitments"]
+            ],
+            reservations=[
+                DailyReservationSummary(
+                    id=x["id"],
+                    owner_type=x.get("owner_type") or "",
+                    owner_id=x.get("owner_id"),
+                    start_time=x.get("start_time") or "",
+                    end_time=x.get("end_time") or "",
+                    allocation_mode=x.get("allocation_mode") or "",
+                    status=x.get("status") or "",
+                    fixed_or_flexible=x.get("fixed_or_flexible") or "flexible",
+                )
+                for x in daycap["reservations"]
+                if x.get("start_time") and x.get("end_time")
+            ],
+        ))
+    return WeeklyTimeCapacityResponse(
+        week_start_date=cap["week_start_date"],
+        days=days,
+        total_minutes=cap["total_minutes"],
+        committed_minutes=cap["committed_minutes"],
+        available_minutes=cap["available_minutes"],
+        overlapping_minutes=cap["overlapping_minutes"],
+        baseline_committed_minutes=cap["baseline_committed_minutes"],
+        reserved_minutes=cap["reserved_minutes"],
+        capacity_basis=cap["capacity_basis"],
+        is_estimate=cap["is_estimate"],
+    )
 
 
 # ---------------- Financial accounts ----------------
@@ -952,6 +1049,10 @@ async def create_financial_account(body: FinancialAccountCreate, current_user: d
         "name": payload["name"].strip(),
         "currency": payload["currency"],
         "current_value": payload["current_value"],  # Decimal128
+        # Batch 2A: authoritative snapshot timestamp — every event created
+        # AFTER this is applied on top; events created before are already
+        # reflected in current_value and MUST NOT be reapplied.
+        "balance_as_of": payload.get("balance_as_of") or now,
         "liquidity_type": payload["liquidity_type"],
         "fixed_or_flexible": payload["fixed_or_flexible"],
         "notes": payload["notes"],
@@ -1007,6 +1108,38 @@ async def update_financial_account(account_id: str, body: FinancialAccountUpdate
 
 @portfolio_router.delete("/financial-accounts/{account_id}", status_code=200)
 async def delete_financial_account(account_id: str, current_user: dict = Depends(get_current_user)):
+    # Guard against orphaning financial history. A financial account that is
+    # referenced by any user-scoped financial_event or checkin cannot be
+    # hard-deleted because doing so would make past balances and transaction
+    # history inaccurate. Users must keep the account to preserve those links.
+    existing_event = await db.financial_events.find_one(
+        {
+            "user_id": current_user["id"],
+            "account_id": account_id,
+        },
+        {
+            "_id": 0,
+            "id": 1,
+        },
+    )
+    existing_checkin = await db.checkins.find_one(
+        {
+            "user_id": current_user["id"],
+            "account_id": account_id,
+        },
+        {
+            "_id": 0,
+            "id": 1,
+        },
+    )
+    if existing_event or existing_checkin:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This account has financial history and cannot be deleted. "
+                "Keep the account so its transactions and balances remain accurate."
+            ),
+        )
     r = await db.financial_accounts.delete_one({"id": account_id, "user_id": current_user["id"]})
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Financial account not found")
@@ -1099,20 +1232,17 @@ async def get_monthly_money_position(
     _require_month_str(month, "month")
     _require_currency(currency, "currency")
 
-    # Opening liquid assets: liquid asset-type accounts in the given currency.
-    accounts = await db.financial_accounts.find(
-        {
-            "user_id": current_user["id"],
-            "currency": currency,
-            "liquidity_type": "liquid",
-            "account_type": {"$in": list(ASSET_ACCOUNT_TYPES)},
-        },
-        {"_id": 0},
-    ).to_list(length=5000)
-    opening_liquid_assets = sum(
-        (_decimal_from_stored(a.get("current_value")) for a in accounts),
-        Decimal(0),
-    )
+    # Batch 2A: "Portfolio available for flexible spending" is one of the
+    # three surfaces that MUST use the authoritative money service. The
+    # planned budget rows (income/expense/saving/investment) remain a
+    # separate informational view — they are NOT combined with actual
+    # spending into a competing "available" number.
+    from money_service import load_availability  # local import to avoid cycles
+
+    availability = await load_availability(db, current_user["id"])
+    by_cur = availability["by_currency"].get(currency, {})
+    liquid_effective = _decimal_from_stored(by_cur.get("liquid_effective", Decimal(0)))
+    available_unreserved = _decimal_from_stored(by_cur.get("available_unreserved", Decimal(0)))
 
     # Active monthly commitments for the requested month in that currency.
     active = await db.monthly_money_commitments.find(
@@ -1153,46 +1283,27 @@ async def get_monthly_money_position(
             planned_investments += amt
         # "other" contributes to nothing.
 
-    available = (
-        opening_liquid_assets
-        + planned_income
-        - fixed_outflows
-        - flexible_outflows
-        - planned_savings
-        - planned_investments
+    # Batch 2A Correction 1: monthly actual spending is now sourced
+    # from CANONICAL applied financial events, not from
+    # ``checkins.money_spent`` — the latter counts check-ins whose
+    # events may be pending, rejected, void, or missing. The money
+    # service is the sole source of truth.
+    from money_service import monthly_actual_spending  # local for cycles
+    actual_spending = await monthly_actual_spending(
+        db, current_user["id"], month, currency,
     )
-
-    # Actual spending: sum of checkin.money_spent for the requested month +
-    # currency. This is treated as a real-time deduction from the available
-    # pool so the "available for flexible spending" number reflects reality,
-    # not just the plan.
-    month_prefix = month  # YYYY-MM
-    spend_docs = await db.checkins.find(
-        {
-            "user_id": current_user["id"],
-            "money_currency": currency,
-            "money_spent": {"$ne": None},
-            "date": {"$regex": f"^{re.escape(month_prefix)}-"},
-        },
-        {"_id": 0, "money_spent": 1},
-    ).to_list(length=20000)
-    actual_spending = sum(
-        (_decimal_from_stored(x.get("money_spent")) for x in spend_docs),
-        Decimal(0),
-    )
-    available = available - actual_spending
 
     return MonthlyMoneyPositionResponse(
         month=month,
         currency=currency,
-        opening_liquid_assets=_quantize_out(opening_liquid_assets),
+        opening_liquid_assets=_quantize_out(liquid_effective),
         planned_income=_quantize_out(planned_income),
         fixed_outflows=_quantize_out(fixed_outflows),
         flexible_outflows=_quantize_out(flexible_outflows),
         planned_savings=_quantize_out(planned_savings),
         planned_investments=_quantize_out(planned_investments),
         actual_spending=_quantize_out(actual_spending),
-        available_for_flexible_spending=_quantize_out(available),
+        available_for_flexible_spending=_quantize_out(available_unreserved),
     )
 
 
@@ -1345,10 +1456,14 @@ async def list_resource_allocations(
     fixed_or_flexible: Optional[str] = None,
     unit: Optional[str] = None,
 ):
-    q: dict = {"user_id": current_user["id"]}
+    # Batch 2B3 — Portfolio API is time-allocation-only. Finance-owned
+    # rows (identified by a set financial_commitment_id) are excluded.
+    q: dict = _portfolio_time_allocation_scope(current_user["id"])
     if resource_type:
         _require_in(resource_type, RESOURCE_TYPES, "resource_type")
-        q["resource_type"] = resource_type
+        if resource_type != "time":
+            raise HTTPException(status_code=400, detail=_PORTFOLIO_MONEY_ALLOCATION_ERROR)
+        # ``time`` is already pinned by the base scope; no override.
     if owner_type:
         _require_in(owner_type, OWNER_TYPES, "owner_type")
         q["owner_type"] = owner_type
@@ -1382,10 +1497,17 @@ async def list_resource_allocations(
 
 @portfolio_router.put("/resource-allocations/{allocation_id}", response_model=ResourceAllocationResponse)
 async def update_resource_allocation(allocation_id: str, body: ResourceAllocationUpdate, current_user: dict = Depends(get_current_user)):
-    existing = await db.resource_allocations.find_one({"id": allocation_id, "user_id": current_user["id"]}, {"_id": 0})
+    # Batch 2B3 — restrict the update surface to Portfolio-owned time
+    # rows. Finance-owned rows (financial_commitment_id set) are
+    # invisible here and return 404 exactly like any other unknown id.
+    scope = {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id}
+    existing = await db.resource_allocations.find_one(scope, {"_id": 0})
     if not existing:
         raise HTTPException(status_code=404, detail="Resource allocation not found")
     incoming = body.dict(exclude_unset=True)
+    # _validate_allocation now refuses resource_type != "time" with the
+    # exact money-allocation error, so a payload trying to flip a time
+    # row into a money row cannot succeed.
     merged = _validate_allocation(body, is_create=False, existing=existing)
     # If ownership has changed (either owner_type or owner_id in the payload),
     # revalidate that the new reference exists & is owned by the user.
@@ -1393,15 +1515,23 @@ async def update_resource_allocation(allocation_id: str, body: ResourceAllocatio
         await _validate_owner_reference(current_user["id"], merged["owner_type"], merged.get("owner_id"))
     merged["updated_at"] = _now()
     await db.resource_allocations.update_one(
-        {"id": allocation_id, "user_id": current_user["id"]}, {"$set": merged},
+        {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id},
+        {"$set": merged},
     )
-    updated = await db.resource_allocations.find_one({"id": allocation_id}, {"_id": 0})
+    updated = await db.resource_allocations.find_one(
+        {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id},
+        {"_id": 0},
+    )
     return _project_allocation(updated)
 
 
 @portfolio_router.delete("/resource-allocations/{allocation_id}", status_code=200)
 async def delete_resource_allocation(allocation_id: str, current_user: dict = Depends(get_current_user)):
-    r = await db.resource_allocations.delete_one({"id": allocation_id, "user_id": current_user["id"]})
+    # Batch 2B3 — Finance-owned rows are excluded from the ownership
+    # scope, so they can never be deleted via this generic route.
+    r = await db.resource_allocations.delete_one(
+        {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id},
+    )
     if r.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Resource allocation not found")
     return {"detail": "Resource allocation deleted"}
@@ -1426,6 +1556,18 @@ async def ensure_portfolio_indexes(database) -> None:
     await database.financial_accounts.create_index("user_id")
     await database.financial_accounts.create_index([("user_id", 1), ("currency", 1)])
     await database.financial_accounts.create_index([("user_id", 1), ("account_type", 1)])
+
+    # Batch 2A migration: every account MUST carry an authoritative
+    # ``balance_as_of`` snapshot timestamp. For pre-2A rows we set it to
+    # the migration/startup timestamp — preserving ``current_value``
+    # unchanged so historical events created BEFORE this moment are not
+    # reapplied to the migrated balance. Idempotent: only rows missing
+    # the field are touched.
+    _now_ts = datetime.now(timezone.utc).isoformat()
+    await database.financial_accounts.update_many(
+        {"$or": [{"balance_as_of": {"$exists": False}}, {"balance_as_of": None}, {"balance_as_of": ""}]},
+        {"$set": {"balance_as_of": _now_ts}},
+    )
 
     # monthly_money_commitments
     await database.monthly_money_commitments.create_index("id", unique=True)

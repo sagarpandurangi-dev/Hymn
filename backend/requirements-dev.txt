@@ -1,0 +1,3 @@
+# Test-only dependencies for the offline suites (safety_tests, unit_tests).
+httpx==0.28.1
+mongomock-motor==0.0.36

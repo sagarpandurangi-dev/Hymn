@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import { CURRENCY_LABEL } from "@/src/lib/portfolio/constants";
@@ -78,6 +78,17 @@ export default function PortfolioScreen() {
 
         <Text style={styles.sectionHead}>Monthly Money Commitments</Text>
         <MonthlyMoneyPanel defaultCurrency={status.reporting_currency || "USD"} />
+
+        <Text style={styles.sectionHead}>Behavioural Calibration</Text>
+        <Pressable
+          onPress={() => router.push("/portfolio/calibration")}
+          style={styles.currencyRow}
+          testID="portfolio-calibration"
+        >
+          <Ionicons name="pulse-outline" size={18} color={colors.onSurfaceSecondary} />
+          <Text style={styles.currencyLabel}>Learn from my overrides</Text>
+          <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+        </Pressable>
       </ScrollView>
 
       <CurrencyPickerModal
