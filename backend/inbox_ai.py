@@ -22,9 +22,13 @@ from pydantic import BaseModel, Field, ValidationError
 
 logger = logging.getLogger(__name__)
 
-MODEL = os.environ.get("HYMN_ASSISTANT_MODEL", "claude-opus-5-5")
-# On a policy decline the API re-runs the request on Anthropic's
-# recommended fallback model instead of returning the refusal.
+# Haiku is plenty for sorting and costs a fraction of Opus; override with
+# HYMN_ASSISTANT_MODEL (e.g. claude-opus-5-5) if quality ever falls short.
+MODEL = os.environ.get("HYMN_ASSISTANT_MODEL") or "claude-haiku-5-5"
+# On a policy decline these models can re-run the request on Anthropic's
+# recommended fallback model instead of returning the refusal. Haiku has
+# no server-side fallback; its refusals surface as AssistantUnavailable.
+_FALLBACK_MODELS = frozenset({"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"})
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 _TONE = (
@@ -108,6 +112,7 @@ def _get_client() -> anthropic.AsyncAnthropic:
 
 async def _parse(system: str, user_content: str, output_format: type[BaseModel]):
     client = _get_client()
+    fallback = {"betas": [_FALLBACK_BETA], "fallbacks": "default"} if MODEL in _FALLBACK_MODELS else {}
     try:
         response = await client.beta.messages.parse(
             model=MODEL,
@@ -116,8 +121,7 @@ async def _parse(system: str, user_content: str, output_format: type[BaseModel])
             messages=[{"role": "user", "content": user_content}],
             output_format=output_format,
             output_config={"effort": "low"},
-            betas=[_FALLBACK_BETA],
-            fallbacks="default",
+            **fallback,
         )
     except anthropic.RateLimitError as exc:
         logger.warning("assistant rate limited: %s", exc)
