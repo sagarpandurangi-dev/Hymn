@@ -2436,70 +2436,63 @@ async def get_spending(
     date: str = Query(..., description="Local YYYY-MM-DD to fetch spending for"),
     current_user: dict = Depends(get_current_user),
 ):
-    """Return check-ins with money_spent for the given local date.
+    """Spending for one local date, from the same rule Finance uses
+    (``money_service.counts_as_spending``), so Today and Finance agree.
 
     Response shape::
 
         {
           "date": "YYYY-MM-DD",
           "groups": [
-            { "currency": "USD", "total": "42.50",
+            { "currency": "INR", "total": "42.50",
               "entries": [ { id, title, time, amount, notes, goal_id, task_id, expected_outcome_id }, ... ] }
-          ]
+          ],
+          "needs_account": 1,   # outflows that count once an account is picked
+          "needs_review": 0     # outflows waiting on a duplicate decision
         }
 
-    The Today screen consumes this to render the "Today's Spending" card and
-    the /spending detail page groups entries per currency (no FX conversion).
+    Entries no longer come from ``checkins.money_spent`` directly: a
+    check-in spend without an account is pending in Finance, so it shows
+    under ``needs_account`` instead of in the total.
     """
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date or ""):
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
 
-    docs = await db.checkins.find(
-        {
-            "user_id": current_user["id"],
-            "date": date,
-            "money_spent": {"$ne": None},
-        },
-        {
-            "_id": 0, "id": 1, "title": 1, "date": 1, "time": 1,
-            "money_spent": 1, "money_currency": 1, "notes": 1,
-            "goal_id": 1, "task_id": 1, "expected_outcome_id": 1,
-        },
-    ).to_list(length=5000)
-
-    from bson.decimal128 import Decimal128 as _D128
     from decimal import Decimal as _Dec
+    from money_service import daily_spending, _to_decimal
 
-    def _to_dec(v):
-        if v is None:
-            return _Dec(0)
-        if isinstance(v, _D128):
-            return v.to_decimal()
-        try:
-            return _Dec(str(v))
-        except Exception:  # noqa: BLE001
-            return _Dec(0)
+    day = await daily_spending(db, current_user["id"], date)
+    checkin_ids = [e["checkin_id"] for e in day["counted"] if e.get("checkin_id")]
+    checkins = {
+        c["id"]: c
+        for c in await db.checkins.find(
+            {"user_id": current_user["id"], "id": {"$in": checkin_ids}},
+            {"_id": 0, "id": 1, "title": 1, "time": 1, "notes": 1,
+             "goal_id": 1, "task_id": 1, "expected_outcome_id": 1},
+        ).to_list(length=None)
+    } if checkin_ids else {}
 
     groups: dict = {}
-    for d in docs:
-        cur = d.get("money_currency") or ""
-        amt = _to_dec(d.get("money_spent"))
+    for ev in day["counted"]:
+        cur = ev.get("currency") or ""
         if not cur:
             continue
+        amt = _to_decimal(ev.get("amount"))
+        c = checkins.get(ev.get("checkin_id")) or {}
         g = groups.setdefault(cur, {"currency": cur, "total": _Dec(0), "entries": []})
         g["total"] += amt
         g["entries"].append({
-            "id": d.get("id"),
-            "title": d.get("title") or "",
-            "time": d.get("time") or "",
+            "id": c.get("id") or ev.get("id"),
+            "title": c.get("title") or ev.get("description") or "",
+            "time": c.get("time") or "",
             "amount": str(amt),
-            "notes": d.get("notes") or "",
-            "goal_id": d.get("goal_id"),
-            "task_id": d.get("task_id"),
-            "expected_outcome_id": d.get("expected_outcome_id"),
+            "notes": c.get("notes") or "",
+            "goal_id": c.get("goal_id"),
+            "task_id": c.get("task_id"),
+            "expected_outcome_id": c.get("expected_outcome_id"),
         })
 
-    payload = {
+    return {
         "date": date,
         "groups": [
             {
@@ -2509,8 +2502,9 @@ async def get_spending(
             }
             for g in sorted(groups.values(), key=lambda x: x["currency"])
         ],
+        "needs_account": day["needs_account"],
+        "needs_review": day["needs_review"],
     }
-    return payload
 
 
 @api_router.get("/checkins/{checkin_id}", response_model=CheckInResponse)

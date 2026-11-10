@@ -13,7 +13,7 @@ objects), the owner's decisions below, and the Financial Discovery handoff
 |---|---|
 | Accounting views | Both **cash basis** and **accrual basis**. |
 | Car purchase | An **asset**; its cost is spread **straight-line (SLM)** over its useful life. |
-| Fuel | Spread **automatically** between fills. At each fuel spend, ask for the **odometer** reading (number or photo) and compute real-world mileage. |
+| Fuel | Spread **automatically** between fills. At each fuel spend, ask for the **odometer** reading (number or photo) and the **price per litre**; litres = amount ÷ price; compute real-world mileage (km/l). |
 | EMIs | Split into **principal** and **interest**. On detecting a loan, ask for the **loan document**; if skipped, ask for principal, rate, tenure, interest method. |
 | Life areas | Five visible (Money, Health, Family & Relationships, Learning, Work); unassigned spending goes to a hidden "Soul" area, shown only above 30%. |
 
@@ -73,7 +73,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🐞 defect · ⏳ lat
 | Cost of a life object (car, house, household, habits) | none | ❌ | `cost_objects` (area, start, optional asset link); events tagged/split | P1 | Low |
 | Car as asset with SLM depreciation | asset types; no vehicle type, no depreciation | ❌ | `vehicle` asset type; purchase price, date, life, salvage → monthly depreciation in accrual view, charged to the car | P1 | Low |
 | Spreading (fuel between fills) | none | ❌ | `consumption_period` on events; fuel auto-period = until next fuel event for the same car | P1 | Low |
-| Real-world mileage | none | ❌ | Odometer prompt at each fuel spend (number or photo → Claude vision); litres or price/litre also needed for km/l | P1 | Low |
+| Real-world mileage | none | ❌ | Odometer (number or photo → Claude vision) and price per litre at each fuel spend; litres = amount ÷ price → km/l | P1 | Low |
 | Loans: principal vs interest | debt payments planned; scenario loan closure | 🟡 no terms, no amortisation | Loan terms on liability (principal, rate, tenure, method, start); EMI split by schedule; loan document upload → extraction | P1 (manual) / P2 (document) | Med |
 | Stock vs flow; balances dated | `balance_as_of` per account | 🟡 net worth mixes asset effective balances with stale liability snapshots | Liabilities move with events once allowed (above); show "as of" per figure | P0 (with cards) | Low |
 | Recurring vs non-recurring income | expected income `classification`; forecasts use recurring separately | 🟡 actual inflows aren't classified (gift/redemption look like income) | `kind` = salary/gift/redemption/refund… on inflows | P0 | Low |
@@ -185,8 +185,8 @@ rows for totals once the ledger is live.
 - Depreciation: monthly SLM transactions for assets with purchase price, date,
   life and salvage value, charged to the asset's cost object.
 - Fuel: consumption period = until the next fuel transaction for the same car;
-  odometer (number or photo → Claude vision) and litres on fuel transactions →
-  km/l.
+  odometer (number or photo → Claude vision) and price per litre on fuel
+  transactions; litres = amount ÷ price → km/l.
 - Reports: `/finance/reports/spending?basis=accrual|cash&group=category|area|object`,
   `/finance/objects/{id}/cost`.
 
