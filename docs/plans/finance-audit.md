@@ -1,6 +1,6 @@
 # Finance audit and Financial Discovery plan
 
-Status: **audit complete, plan awaiting approval.** No code was changed for this
+Status: **audit complete; ledger architecture approved; patches await approval one by one.** No code was changed for this
 audit. Repository revision audited: `main` at `5c8448f` (after PR #14).
 
 Sources: the owner's requirements (ledger, accrual, spreading, cost of life
@@ -93,30 +93,80 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🐞 defect · ⏳ lat
 **Conclusion.** The existing engine is a careful cash-flow planner with a
 sound balance service and audit trail. It is inadequate as a ledger in three
 demonstrated ways — no transfers, no credit-card accounting, no
-classification — and those three block every owner requirement. The plan
-therefore **evolves `financial_events` into the ledger** rather than adding a
-parallel one: same collection, same confirmation semantics, same
-money_service, new fields with backward-compatible defaults.
+classification — and those three block every owner requirement.
+
+## Architecture decision: a double-entry ledger
+
+Approved by the owner. The handoff is the feature brief, not the framework
+spec; the architecture is chosen for (1) fast, cheap capture and retrieval,
+(2) the fewest repeat fixes later, and (3) supporting Hymn as a decision
+copilot.
+
+**Why a ledger rather than extended event rows.** Every owner requirement is a
+multi-leg movement: EMI = principal + interest; one bill split across car and
+household; card purchase vs card settlement; monthly depreciation; cash vs
+accrual views. Single-row events need a special case for each; a ledger
+handles all of them with one rule — every transaction's postings sum to zero —
+which also makes double counting structurally impossible.
+
+**Model.**
+
+- `ledger_accounts`: the user's real accounts (bank, cash, card, loan, FD,
+  fund, vehicle…) plus nominal accounts (expense categories, income types,
+  opening balances). Real accounts reuse `financial_accounts` ids.
+- `ledger_transactions`: one per **economic event** — date, kind (expense,
+  income, transfer, card settlement, investment, redemption, loan payment,
+  refund, gift, depreciation, opening balance), description, cost-object
+  splits, area, provenance (document / user / inferred / estimated), `locked`
+  when the user corrected it, optional consumption period (spreading).
+- `postings`: account, signed amount, and the date money actually moved
+  (drives the **cash view**); the transaction date drives the **accrual
+  view**.
+- **Evidence**: existing `financial_events` (check-in, manual, later SMS /
+  statement lines) become evidence records linked to a transaction. Several
+  records can prove one transaction — PhonePe + card statement + check-in →
+  one dinner.
+
+**Speed and cost rules.**
+
+- Postings indexed by (user, account, date) and (user, transaction); totals by
+  Mongo aggregation, never by loading rows into Python. Monthly roll-ups are
+  added only if measured queries need them.
+- Classification is **rules first, Claude second**: deterministic rules (own
+  accounts → transfer, card bill → settlement, known merchants, user's past
+  corrections) handle the bulk; Claude Haiku only for what remains; Claude
+  Opus only for advice and planning. Statement imports use the Batch API
+  (half price) because they aren't interactive.
+- `money_service` stays the single place that computes balances; it switches
+  to postings, so existing screens and forecasts keep working.
+
+**Quality rules (fewest repeat fixes).** Small reviewed patches; tests for
+every rule before it ships, including deliberately-broken checks; one-time
+data conversion with a dry-run report first; no feature reads the old event
+rows for totals once the ledger is live.
 
 ---
 
 ## Deliverable 3 — Minimal amendment plan
 
-### A. Event kinds, transfers, cards (P0)
-- **Edit** `finance_manager.py` (`FinancialEventCreate`, `create_event`,
-  `_resolve_event_account`), `money_service.py` (`compute_effective_balance`,
-  `monthly_actual_spending`, `event_is_applied_to_account`).
-- **New fields** on events: `kind`, `counter_account_id`. Existing rows read as
-  `expense` (outflow) / `income` (inflow) — no migration needed to keep working.
-- **Rules**: transfer/settlement/investment = outflow on `account_id`, inflow on
-  `counter_account_id`, excluded from spending. Liability accounts accept
-  events: expense raises outstanding, settlement lowers it.
-- **Must not change**: confirmation/lifecycle semantics, available-money
-  definition for asset accounts, audit trail, API shape for existing fields.
-- **Accept**: moving ₹50,000 bank→FD leaves spending unchanged and net worth
-  unchanged; a ₹2,000 card dinner is ₹2,000 spending on that day and +₹2,000 card
-  outstanding; paying the card bill changes bank and card, not spending.
-- **Tests**: extend `safety_tests/test_money_service.py`; new unit tests.
+### A. Ledger core (P0)
+- **New** `ledger.py` (accounts, transactions, postings, invariants, balance
+  and spending queries) — new because nothing comparable exists.
+- Built **alongside** the current engine: no screen reads it until step A3.
+  - A1: model + invariants (postings sum to zero, one currency per
+    transaction, locked transactions immutable to automation) + kinds incl.
+    transfers, card settlements, loan payments.
+  - A2: one-time conversion of accounts, snapshots, events and check-in spends,
+    with a dry-run report the owner reviews.
+  - A3: `money_service` reads postings; Today's Spending and Finance follow.
+- **Must not change**: confirmation semantics (unconfirmed evidence never
+  posts), the available-money definition, the audit trail, existing API shapes.
+- **Accept**: moving ₹50,000 bank→FD leaves spending and net worth unchanged; a
+  ₹2,000 card dinner is ₹2,000 accrual spending that day and +₹2,000 card
+  outstanding; paying the card bill moves bank and card only, and counts as
+  cash-view spending on the payment date.
+- **Tests**: invariants, each kind's postings, both views, conversion dry run
+  on synthetic data (never personal data).
 
 ### B. Single spending truth + no truncation (P0)
 - **Edit** `server.py` `get_spending` to use applied events; replace capped
@@ -129,10 +179,14 @@ money_service, new fields with backward-compatible defaults.
 - **Must not change**: time-commitment requirement; existing completed users.
 
 ### D. Categories, cost objects, areas, spreading, depreciation, mileage (P1)
-- **New** `ledger_meta.py` (categories, cost objects, asset depreciation
-  schedule) — new because nothing comparable exists.
-- **Edit** events: `category_id`, `cost_object_id` (+ optional splits),
-  `consumption_period`, `odometer_km`, `fuel_litres`.
+- Categories are nominal ledger accounts (default tree, editable); cost
+  objects (car, house, household, habits) carry an area and optional asset
+  link; transactions split across them.
+- Depreciation: monthly SLM transactions for assets with purchase price, date,
+  life and salvage value, charged to the asset's cost object.
+- Fuel: consumption period = until the next fuel transaction for the same car;
+  odometer (number or photo → Claude vision) and litres on fuel transactions →
+  km/l.
 - Reports: `/finance/reports/spending?basis=accrual|cash&group=category|area|object`,
   `/finance/objects/{id}/cost`.
 
@@ -149,7 +203,7 @@ money_service, new fields with backward-compatible defaults.
 
 | Phase | Contents |
 |---|---|
-| **P0 Integrity** | B (single truth, no truncation) → A (kinds, transfers, cards) |
+| **P0 Integrity** | B (single truth, no truncation) → A1 ledger core → A2 conversion (dry run, owner review) → A3 switch-over |
 | **P1 Manual-first** | C (optional setup) · D (categories, objects, spreading, depreciation, mileage) · E-manual (loans) · account deletion |
 | **P2 Evidence** | Statement upload + extraction · better duplicate matching · provenance/locks · loan documents |
 | **P3 Clarification** | Material-questions queue (wired into nudges/daily review) · coverage indicators |
@@ -177,5 +231,5 @@ money_service, new fields with backward-compatible defaults.
 - **Excluded**: transfers, cards, categories, any frontend change beyond
   optionally showing the "needs account" count.
 
-Next patch after approval: **A (kinds, transfers, cards)** — the change that
-unblocks every owner requirement.
+Next patch after approval: **A1 ledger core** — built alongside the current
+engine, invisible to users until the conversion has been reviewed.
