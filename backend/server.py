@@ -3,6 +3,7 @@ from fastapi.security import OAuth2PasswordBearer
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
+import asyncio
 import os
 import logging
 import re
@@ -2838,6 +2839,7 @@ from finance_advanced import advanced_router as finance_advanced_router, ensure_
 from planning_engine import planning_router, ensure_planning_indexes  # noqa: E402
 from planning_space import planning_space_router  # noqa: E402
 from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
+import nudges  # noqa: E402
 import goal_merge  # noqa: F401,E402  (registers merge endpoints on planning_router)
 
 api_router.include_router(portfolio_router)
@@ -2846,6 +2848,7 @@ api_router.include_router(finance_advanced_router)
 api_router.include_router(planning_router)
 api_router.include_router(planning_space_router)
 api_router.include_router(inbox_router)
+api_router.include_router(nudges.nudges_router)
 app.include_router(api_router)
 
 # Auth is a bearer header, never a cookie, so credentialed CORS is not
@@ -2879,14 +2882,20 @@ async def startup_indexes():
     await ensure_finance_advanced_indexes(db)
     await ensure_planning_indexes(db)
     await ensure_inbox_indexes(db)
+    await nudges.ensure_nudge_indexes(db)
     try:
         touched = await backfill_fc_into_allocations(db)
         if touched:
             logger.info("finance migration: backfilled %d financial_commitments into resource_allocations", touched)
     except Exception as _bfx:  # pragma: no cover — never fail startup
         logger.warning("finance backfill skipped: %s", _bfx)
+    if nudges.loop_enabled():
+        app.state.nudge_task = asyncio.create_task(nudges.nudge_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown_db_client():
+    task = getattr(app.state, "nudge_task", None)
+    if task:
+        task.cancel()
     client.close()

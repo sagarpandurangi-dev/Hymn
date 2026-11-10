@@ -558,10 +558,9 @@ def _week_report(stats: dict) -> str:
     )
 
 
-@inbox_router.post("/patterns", status_code=201)
-async def generate_patterns(current_user: dict = Depends(get_current_user)):
-    db = get_db()
-    stats = await build_week_stats(db, current_user["id"])
+async def create_weekly_insight(db, user_id: str) -> dict:
+    """Analyse the last 7 days and store the result (route and scheduler)."""
+    stats = await build_week_stats(db, user_id)
     insight = None
     error = None
     if stats["captured"] or stats["avoided"]:
@@ -571,7 +570,7 @@ async def generate_patterns(current_user: dict = Depends(get_current_user)):
             error = str(exc)
     doc = {
         "id": str(uuid.uuid4()),
-        "user_id": current_user["id"],
+        "user_id": user_id,
         "stats": {k: v for k, v in stats.items() if not k.startswith("_")},
         "insight": insight,
         "error": error,
@@ -579,6 +578,11 @@ async def generate_patterns(current_user: dict = Depends(get_current_user)):
     }
     await db.inbox_insights.insert_one(doc)
     return _public(doc)
+
+
+@inbox_router.post("/patterns", status_code=201)
+async def generate_patterns(current_user: dict = Depends(get_current_user)):
+    return await create_weekly_insight(get_db(), current_user["id"])
 
 
 @inbox_router.get("/patterns")
