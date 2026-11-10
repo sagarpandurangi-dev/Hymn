@@ -2835,6 +2835,7 @@ from planning_space import planning_space_router  # noqa: E402
 from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
 import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
+import ledger_conversion  # noqa: F401,E402  (registers conversion routes on ledger_router)
 import goal_merge  # noqa: F401,E402  (registers merge endpoints on planning_router)
 
 api_router.include_router(portfolio_router)
