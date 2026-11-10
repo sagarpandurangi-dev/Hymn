@@ -27,6 +27,7 @@ DB_NAME = os.environ["DB_NAME"]
 # other mode). See backend/runtime.py.
 from runtime import get_jwt_secret  # noqa: E402
 import auth_throttle  # noqa: E402
+from plans import user_plan  # noqa: E402
 JWT_SECRET = get_jwt_secret()
 JWT_ALG = "HS256"
 # Long-lived token. Each token carries the user's ``token_version``;
@@ -83,6 +84,7 @@ class UserResponse(BaseModel):
     portfolio_setup_completed_at: Optional[str] = None
     portfolio_reporting_currency: Optional[str] = None
     post_creation_decomposition_preference: str = "always_ask"
+    plan: str = "free"
 
 
 class PostCreationDecompositionPreferenceUpdate(BaseModel):
@@ -674,6 +676,7 @@ def user_to_response(u: dict) -> UserResponse:
         post_creation_decomposition_preference=u.get(
             "post_creation_decomposition_preference", "always_ask",
         ),
+        plan=user_plan(u),
     )
 
 

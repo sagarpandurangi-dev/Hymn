@@ -15,6 +15,7 @@ objects), the owner's decisions below, and the Financial Discovery handoff
 | Car purchase | An **asset**; its cost is spread **straight-line (SLM)** over its useful life. |
 | Fuel | Spread **automatically** between fills. At each fuel spend, ask for the **odometer** reading (number or photo) and the **price per litre**; litres = amount ÷ price; compute real-world mileage (km/l). |
 | EMIs | Split into **principal** and **interest**. On detecting a loan, ask for the **loan document**; if skipped, ask for principal, rate, tenure, interest method. |
+| Plans | **Free**: opening balances entered by hand. **Premium**: statement upload and the spending history and analysis built from it. No billing yet; Premium via `HYMN_PREMIUM_EMAILS`. |
 | Life areas | Five visible (Money, Health, Family & Relationships, Learning, Work); unassigned spending goes to a hidden "Soul" area, shown only above 30%. |
 
 ---

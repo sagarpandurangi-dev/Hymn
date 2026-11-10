@@ -37,13 +37,14 @@ def _chunk(lines, kind="bank", opening="", closing="", **kw):
 
 
 @pytest.fixture()
-def user(client):
+def user(client, server):
     r = client.post("/api/auth/signup", json={
         "name": "Docs", "email": "docs@example.com", "password": "correct-horse-battery",
         "security_question": "Q?", "security_answer": "A",
     })
     assert r.status_code == 201, r.text
     body = r.json()
+    asyncio.run(server.db.users.update_one({"id": body["user"]["id"]}, {"$set": {"plan": "premium"}}))
     return {"id": body["user"]["id"], "headers": {"Authorization": f"Bearer {body['access_token']}"}}
 
 

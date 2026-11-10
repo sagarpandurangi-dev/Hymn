@@ -13,6 +13,9 @@ Flow
 4. Nothing reaches the ledger here; confirming imports into it is the next
    step (classification, duplicate matching, opening balances).
 
+Uploading is a Premium feature; listing and deleting stay open to everyone,
+so a user who leaves Premium can still remove their documents.
+
 The one reading rule, for every institution: the debit column is money out
 of the account, the credit column is money into it.
 """
@@ -34,6 +37,7 @@ from pypdf.errors import PdfReadError
 import statements_ai
 from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
+from plans import require_feature
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +251,9 @@ async def upload_statement(
     password: Optional[str] = Form(default=None),
     current_user: dict = Depends(get_current_user),
 ):
+    require_feature(current_user, "statements",
+                    "Reading statements is part of Hymn Premium. On the free plan, enter your "
+                    "account balances by hand.")
     data = await file.read(MAX_BYTES + 1)
     if len(data) > MAX_BYTES:
         raise HTTPException(status_code=413, detail="Statements must be 10 MB or smaller.")
