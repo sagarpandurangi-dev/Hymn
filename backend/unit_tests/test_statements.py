@@ -160,6 +160,7 @@ def test_one_misread_number_is_caught():
     assert v["trusted"] is False
     assert {p["issue"] for p in v["problems"]} == {"running balance doesn't add up", "opening + movements ≠ closing"}
     assert v["problems"][0]["line"] == 2
+    assert (v["problems"][0]["line_number"], v["problems"][0]["message"]) == (2, "running balance doesn't add up")
 
 
 def test_card_statement_balances_are_amounts_owed():

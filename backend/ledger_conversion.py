@@ -291,7 +291,8 @@ async def apply(db, user_id: str, fingerprint: str) -> dict:
     for d in plan["drafts"]:
         await ledger.record(db, user_id, d["draft"], provenance="conversion", evidence_ids=d["evidence_ids"])
         created += 1
-    return {"created": created, "fingerprint": fingerprint}
+    # The app reads `entries_created`; keep both spellings.
+    return {"created": created, "entries_created": created, "fingerprint": fingerprint}
 
 
 class ApplyRequest(BaseModel):
