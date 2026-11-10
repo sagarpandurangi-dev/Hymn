@@ -7,7 +7,7 @@ Two jobs, each a single structured-output request:
 * ``summarise_patterns`` turns a week of inbox activity into themes and
   workflow suggestions.
 
-Both raise :class:`AssistantUnavailable` on any failure (no key, API
+Both raise :class:`claude_client.AssistantUnavailable` on any failure (no key, API
 error, refusal, truncated output). Callers must already have persisted
 whatever the user sent, so a failure here never loses anything.
 """
@@ -20,16 +20,14 @@ from typing import List, Literal
 import anthropic
 from pydantic import BaseModel, Field, ValidationError
 
+import claude_client
+from claude_client import AssistantUnavailable
+
 logger = logging.getLogger(__name__)
 
 # Haiku is plenty for sorting and costs a fraction of Opus; override with
 # HYMN_ASSISTANT_MODEL (e.g. claude-opus-5-5) if quality ever falls short.
 MODEL = os.environ.get("HYMN_ASSISTANT_MODEL") or "claude-haiku-5-5"
-# On a policy decline these models can re-run the request on Anthropic's
-# recommended fallback model instead of returning the refusal. Haiku has
-# no server-side fallback; its refusals surface as AssistantUnavailable.
-_FALLBACK_MODELS = frozenset({"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"})
-_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 _TONE = (
     "You are Hymn, the user's personal assistant. Your job is to take "
@@ -74,10 +72,6 @@ Base everything on the data given. If there is little data, say so briefly
 rather than inventing patterns."""
 
 
-class AssistantUnavailable(Exception):
-    """The model could not produce a usable answer."""
-
-
 class SortedItem(BaseModel):
     text: str
     category: Literal["task", "reminder", "idea", "plan"]
@@ -96,24 +90,10 @@ class WeeklyPatterns(BaseModel):
     summary: str
 
 
-_client: anthropic.AsyncAnthropic | None = None
-
-
-def _get_client() -> anthropic.AsyncAnthropic:
-    global _client
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        logger.warning("assistant unavailable: ANTHROPIC_API_KEY is not configured")
-        raise AssistantUnavailable("ANTHROPIC_API_KEY is not configured")
-    if _client is None:
-        # A phone is waiting on the response; the raw dump is already saved,
-        # so fail fast and let the user re-sort later.
-        _client = anthropic.AsyncAnthropic(timeout=45.0, max_retries=1)
-    return _client
-
-
 async def _parse(system: str, user_content: str, output_format: type[BaseModel]):
-    client = _get_client()
-    fallback = {"betas": [_FALLBACK_BETA], "fallbacks": "default"} if MODEL in _FALLBACK_MODELS else {}
+    # A phone is waiting on the response; the raw dump is already saved,
+    # so fail fast and let the user re-sort later.
+    client = claude_client.get_client().with_options(timeout=45.0)
     try:
         response = await client.beta.messages.parse(
             model=MODEL,
@@ -122,17 +102,10 @@ async def _parse(system: str, user_content: str, output_format: type[BaseModel])
             messages=[{"role": "user", "content": user_content}],
             output_format=output_format,
             output_config={"effort": "low"},
-            **fallback,
+            **claude_client.fallback_kwargs(MODEL),
         )
-    except anthropic.RateLimitError as exc:
-        logger.warning("assistant rate limited: %s", exc)
-        raise AssistantUnavailable("rate limited") from exc
-    except anthropic.APIStatusError as exc:
-        logger.warning("assistant API error %s: %s", exc.status_code, exc.message)
-        raise AssistantUnavailable(f"API error {exc.status_code}") from exc
-    except anthropic.APIConnectionError as exc:
-        logger.warning("assistant unreachable: %s", exc)
-        raise AssistantUnavailable("connection error") from exc
+    except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+        raise claude_client.unavailable_from(exc) from exc
     except ValidationError as exc:
         logger.warning("assistant returned malformed output: %s", exc)
         raise AssistantUnavailable("malformed output") from exc

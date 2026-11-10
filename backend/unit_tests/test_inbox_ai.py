@@ -8,6 +8,7 @@ import httpx2
 import pytest
 
 import anthropic
+import claude_client
 import inbox_ai
 
 
@@ -24,7 +25,9 @@ class _FakeMessages:
 
 def _install(monkeypatch, messages):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setattr(inbox_ai, "_client", SimpleNamespace(beta=SimpleNamespace(messages=messages)))
+    fake = SimpleNamespace(beta=SimpleNamespace(messages=messages))
+    fake.with_options = lambda **_: fake
+    monkeypatch.setattr(claude_client, "_client", fake)
 
 
 def _sort():

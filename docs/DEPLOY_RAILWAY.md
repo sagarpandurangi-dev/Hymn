@@ -66,8 +66,5 @@ visible first).
 
 ## What doesn't work yet on Railway
 
-- The planning chat and goal merge still use Emergent's AI wrapper, which
-  only exists inside Emergent. They show "Planning is unavailable" until
-  they are moved to the Anthropic SDK like the inbox.
 - Your existing data lives in Emergent's database. The Railway backend
   starts empty; moving data across is a separate step.

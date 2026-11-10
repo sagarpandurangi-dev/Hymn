@@ -41,6 +41,7 @@ recompute "available money" or "effective balance". Test coverage is in
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Optional
@@ -503,43 +504,79 @@ async def load_availability(db, user_id: str) -> dict:
     }
 
 
+def counts_as_spending(event: dict) -> bool:
+    """The single rule for "this event is spending", used by every screen.
+
+    An outflow counts once it is confirmed, fully processed (applied
+    lifecycle) and tied to an account. Its reporting date is
+    ``event_date`` (the user's calendar day); an exact ``occurred_at`` is
+    needed to order events against a balance snapshot, not to know which
+    day money was spent, so date-only events count too.
+    """
+    event_date = event.get("event_date")
+    return (
+        event.get("direction") == "outflow"
+        and event.get("confirmation_status") == "confirmed"
+        and event.get("lifecycle_status") in APPLIED_LIFECYCLE_STATUSES
+        and bool(event.get("account_id"))
+        and isinstance(event_date, str)
+        and len(event_date) == 10
+    )
+
+
+def _spending_filter(user_id: str, event_date: Any) -> dict:
+    # Narrow in Mongo so totals never depend on a row cap; the Python
+    # predicate above stays the authority.
+    return {
+        "user_id": user_id,
+        "direction": "outflow",
+        "confirmation_status": "confirmed",
+        "lifecycle_status": {"$in": list(APPLIED_LIFECYCLE_STATUSES)},
+        "account_id": {"$nin": [None, ""]},
+        "event_date": event_date,
+    }
+
+
 async def monthly_actual_spending(
     db, user_id: str, month: str, currency: str,
 ) -> Decimal:
-    """Compute month-to-date outflows from CANONICAL applied events —
-    the single source of truth. Sums the amount of every event that:
+    """Month-to-date spending in ``currency``, bucketed by ``event_date``
+    (the user's calendar), never the UTC month of ``occurred_at``."""
+    query = _spending_filter(user_id, {"$regex": "^" + re.escape(month) + "-"})
+    query["currency"] = currency
+    events = await db.financial_events.find(
+        query, {"_id": 0, "amount": 1, "direction": 1, "confirmation_status": 1,
+                "lifecycle_status": 1, "account_id": 1, "event_date": 1},
+    ).to_list(length=None)
+    return sum((_to_decimal(e.get("amount")) for e in events if counts_as_spending(e)), Decimal(0))
 
-    * belongs to ``user_id`` and matches ``currency``
-    * has ``direction == 'outflow'``
-    * is applied (confirmation_status='confirmed' + lifecycle_status in
-      APPLIED + account_id present + parseable ``occurred_at``).
 
-    Correction 2: monthly bucketing uses the user-facing/reporting
-    ``event_date`` (YYYY-MM-DD in the user's calendar), NOT the UTC
-    month of ``occurred_at``. Using the UTC month would move
-    transactions across months for users east/west of UTC.
+async def daily_spending(db, user_id: str, day: str) -> dict:
+    """Spending events for one calendar day, plus what is waiting.
+
+    Returns ``{"counted": [...events], "needs_account": n, "needs_review": n}``
+    where the last two count that day's outflows that will count once an
+    account is picked or a possible duplicate is resolved.
     """
-    applied_events, _ = await _load_applied_and_all_events(db, user_id)
-    total = Decimal(0)
-    for ev in applied_events:
-        if ev.get("currency") != currency:
-            continue
-        if ev.get("direction") != "outflow":
-            continue
-        if parse_utc(ev.get("occurred_at")) is None:
-            # Not trustworthy enough to affect balance — also excluded
-            # from the reporting sum.
-            continue
-        # Bucket by the reporting calendar date, not the UTC month of
-        # occurred_at.
-        event_date = ev.get("event_date") or ""
-        if not (isinstance(event_date, str) and event_date.startswith(month)):
-            continue
-        total += _to_decimal(ev.get("amount"))
-    return total
+    events = await db.financial_events.find(
+        {"user_id": user_id, "direction": "outflow", "event_date": day}, {"_id": 0},
+    ).to_list(length=None)
+    counted = [e for e in events if counts_as_spending(e)]
+    needs_account = sum(
+        1 for e in events if e.get("lifecycle_status") == "pending_account_assignment"
+    )
+    needs_review = sum(
+        1 for e in events
+        if e.get("lifecycle_status") == "pending_deduplication"
+        or (e.get("confirmation_status") == "pending"
+            and e.get("lifecycle_status") != "pending_account_assignment")
+    )
+    return {"counted": counted, "needs_account": needs_account, "needs_review": needs_review}
 
 
 __all__ = [
+    "counts_as_spending",
+    "daily_spending",
     "APPLIED_LIFECYCLE_STATUSES",
     "UNAPPLIED_LIFECYCLE_STATUSES",
     "ALL_LIFECYCLE_STATUSES",
