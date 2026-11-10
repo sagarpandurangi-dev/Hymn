@@ -1,3 +1,6 @@
+import { Platform } from "react-native";
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
 import { getToken } from "./tokenStorage";
 
 const BASE_URL = "https://hymn-production-4828.up.railway.app";
@@ -93,7 +96,9 @@ async function request<T>(
   options: { method?: string; body?: any; auth?: boolean } = {},
 ): Promise<T> {
   const { method = "GET", body, auth = false } = options;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // Multipart bodies (FormData) set their own Content-Type boundary.
+  const isForm = typeof FormData !== "undefined" && body instanceof FormData;
+  const headers: Record<string, string> = isForm ? {} : { "Content-Type": "application/json" };
   if (auth) {
     const token = await getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -101,7 +106,7 @@ async function request<T>(
   const res = await fetch(`${BASE_URL}/api${path}`, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    body: isForm ? body : body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
   let data: any = null;
@@ -796,6 +801,85 @@ export const api = {
   listNudges: (limit = 20) => request<Nudge[]>(`/nudges?limit=${limit}`, { auth: true }),
   markNudgeOpened: (id: string) =>
     request<any>(`/nudges/${id}/opened`, { method: "POST", auth: true }),
+
+  // -- Statements --
+  uploadStatement: (form: FormData) =>
+    request<Statement>("/statements", { method: "POST", body: form, auth: true }),
+  listStatements: () => request<Statement[]>("/statements", { auth: true }),
+  getStatement: (id: string) => request<StatementDetail>(`/statements/${id}`, { auth: true }),
+  deleteStatement: (id: string) =>
+    request<any>(`/statements/${id}`, { method: "DELETE", auth: true }),
+  deleteAllStatements: () => request<any>("/statements", { method: "DELETE", auth: true }),
+  downloadStatementFile: (id: string, filename: string) => downloadStatementFile(id, filename),
+
+  // -- Money book (ledger conversion) --
+  getLedgerConversionPreview: () =>
+    request<LedgerConversionPreview>("/ledger/conversion/preview", { auth: true }),
+  applyLedgerConversion: (fingerprint: string) =>
+    request<any>("/ledger/conversion/apply", { method: "POST", body: { fingerprint }, auth: true }),
+};
+
+/** GET /statements/{id}/file with auth, then open (web) or share (native) the PDF. */
+async function downloadStatementFile(id: string, filename: string): Promise<void> {
+  const token = await getToken();
+  const url = `${BASE_URL}/api/statements/${id}/file`;
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const safeName = (filename || `statement-${id}.pdf`).replace(/[^\w.\- ]+/g, "_");
+  if (Platform.OS === "web") {
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      const text = await res.text();
+      let detail: any = text;
+      try { detail = JSON.parse(text)?.detail ?? text; } catch { /* plain-text error */ }
+      throw { status: res.status, message: _stringifyDetail(detail) || "Download failed" } as ApiError;
+    }
+    const blobUrl = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = safeName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    return;
+  }
+  const target = `${FileSystem.cacheDirectory}${safeName.endsWith(".pdf") ? safeName : `${safeName}.pdf`}`;
+  const result = await FileSystem.downloadAsync(url, target, { headers });
+  if (result.status < 200 || result.status >= 300) {
+    let detail: any = "Download failed";
+    try { detail = JSON.parse(await FileSystem.readAsStringAsync(result.uri))?.detail ?? detail; } catch { /* not JSON */ }
+    throw { status: result.status, message: _stringifyDetail(detail) } as ApiError;
+  }
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(result.uri, { mimeType: "application/pdf", UTI: "com.adobe.pdf" });
+  }
+}
+
+export type StatementStatus = "reading" | "ready" | "needs_review" | "failed" | string;
+export type Statement = {
+  id: string;
+  filename: string;
+  status: StatementStatus;
+  metadata?: { institution?: string | null; period_start?: string | null; period_end?: string | null } | null;
+};
+export type StatementProblem = { line?: number | null; line_number?: number | null; message?: string; problem?: string; reason?: string; detail?: string };
+export type StatementLine = {
+  line?: number;
+  line_number?: number;
+  date?: string;
+  description?: string;
+  debit?: string | number | null;
+  credit?: string | number | null;
+  balance?: string | number | null;
+};
+export type StatementDetail = Statement & {
+  verification?: { problems?: StatementProblem[] } | null;
+  lines?: StatementLine[];
+};
+export type LedgerConversionPreview = {
+  summary?: string[];
+  accounts?: { id?: string; name: string; currency: string; opening_balance: string | number; ledger_balance_today: string | number }[];
+  already_converted?: boolean;
+  verification?: { balances_match?: boolean; spending_matches?: boolean } | null;
+  fingerprint?: string;
 };
 
 export type NudgeSettings = {

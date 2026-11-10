@@ -418,6 +418,28 @@ export default function FinanceScreen() {
           </View>
         ) : null}
 
+        {/* Documents — statements and money book */}
+        <View style={styles.blockGap}>
+          <FoldSectionHeader label="Documents" />
+          <FoldCard>
+            <FoldRow
+              first
+              label="Statements"
+              meta="Upload bank statements and check they add up."
+              onPress={() => router.push(`/finance/statements`)}
+              chevron
+              testID="finance-statements"
+            />
+            <FoldRow
+              label="Money book"
+              meta="Review and approve setting up your money book."
+              onPress={() => router.push(`/finance/money-book`)}
+              chevron
+              testID="finance-money-book"
+            />
+          </FoldCard>
+        </View>
+
         {/* ============================================================
            6. Recent actual events
         ============================================================ */}
