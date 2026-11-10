@@ -43,7 +43,7 @@ export default function ForgotPasswordScreen() {
   const submitReset = async () => {
     setError(null);
     if (!answer || !newPassword) { setError("All fields are required."); return; }
-    if (newPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (newPassword.length < 10) { setError("Password must be at least 10 characters."); return; }
     setBusy(true);
     try {
       await api.forgotPassword({
