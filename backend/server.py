@@ -27,6 +27,7 @@ DB_NAME = os.environ["DB_NAME"]
 # other mode). See backend/runtime.py.
 from runtime import get_jwt_secret  # noqa: E402
 import auth_throttle  # noqa: E402
+from plans import user_plan  # noqa: E402
 JWT_SECRET = get_jwt_secret()
 JWT_ALG = "HS256"
 # Long-lived token. Each token carries the user's ``token_version``;
@@ -83,6 +84,7 @@ class UserResponse(BaseModel):
     portfolio_setup_completed_at: Optional[str] = None
     portfolio_reporting_currency: Optional[str] = None
     post_creation_decomposition_preference: str = "always_ask"
+    plan: str = "free"
 
 
 class PostCreationDecompositionPreferenceUpdate(BaseModel):
@@ -674,6 +676,7 @@ def user_to_response(u: dict) -> UserResponse:
         post_creation_decomposition_preference=u.get(
             "post_creation_decomposition_preference", "always_ask",
         ),
+        plan=user_plan(u),
     )
 
 
@@ -2836,6 +2839,7 @@ from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
 import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
 import ledger_conversion  # noqa: F401,E402  (registers conversion routes on ledger_router)
+from statements import statements_router, ensure_statement_indexes  # noqa: E402
 import goal_merge  # noqa: F401,E402  (registers merge endpoints on planning_router)
 
 api_router.include_router(portfolio_router)
@@ -2846,6 +2850,7 @@ api_router.include_router(planning_space_router)
 api_router.include_router(inbox_router)
 api_router.include_router(nudges.nudges_router)
 api_router.include_router(ledger_router)
+api_router.include_router(statements_router)
 app.include_router(api_router)
 
 # Auth is a bearer header, never a cookie, so credentialed CORS is not
@@ -2881,6 +2886,7 @@ async def startup_indexes():
     await ensure_inbox_indexes(db)
     await nudges.ensure_nudge_indexes(db)
     await ensure_ledger_indexes(db)
+    await ensure_statement_indexes(db)
     try:
         touched = await backfill_fc_into_allocations(db)
         if touched:

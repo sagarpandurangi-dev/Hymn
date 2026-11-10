@@ -40,3 +40,9 @@ HYMN_ASSISTANT_MODEL=
 HYMN_PLANNING_MODEL=
 # Set to "off" to stop the nudge scheduler in this process.
 HYMN_NUDGES=
+
+# ---- Plans (no billing yet) ------------------------------------------------
+# Comma-separated emails that get Premium (statement upload).
+HYMN_PREMIUM_EMAILS=
+# Plan for everyone else: free (default) or premium.
+HYMN_DEFAULT_PLAN=
