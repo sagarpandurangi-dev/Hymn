@@ -145,6 +145,14 @@ export default function MeScreen() {
             <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
           </Pressable>
 
+          <Pressable style={styles.row} onPress={() => router.push("/nudges" as any)} testID="me-open-nudges">
+            <View style={styles.rowLeft}>
+              <Ionicons name="notifications-outline" size={20} color={colors.onSurface} />
+              <Text style={styles.rowText}>Nudges</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+          </Pressable>
+
           <Pressable style={styles.row} onPress={() => router.push("/settings/decomposition" as any)} testID="me-open-decomposition">
             <View style={styles.rowLeft}>
               <Ionicons name="git-network-outline" size={20} color={colors.onSurface} />

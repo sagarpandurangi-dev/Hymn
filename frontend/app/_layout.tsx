@@ -6,6 +6,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider, useAuth } from "@/src/lib/AuthContext";
+import { useNotificationTapNavigation } from "@/src/lib/push";
 import AppBottomNavigation, {
   type MainTabName,
 } from "@/src/components/AppBottomNavigation";
@@ -78,6 +79,10 @@ function AuthenticatedAppShell() {
   //     its own copy of the same bar, and we must never render two bars.
   //   - `Boolean(seg0)` guards against the initial empty-segments render
   //     where `seg0` is undefined.
+  useNotificationTapNavigation(
+    !loading && Boolean(user?.portfolio_setup_completed_at),
+  );
+
   const showRootBottomNavigation =
     !loading &&
     Boolean(user) &&

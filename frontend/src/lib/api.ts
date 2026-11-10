@@ -781,6 +781,61 @@ export const api = {
       project_id?: string;
     },
   ) => request<any>(`/inbox/items/${itemId}/migrate`, { method: "POST", body: payload, auth: true }),
+  getInboxPatterns: () => request<InboxPatternsResponse>("/inbox/patterns", { auth: true }),
+  refreshInboxPatterns: () =>
+    request<InboxPatternsResponse>("/inbox/patterns", { method: "POST", auth: true }),
+
+  // -- Nudges --
+  registerNudgeDevice: (payload: { token: string; platform: "android" | "ios" }) =>
+    request<any>("/nudges/devices", { method: "POST", body: payload, auth: true }),
+  unregisterNudgeDevice: (token: string) =>
+    request<any>(`/nudges/devices?token=${encodeURIComponent(token)}`, { method: "DELETE", auth: true }),
+  getNudgeSettings: () => request<NudgeSettings>("/nudges/settings", { auth: true }),
+  updateNudgeSettings: (payload: NudgeSettingsUpdate) =>
+    request<NudgeSettings>("/nudges/settings", { method: "PUT", body: payload, auth: true }),
+  listNudges: (limit = 20) => request<Nudge[]>(`/nudges?limit=${limit}`, { auth: true }),
+  markNudgeOpened: (id: string) =>
+    request<any>(`/nudges/${id}/opened`, { method: "POST", auth: true }),
+};
+
+export type NudgeSettings = {
+  daily_review?: { enabled?: boolean | null; time?: string | null; adaptive?: boolean | null };
+  daily_review_plan?: { explanation?: string | null } | null;
+  weekly_patterns?: { enabled?: boolean | null; weekday?: number | null; time?: string | null };
+  reminders?: { enabled?: boolean | null };
+  quiet_hours?: { start?: string | null; end?: string | null };
+  timezone?: string | null;
+};
+export type NudgeSettingsUpdate = {
+  daily_review?: Partial<NonNullable<NudgeSettings["daily_review"]>>;
+  weekly_patterns?: Partial<NonNullable<NudgeSettings["weekly_patterns"]>>;
+  reminders?: Partial<NonNullable<NudgeSettings["reminders"]>>;
+  quiet_hours?: Partial<NonNullable<NudgeSettings["quiet_hours"]>>;
+  timezone: string;
+};
+export type Nudge = {
+  id: string;
+  title: string;
+  body: string;
+  created_at?: string;
+  sent_at?: string;
+  data?: { screen?: string } | null;
+};
+export type InboxPatternsResponse = {
+  stats?: {
+    captured?: number;
+    completed?: number;
+    discarded?: number;
+    migrated?: number;
+    avoided?: { id?: string; text: string; review_count: number }[];
+  } | null;
+  insight?: {
+    summary?: string;
+    themes?: any[];
+    avoidance?: any[];
+    suggestions?: any[];
+  } | null;
+  created_at?: string;
 };
 
 export type InboxCategory = "task" | "reminder" | "idea" | "plan" | "unsorted";

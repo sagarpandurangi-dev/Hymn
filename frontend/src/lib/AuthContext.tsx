@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { api } from "./api";
 import { clearToken, getToken, saveToken } from "./tokenStorage";
+import { registerForPushNotifications, unregisterPushDevice } from "./push";
 
 const AUTH_STARTUP_TIMEOUT_MS = 10_000;
 const AUTH_STARTUP_TIMEOUT_CODE = "AUTH_STARTUP_TIMEOUT";
@@ -102,6 +103,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     void hydrateAuth();
   }, [hydrateAuth]);
 
+  // Register for nudges on app start (restored session) and after login.
+  useEffect(() => {
+    if (user?.id) void registerForPushNotifications();
+  }, [user?.id]);
+
   const signIn = useCallback(async (email: string, password: string) => {
     const res = await api.login({ email, password });
     await saveToken(res.access_token);
@@ -124,6 +130,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const signOut = useCallback(async () => {
+    await unregisterPushDevice();
     try {
       await api.logout();
     } catch {
