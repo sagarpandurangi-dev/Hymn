@@ -1,6 +1,6 @@
 import { getToken } from "./tokenStorage";
 
-const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
+const BASE_URL = "https://hymn-production-4828.up.railway.app";
 
 export type ApiError = { status: number; message: string };
 
