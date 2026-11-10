@@ -102,6 +102,7 @@ _client: anthropic.AsyncAnthropic | None = None
 def _get_client() -> anthropic.AsyncAnthropic:
     global _client
     if not os.environ.get("ANTHROPIC_API_KEY"):
+        logger.warning("assistant unavailable: ANTHROPIC_API_KEY is not configured")
         raise AssistantUnavailable("ANTHROPIC_API_KEY is not configured")
     if _client is None:
         # A phone is waiting on the response; the raw dump is already saved,
