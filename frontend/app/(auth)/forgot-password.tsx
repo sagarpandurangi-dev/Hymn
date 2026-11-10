@@ -113,7 +113,7 @@ export default function ForgotPasswordScreen() {
                 style={styles.input}
                 value={newPassword}
                 onChangeText={setNewPassword}
-                placeholder="At least 6 characters"
+                placeholder="At least 10 characters"
                 placeholderTextColor={colors.onSurfaceTertiary}
                 secureTextEntry
                 testID="forgot-new-password-input"

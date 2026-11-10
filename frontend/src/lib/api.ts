@@ -762,4 +762,36 @@ export const api = {
     tradeoffs?: { kind: "goal" | "project" | "task"; id: string; action: "postpone" | "cancel"; new_due_date?: string }[];
   }) =>
     request<any>("/planning/merge/apply", { method: "POST", body: payload, auth: true }),
+
+  // -- Inbox: brain dump, daily review, nuggets --
+  createInboxDump: (payload: { text: string; client_dump_id: string; timezone: string }) =>
+    request<InboxDumpResponse>("/inbox/dumps", { method: "POST", body: payload, auth: true }),
+  sortInboxDump: (dumpId: string) =>
+    request<InboxDumpResponse>(`/inbox/dumps/${dumpId}/sort`, { method: "POST", auth: true }),
+  getInboxReview: () => request<InboxReviewResponse>("/inbox/review", { auth: true }),
+  submitInboxReview: (decisions: { item_id: string; decision: InboxDecision }[]) =>
+    request<InboxReviewResponse>("/inbox/review", { method: "POST", body: { decisions }, auth: true }),
+  migrateInboxItem: (
+    itemId: string,
+    payload: {
+      destination: "task" | "calendar" | "wishlist";
+      next_step: string;
+      due_date?: string;
+      time?: string;
+      project_id?: string;
+    },
+  ) => request<any>(`/inbox/items/${itemId}/migrate`, { method: "POST", body: payload, auth: true }),
+};
+
+export type InboxCategory = "task" | "reminder" | "idea" | "plan" | "unsorted";
+export type InboxItem = { id: string; text: string; category: InboxCategory | string };
+export type InboxDump = { id: string; status: string };
+export type InboxDumpResponse = { dump: InboxDump; items: InboxItem[]; ack: string };
+export type InboxDecision = "done" | "discard" | "nugget" | "keep";
+export type InboxReviewResponse = {
+  prompt?: string;
+  items?: InboxItem[];
+  open_total?: number;
+  nuggets?: InboxItem[];
+  migrate_prompt?: string;
 };

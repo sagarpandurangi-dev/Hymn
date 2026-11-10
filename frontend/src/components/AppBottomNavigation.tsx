@@ -146,6 +146,13 @@ function ChooserModal({ visible, onClose }: { visible: boolean; onClose: () => v
               <Text style={styles.chooserRowText}>Standalone note about your day</Text>
             </View>
           </Pressable>
+          <Pressable style={styles.chooserRow} onPress={() => go("/inbox/dump")} testID="chooser-brain-dump">
+            <Ionicons name="cloud-outline" size={22} color={colors.brandPrimary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.chooserRowTitle}>Brain dump</Text>
+              <Text style={styles.chooserRowText}>Empty your head; Hymn sorts it</Text>
+            </View>
+          </Pressable>
 
           <Pressable style={styles.chooserCancel} onPress={onClose} testID="chooser-cancel">
             <Text style={styles.chooserCancelText}>Cancel</Text>

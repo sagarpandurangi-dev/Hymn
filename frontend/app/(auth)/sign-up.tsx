@@ -84,7 +84,7 @@ export default function SignUpScreen() {
             style={styles.input}
             value={password}
             onChangeText={setPassword}
-            placeholder="At least 6 characters"
+            placeholder="At least 10 characters"
             placeholderTextColor={colors.onSurfaceTertiary}
             secureTextEntry
             testID="sign-up-password-input"
