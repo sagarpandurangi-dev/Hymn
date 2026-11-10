@@ -22,19 +22,19 @@ Never touches items whose ``commitment_type == 'exclusive'``.
 from __future__ import annotations
 
 import json
-import os
 import re
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 
+import claude_client
 from deps import get_current_user, get_db
 
 # Reuse helpers + router from the conversational engine.
 from planning_engine import (
+    PLANNING_MODEL,
     _iso_date,
     _now,
     _uuid,
@@ -300,14 +300,7 @@ to action='keep' with parent_outcome_id=null."""
 
 
 async def _llm_merge_plan(bundles: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Ask the LLM for a plan. Returns parsed plan dict or None on any error."""
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
-    if not api_key:
-        return None
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage  # noqa
-    except Exception:
-        return None
+    """Ask Claude for a plan. Returns parsed plan dict or None on any error."""
     payload_bits: List[str] = []
     for b in bundles:
         g = b["goal"]
@@ -327,20 +320,22 @@ async def _llm_merge_plan(bundles: List[Dict[str, Any]]) -> Optional[Dict[str, A
             )
     user_text = "Goals & outcomes to merge:\n" + "\n".join(payload_bits)
     try:
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"merge-{uuid.uuid4().hex[:8]}",
-            system_message=_MERGE_SYSTEM_PROMPT,
-        ).with_model("anthropic", "claude-sonnet-4-6")
-        response = await chat.send_message(UserMessage(text=user_text))
-        raw = (response or "").strip()
-        # Strip any accidental code fences.
-        raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict) and "outcome_rules" in parsed:
-            return parsed
-    except Exception:
+        raw = await claude_client.complete_text(
+            model=PLANNING_MODEL,
+            system=_MERGE_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_text}],
+            effort="low",
+        )
+    except claude_client.AssistantUnavailable:
         return None
+    # Strip any accidental code fences.
+    raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict) and "outcome_rules" in parsed:
+        return parsed
     return None
 
 

@@ -187,6 +187,7 @@ async def _deliver(db, nudge: dict) -> None:
         {"user_id": nudge["user_id"]}, {"_id": 0, "token": 1},
     ).to_list(length=20)
     if not tokens:
+        logger.info("nudge %s: no registered device; kept in the in-app feed", nudge["id"])
         await db.nudges.update_one({"id": nudge["id"]}, {"$set": {"status": "no_device"}})
         return
     messages = [
@@ -208,9 +209,11 @@ async def _deliver(db, nudge: dict) -> None:
             delivered += 1
         elif (ticket.get("details") or {}).get("error") == "DeviceNotRegistered":
             await db.push_tokens.delete_one({"token": token["token"]})
+    status = "sent" if delivered else "failed"
+    logger.info("nudge %s: %s to %d of %d devices", nudge["id"], status, delivered, len(tokens))
     await db.nudges.update_one(
         {"id": nudge["id"]},
-        {"$set": {"status": "sent" if delivered else "failed", "sent_at": _now().isoformat()}},
+        {"$set": {"status": status, "sent_at": _now().isoformat()}},
     )
 
 
@@ -237,6 +240,7 @@ async def _claim(db, user_id: str, kind: str, key: str, title: str, body: str,
     except DuplicateKeyError:
         return None
     nudge.pop("_id", None)
+    logger.info("nudge created: %s for user %s (%s)", kind, user_id, key)
     return nudge
 
 

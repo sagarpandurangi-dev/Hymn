@@ -29,11 +29,14 @@ JWT_SECRET=REPLACE_WITH_LONG_RANDOM_SECRET
 # deployed web build. Defaults to "*" (auth is a bearer header, not a cookie).
 CORS_ORIGINS=
 
-# ---- LLM / integrations (optional) --------------------------------------
-# Fill in only if the corresponding integration is enabled locally.
-EMERGENT_LLM_KEY=
-# Brain-dump inbox (Claude API). Without it, dumps are still saved and
-# show up as "unsorted" until sorting is retried.
+# ---- Claude (optional) ---------------------------------------------------
+# Powers brain-dump sorting, weekly patterns, the planning chat and goal
+# merge. Without it, dumps are still saved and show up as "unsorted".
 ANTHROPIC_API_KEY=
-# Optional override; defaults to claude-haiku-5-5 (e.g. claude-opus-5-5).
+# Optional model overrides.
+# Brain dump + weekly patterns; defaults to claude-haiku-5-5.
 HYMN_ASSISTANT_MODEL=
+# Planning chat + goal merge; defaults to claude-opus-5-5.
+HYMN_PLANNING_MODEL=
+# Set to "off" to stop the nudge scheduler in this process.
+HYMN_NUDGES=

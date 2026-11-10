@@ -9,9 +9,9 @@ Design highlights
 -----------------
 * One ``plan_conversations`` doc per (user, target_type, target_id). Messages
   and any proposed changes are appended atomically.
-* The LLM (Anthropic Claude Sonnet 4.5 via emergentintegrations) is invoked
-  with the Anthropic ``web_search`` provider-hosted tool enabled so the model
-  can ground its recommendations. The tool executes on the API side; we
+* Claude (``PLANNING_MODEL``, via the Anthropic SDK) is invoked with the
+  provider-hosted ``web_search`` tool enabled so the model can ground its
+  recommendations. The tool executes on the API side; we
   never surface tool calls or raw JSON to the UI.
 * The assistant reply is split into a *prose* section (what the UI shows)
   and a *structured proposal* section (parsed on the server, hidden from the
@@ -44,6 +44,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+import claude_client
 from deps import get_current_user, get_db
 
 load_dotenv()
@@ -619,61 +620,53 @@ def _context_prelude(ctx: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def _call_llm(history: List[Dict[str, str]], user_text: str, ctx: Dict[str, Any]) -> str:
-    """Non-streaming LLM turn with Anthropic web_search enabled.
+# The planning chat reasons over goals, plans and the user's capacity, so it
+# defaults to the most capable model; HYMN_PLANNING_MODEL overrides it.
+PLANNING_MODEL = os.environ.get("HYMN_PLANNING_MODEL") or "claude-opus-5-5"
+_WEB_SEARCH_TOOL = {"type": "web_search_20260209", "name": "web_search", "max_uses": 3}
 
-    Returns the assistant's raw text (still containing any HYMN_PROPOSAL
-    block). Raises HTTPException on any provider error so the caller can
-    surface a friendly message to the user."""
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
-    if not api_key:
-        raise HTTPException(status_code=500,
-                            detail="Planning is unavailable — LLM key not configured.")
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage  # noqa: WPS433
-    except Exception as exc:  # pragma: no cover
-        raise HTTPException(status_code=500,
-                            detail=f"Planning is unavailable — {type(exc).__name__}")
 
-    # Rebuild history as simplified messages [{role, content}]. We drop any
-    # HYMN_PROPOSAL blocks from prior assistant messages before feeding the
-    # LLM — the model doesn't need to see its own machine block.
-    initial = [{"role": "system", "content": _SYSTEM_PROMPT + "\n\n" + _context_prelude(ctx)}]
+def _llm_messages(history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Prior turns as alternating user/assistant messages, ending with the
+    user's latest message. HYMN_PROPOSAL blocks are dropped from assistant
+    turns: the model doesn't need to see its own machine block."""
+    out: List[Dict[str, str]] = []
     for msg in history:
         role = msg.get("role")
         content = msg.get("content") or ""
         if role == "assistant":
             content, _ = _split_message(content)
-        if role in ("user", "assistant") and content.strip():
-            initial.append({"role": role, "content": content})
+        if role not in ("user", "assistant") or not content.strip():
+            continue
+        if out and out[-1]["role"] == role:
+            out[-1]["content"] += "\n\n" + content
+        else:
+            out.append({"role": role, "content": content})
+    while out and out[0]["role"] != "user":
+        out.pop(0)
+    return out
 
-    chat = LlmChat(
-        api_key=api_key,
-        session_id=f"planning-{ctx['target_type']}-{ctx['target']['id']}",
-        system_message=initial[0]["content"],
-        initial_messages=initial,
-    ).with_model("anthropic", "claude-sonnet-4-6")
 
-    # Attach Anthropic web_search tool. Provider-hosted tool → results are
-    # applied on the API side; we get the final assistant text back on
-    # response.content.
+async def _call_llm(history: List[Dict[str, str]], ctx: Dict[str, Any]) -> str:
+    """One planning turn with web search enabled.
+
+    ``history`` already ends with the user's new message. Returns the
+    assistant's raw text (still containing any HYMN_PROPOSAL block). Raises
+    HTTPException on any provider error so the caller can surface a friendly
+    message to the user."""
+    messages = _llm_messages(history)
+    if not messages or messages[-1]["role"] != "user":
+        raise HTTPException(status_code=400, detail="Nothing to send to the planning assistant.")
     try:
-        chat.with_tools([
-            {"type": "web_search_20250305", "name": "web_search", "max_uses": 3},
-        ])
-    except Exception:
-        # If tools API is unavailable, continue without web search.
-        pass
-
-    try:
-        response = await chat.send_message_with_tools(UserMessage(text=user_text))
-    except Exception as exc:
-        logger.exception("Planning LLM call failed")
+        return await claude_client.complete_text(
+            model=PLANNING_MODEL,
+            system=_SYSTEM_PROMPT + "\n\n" + _context_prelude(ctx),
+            messages=messages,
+            tools=[_WEB_SEARCH_TOOL],
+        )
+    except claude_client.AssistantUnavailable as exc:
         raise HTTPException(status_code=502,
-                            detail=f"Planning assistant temporarily unavailable ({type(exc).__name__}).")
-
-    text = response.content or ""
-    return text.strip()
+                            detail=f"Planning assistant temporarily unavailable ({exc}).")
 
 
 # ---------------------------------------------------------------------------
@@ -2139,7 +2132,7 @@ async def post_message(
     }
     # LLM call uses in-memory copy of history including this user_msg.
     conv_messages_for_llm = list(conv.get("messages") or []) + [user_msg]
-    raw = await _call_llm(conv_messages_for_llm, body.content.strip(), ctx)
+    raw = await _call_llm(conv_messages_for_llm, ctx)
     prose, proposal = _split_message(raw)
     if not prose and proposal:
         prose = proposal.get("summary") or "Here are some proposed changes for your plan."
