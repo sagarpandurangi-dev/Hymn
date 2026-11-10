@@ -47,8 +47,25 @@ def test_success_returns_parsed_output_and_sends_expected_request(monkeypatch):
     assert _sort() == parsed
     assert messages.kwargs["model"] == inbox_ai.MODEL
     assert messages.kwargs["output_format"] is inbox_ai.SortedDump
-    assert messages.kwargs["fallbacks"] == "default"
     assert "renew passport" in messages.kwargs["messages"][0]["content"]
+
+
+@pytest.mark.parametrize("model, expects_fallback", [
+    ("claude-haiku-5-5", False),
+    ("claude-opus-5-5", True),
+])
+def test_fallbacks_only_sent_to_models_that_support_them(monkeypatch, model, expects_fallback):
+    parsed = inbox_ai.SortedDump(
+        items=[inbox_ai.SortedItem(text="renew passport", category="task", remind_at_local="")],
+        encouragement="Got it.",
+    )
+    messages = _FakeMessages(SimpleNamespace(stop_reason="end_turn", parsed_output=parsed))
+    _install(monkeypatch, messages)
+    monkeypatch.setattr(inbox_ai, "MODEL", model)
+    _sort()
+    assert messages.kwargs["model"] == model
+    assert ("fallbacks" in messages.kwargs) is expects_fallback
+    assert ("betas" in messages.kwargs) is expects_fallback
 
 
 @pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
