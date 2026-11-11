@@ -195,6 +195,10 @@ def verify(statement: Dict[str, Any]) -> Dict[str, Any]:
                              "printed": format(closing, "f")})
     else:
         totals = "not_available"
+    # The app reads `message` and `line_number`; keep both spellings.
+    for p in problems:
+        p["message"] = p["issue"]
+        p["line_number"] = p["line"]
     return {
         "totals_check": totals,
         "running_balance_lines_checked": running_checked,

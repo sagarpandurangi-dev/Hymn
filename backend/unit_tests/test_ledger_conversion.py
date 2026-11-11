@@ -131,7 +131,7 @@ def test_apply_writes_what_the_preview_showed_once(client, user, history):
     r = client.post("/api/ledger/conversion/apply", headers=user["headers"],
                     json={"fingerprint": report["fingerprint"]})
     assert r.status_code == 200, r.text
-    assert r.json()["created"] == 5
+    assert r.json()["created"] == r.json()["entries_created"] == 5
 
     balances = client.get("/api/ledger/balances?as_of=2026-12-31", headers=user["headers"]).json()
     assert balances[0]["balance"] == "149000.00"
