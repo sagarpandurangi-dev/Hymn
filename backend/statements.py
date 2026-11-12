@@ -47,6 +47,9 @@ MAX_BYTES = 10 * 1024 * 1024
 PAGES_PER_CHUNK = 4
 # Accounts where a credit raises what you hold (vs. lowers what you owe).
 HOLDING_KINDS = frozenset({"bank", "wallet", "investment", "other"})
+# Banks round interest and charges; a gap this small is the statement's own
+# rounding, not a missed transaction.
+ROUNDING_TOLERANCE = Decimal("1.00")
 
 
 def _now() -> str:
@@ -187,20 +190,32 @@ def verify(statement: Dict[str, Any]) -> Dict[str, Any]:
             prev_balance + change(debit, credit) if prev_balance is not None else None)
 
     opening, closing = _amount(meta["opening_balance"]), _amount(meta["closing_balance"])
+    notes: List[str] = []
     if opening is not None and closing is not None:
-        totals = "ok" if opening + change(total_debit, total_credit) == closing else "mismatch"
-        if totals == "mismatch":
+        expected = opening + change(total_debit, total_credit)
+        gap = abs(closing - expected)
+        if gap == 0:
+            totals = "ok"
+        elif gap <= ROUNDING_TOLERANCE:
+            totals = "rounding"
+            notes.append(f"The statement's own closing balance differs from its transactions by "
+                         f"{money(gap, meta['currency'])}, a rounding difference in the statement.")
+        else:
+            totals = "mismatch"
             problems.append({"line": None, "issue": "opening + movements ≠ closing",
-                             "expected": format(opening + change(total_debit, total_credit), "f"),
-                             "printed": format(closing, "f")})
+                             "expected": format(expected, "f"), "printed": format(closing, "f"),
+                             "difference": format(gap, "f")})
     else:
         totals = "not_available"
+    line_problems = [p for p in problems if p["line"] is not None]
     # The app reads `message` and `line_number`; keep both spellings.
     for p in problems:
         p["message"] = p["issue"]
         p["line_number"] = p["line"]
     # Nothing to cross-check means a person must look before it's used.
-    trusted = not problems and (totals == "ok" or running_checked == len(lines) > 0)
+    trusted = not problems and (totals in ("ok", "rounding") or running_checked == len(lines) > 0)
+    if trusted and running_checked:
+        notes.insert(0, f"All {running_checked} line balances add up.")
     return {
         "totals_check": totals,
         "running_balance_lines_checked": running_checked,
@@ -209,24 +224,55 @@ def verify(statement: Dict[str, Any]) -> Dict[str, Any]:
         "total_credit": format(total_credit, "f"),
         "problems": problems,
         "trusted": trusted,
-        "reasons": [] if trusted else review_reasons(problems, totals, running_checked, len(lines)),
+        "reasons": [] if trusted else review_reasons(
+            problems, totals, running_checked, len(lines), meta["currency"],
+            every_line_adds_up=bool(lines) and running_checked == len(lines) and not line_problems,
+        ),
+        "notes": notes,
     }
 
 
-def review_reasons(problems: List[Dict[str, Any]], totals: str,
-                   running_checked: int, line_count: int) -> List[str]:
-    """Why a statement needs review, in plain language for the app."""
+def money(amount: Decimal, currency: str) -> str:
+    """₹1,23,456.78 for INR (Indian grouping), else e.g. "USD 123,456.78"."""
+    amount = amount.quantize(Decimal("0.01"))
+    sign, whole, frac = ("-" if amount < 0 else ""), *format(abs(amount), "f").split(".")
+    if currency == "INR":
+        head, tail = whole[:-3], whole[-3:]
+        groups = []
+        while len(head) > 2:
+            groups.insert(0, head[-2:])
+            head = head[:-2]
+        whole = ",".join(([head] if head else []) + groups + [tail])
+        return f"{sign}₹{whole}.{frac}"
+    return f"{sign}{currency or ''} {int(whole):,}.{frac}".strip()
+
+
+def review_reasons(problems: List[Dict[str, Any]], totals: str, running_checked: int,
+                   line_count: int, currency: str, *, every_line_adds_up: bool = False) -> List[str]:
+    """Why a statement needs review: what was checked, how big the gap is,
+    and the most likely cause."""
     reasons = []
     for p in problems:
         if p["issue"] == "opening + movements ≠ closing":
-            reasons.append(
-                f"The transactions don't add up to the closing balance: they give {p['expected']}, "
-                f"the statement says {p['printed']}. A transaction may have been missed or misread."
-            )
+            gap = money(Decimal(p["difference"]), currency)
+            if every_line_adds_up:
+                reasons.append(
+                    f"All {running_checked} line balances add up, but the statement's closing balance "
+                    f"differs from them by {gap}. The statement's own summary looks inconsistent; "
+                    f"check its closing balance."
+                )
+            else:
+                reasons.append(
+                    f"{gap} is unaccounted for: the transactions give {money(Decimal(p['expected']), currency)}, "
+                    f"the statement's closing balance is {money(Decimal(p['printed']), currency)}. "
+                    f"Look for a missing or misread transaction of about {gap}."
+                )
         elif p["issue"] == "running balance doesn't add up":
+            expected, printed = Decimal(p["expected"]), Decimal(p["printed"])
             reasons.append(
-                f"Line {p['line']}: the balance should be {p['expected']} but the statement shows "
-                f"{p['printed']}. This line's amount may have been misread."
+                f"Line {p['line']}: the balance should be {money(expected, currency)} but the statement "
+                f"shows {money(printed, currency)} (off by {money(abs(expected - printed), currency)}). "
+                f"This line's amount was probably misread."
             )
         elif p["issue"] == "date is not YYYY-MM-DD":
             reasons.append(f"Line {p['line']}: the date couldn't be read.")
@@ -318,12 +364,27 @@ async def upload_statement(
     return _summary(doc)
 
 
+async def _rechecked(db, doc: dict) -> dict:
+    """Re-run the arithmetic (no AI call) so statements read earlier get
+    today's checks, explanations and status; persist a changed status."""
+    if not doc.get("metadata") or doc.get("status") not in ("ready", "needs_review"):
+        return doc
+    checks = verify({"metadata": doc["metadata"], "lines": doc.get("lines", [])})
+    status = "ready" if checks["trusted"] else "needs_review"
+    if status != doc["status"] or checks != doc.get("verification"):
+        await db.statement_imports.update_one(
+            {"id": doc["id"]}, {"$set": {"verification": checks, "status": status, "updated_at": _now()}},
+        )
+    return {**doc, "verification": checks, "status": status}
+
+
 @statements_router.get("")
 async def list_statements(current_user: dict = Depends(get_current_user)):
-    docs = await get_db().statement_imports.find(
-        {"user_id": current_user["id"]}, {"_id": 0, "lines": 0},
+    db = get_db()
+    docs = await db.statement_imports.find(
+        {"user_id": current_user["id"]}, {"_id": 0},
     ).sort("created_at", -1).to_list(length=500)
-    return [_summary(d) for d in docs]
+    return [_summary(await _rechecked(db, d)) for d in docs]
 
 
 async def _get(db, user_id: str, import_id: str) -> dict:
@@ -335,11 +396,8 @@ async def _get(db, user_id: str, import_id: str) -> dict:
 
 @statements_router.get("/{import_id}")
 async def get_statement(import_id: str, current_user: dict = Depends(get_current_user)):
-    doc = await _get(get_db(), current_user["id"], import_id)
-    if doc.get("metadata"):
-        # Re-check on read so statements read earlier get today's checks
-        # and explanations; it is pure arithmetic, no AI call.
-        doc["verification"] = verify({"metadata": doc["metadata"], "lines": doc.get("lines", [])})
+    db = get_db()
+    doc = await _rechecked(db, await _get(db, current_user["id"], import_id))
     return {**_summary(doc), "pages": doc.get("pages"), "lines": doc.get("lines", [])}
 
 
