@@ -66,6 +66,8 @@ export default function StatementDetailScreen() {
     }
   };
 
+  const rawReasons = (doc?.verification as { reasons?: unknown } | null | undefined)?.reasons;
+  const reasons = Array.isArray(rawReasons) ? rawReasons.filter((r): r is string => typeof r === "string" && r.trim() !== "") : [];
   const problems = doc?.verification?.problems ?? [];
   const flagged = new Set(problems.map(problemLine).filter((n): n is number => n !== null));
   const lines = doc?.lines ?? [];
@@ -75,6 +77,13 @@ export default function StatementDetailScreen() {
       <FinanceHeader title={doc?.filename || "Statement"} subtitle={doc ? [doc.metadata?.institution, periodLabel(doc.metadata)].filter(Boolean).join(" · ") : undefined} />
       {loading ? <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} /> : (
         <ScrollView contentContainerStyle={styles.scroll}>
+          {reasons.length > 0 ? (
+            <FoldCard style={styles.reasons} testID="statement-reasons">
+              {reasons.map((r, i) => (
+                <Text key={i} style={styles.reasonText}>{r}</Text>
+              ))}
+            </FoldCard>
+          ) : null}
           {doc ? (
             <View style={styles.statusRow}><StatementStatusBadge status={doc.status} /></View>
           ) : null}
@@ -146,6 +155,8 @@ const styles = StyleSheet.create({
   statusRow: { flexDirection: "row" },
   error: { fontSize: 13, color: financeColors.negative },
   empty: { fontSize: 13, color: financeColors.inkMuted, padding: financeSpace.xl, textAlign: "center", fontStyle: "italic" },
+  reasons: { padding: financeSpace.lg, gap: financeSpace.xs, backgroundColor: financeColors.pillWarnBg },
+  reasonText: { fontSize: 13.5, lineHeight: 19, color: financeColors.pillWarnInk, fontWeight: "600" },
   problems: { padding: financeSpace.lg, gap: financeSpace.sm, backgroundColor: financeColors.pillWarnBg },
   problemsTitle: { fontSize: 14, fontWeight: "700", color: financeColors.pillWarnInk },
   problemRow: { flexDirection: "row", gap: financeSpace.md },
