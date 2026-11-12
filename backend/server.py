@@ -2840,6 +2840,7 @@ import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
 import ledger_conversion  # noqa: F401,E402  (registers conversion routes on ledger_router)
 from statements import statements_router, ensure_statement_indexes  # noqa: E402
+from statement_matching import ensure_matching_indexes  # noqa: E402  (registers matching routes)
 import goal_merge  # noqa: F401,E402  (registers merge endpoints on planning_router)
 
 api_router.include_router(portfolio_router)
@@ -2887,6 +2888,7 @@ async def startup_indexes():
     await nudges.ensure_nudge_indexes(db)
     await ensure_ledger_indexes(db)
     await ensure_statement_indexes(db)
+    await ensure_matching_indexes(db)
     try:
         touched = await backfill_fc_into_allocations(db)
         if touched:
