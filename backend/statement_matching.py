@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 from pymongo import ReplaceOne, UpdateOne
 
 import ledger
+import ledger_sync
 import merchant_directory
 import statements_ai
 from claude_client import AssistantUnavailable
@@ -337,6 +338,9 @@ async def suggestions(import_id: str, current_user: dict = Depends(get_current_u
     doc, accounts, account = await _statement_and_account(db, current_user["id"], import_id)
     if account is None:
         return {"account_id": None, "account_suggestions": _account_suggestions(doc, accounts), "lines": []}
+    # Spends recorded the old way since conversion must be in the ledger,
+    # or their statement lines would look new and count twice.
+    await ledger_sync.sync(db, current_user["id"])
     rules = await _load_rules(db, current_user["id"])
     txs = await _transactions_near(db, current_user["id"], doc)
     done = set(doc.get("confirmed_lines", []))
