@@ -91,3 +91,57 @@ async def extract_chunk(pdf_bytes: bytes, part: int, parts: int) -> StatementChu
     if response.stop_reason != "end_turn" or response.parsed_output is None:
         raise AssistantUnavailable(f"stop_reason={response.stop_reason}")
     return response.parsed_output
+
+
+# ---------------------------------------------------------------------------
+# Category guesses for merchants Hymn hasn't learned yet
+# ---------------------------------------------------------------------------
+
+_CATEGORISE_SYSTEM = """You guess spending and income categories for bank and card
+statement lines. For each line, pick the single most likely category from the
+allowed list for its direction. Use "uncategorised" when the description gives
+no real clue (e.g. only a person's name or a bare reference number). Never
+invent new categories."""
+
+
+class CategoryGuess(BaseModel):
+    n: int
+    category: str
+
+
+class CategoryGuesses(BaseModel):
+    guesses: List[CategoryGuess]
+
+
+async def guess_categories(lines: List[dict], expense: List[str], income: List[str]) -> dict:
+    """{line n: "expense:<c>" | "income:<c>"} for lines given as
+    {n, description, direction: out|in}. Raises AssistantUnavailable."""
+    if not lines:
+        return {}
+    listing = "\n".join(f"{l['n']}\t{l['direction']}\t{l['description']}" for l in lines)
+    prompt = (
+        f"Allowed for money out: {', '.join(expense)}\n"
+        f"Allowed for money in: {', '.join(income)}\n\n"
+        f"Lines (n, direction, description):\n{listing}"
+    )
+    client = claude_client.get_client().with_options(timeout=60.0)
+    try:
+        response = await client.beta.messages.parse(
+            model=MODEL, max_tokens=8000, system=_CATEGORISE_SYSTEM,
+            messages=[{"role": "user", "content": prompt}],
+            output_format=CategoryGuesses, output_config={"effort": "low"},
+            **claude_client.fallback_kwargs(MODEL),
+        )
+    except (anthropic.APIStatusError, anthropic.APIConnectionError) as exc:
+        raise claude_client.unavailable_from(exc) from exc
+    except ValidationError as exc:
+        raise AssistantUnavailable("malformed output") from exc
+    if response.stop_reason != "end_turn" or response.parsed_output is None:
+        raise AssistantUnavailable(f"stop_reason={response.stop_reason}")
+    direction = {l["n"]: l["direction"] for l in lines}
+    out = {}
+    for g in response.parsed_output.guesses:
+        allowed, prefix = (expense, "expense") if direction.get(g.n) == "out" else (income, "income")
+        if g.n in direction and g.category in allowed and g.category != "uncategorised":
+            out[g.n] = f"{prefix}:{g.category}"
+    return out

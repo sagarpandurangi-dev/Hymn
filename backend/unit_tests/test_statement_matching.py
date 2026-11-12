@@ -6,11 +6,25 @@ import uuid
 
 import pytest
 
+import statements_ai
+from claude_client import AssistantUnavailable
 from statement_matching import merchant_key
 
 BANK = {"id": "bank", "account_type": "bank", "currency": "INR", "name": "HDFC Salary 1234"}
 CARD = {"id": "card", "account_type": "credit_card", "currency": "INR", "name": "Scapia card 9876"}
 USD = {"id": "usd", "account_type": "bank", "currency": "USD", "name": "US bank"}
+
+
+@pytest.fixture(autouse=True)
+def no_ai(monkeypatch):
+    """Offline by default: the category guesser is unavailable."""
+    calls = []
+
+    async def down(lines, expense, income):
+        calls.append(lines)
+        raise AssistantUnavailable("offline")
+    monkeypatch.setattr(statements_ai, "guess_categories", down)
+    return calls
 
 
 @pytest.fixture()
@@ -249,3 +263,47 @@ def test_rules_and_statements_are_private(client, user, server):
     h = {"Authorization": f"Bearer {other['access_token']}"}
     assert client.get(f"/api/statements/{sid}/suggestions", headers=h).status_code == 404
     assert client.get("/api/statements/rules/all", headers=h).json() == []
+
+
+def test_ai_guesses_categories_for_new_merchants_once(client, user, server, monkeypatch):
+    calls = []
+
+    async def guess(lines, expense, income):
+        calls.append([l["n"] for l in lines])
+        assert "food" in expense and "salary" in income
+        return {1: "expense:food"}
+    monkeypatch.setattr(statements_ai, "guess_categories", guess)
+    sid = _statement(server, user, [_line(1, "2026-10-02", "SWIGGY BANGALORE", debit="450"),
+                                    _line(2, "2026-10-03", "RAMESH K", debit="200")], account_id="bank")
+    lines = {l["n"]: l for l in _suggest(client, user, sid)["lines"]}
+    assert lines[1]["category"] == "expense:food" and lines[1]["confidence"] == "ai"
+    assert "guess" in lines[1]["why"].lower()
+    assert lines[2]["category"] == "expense:uncategorised" and lines[2]["confidence"] == "new"
+    _suggest(client, user, sid)
+    assert calls == [[1, 2]]  # cached: asked once per statement
+
+
+def test_learned_rules_beat_ai_guesses(client, user, server, monkeypatch, no_ai):
+    sid = _statement(server, user, [_line(1, "2026-10-02", "SWIGGY BANGALORE", debit="450")], account_id="bank")
+    _accept_all(client, user, sid, {1: {"category": "expense:groceries"}})
+    sid2 = _statement(server, user, [_line(1, "2026-10-12", "SWIGGY BANGALORE", debit="300")], account_id="bank")
+    line = _suggest(client, user, sid2)["lines"][0]
+    assert line["category"] == "expense:groceries" and line["confidence"] == "learned"
+    assert no_ai == [[{"n": 1, "description": "SWIGGY BANGALORE", "direction": "out"}]]
+
+
+def test_ai_down_still_suggests(client, user, server):
+    sid = _statement(server, user, [_line(1, "2026-10-02", "SWIGGY", debit="450")], account_id="bank")
+    line = _suggest(client, user, sid)["lines"][0]
+    assert line["confidence"] == "new"
+
+
+def test_account_can_be_changed_until_lines_are_confirmed(client, user, server):
+    sid = _statement(server, user, [_line(1, "2026-10-02", "SWIGGY", debit="450")], account_id="card")
+    r = client.post(f"/api/statements/{sid}/link", headers=user["headers"], json={"account_id": "bank"})
+    assert r.status_code == 200, r.text
+    _accept_all(client, user, sid)
+    r = client.post(f"/api/statements/{sid}/link", headers=user["headers"], json={"account_id": "card"})
+    assert r.status_code == 409
+    r = client.post(f"/api/statements/{sid}/link", headers=user["headers"], json={"account_id": "bank"})
+    assert r.status_code == 200

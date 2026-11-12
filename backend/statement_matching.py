@@ -34,6 +34,8 @@ from pydantic import BaseModel, Field
 from pymongo import ReplaceOne, UpdateOne
 
 import ledger
+import statements_ai
+from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
 from statements import statements_router
 
@@ -310,6 +312,9 @@ async def link_account(import_id: str, body: LinkRequest, current_user: dict = D
         raise HTTPException(status_code=404, detail="Account not found")
     if account.get("currency") != (doc.get("metadata") or {}).get("currency"):
         raise HTTPException(status_code=400, detail="That account is in a different currency.")
+    if doc.get("confirmed_lines") and doc.get("account_id") != account["id"]:
+        raise HTTPException(status_code=409, detail="Some lines are already confirmed for another account, "
+                                                    "so this statement's account can't be changed.")
     await db.statement_imports.update_one({"id": import_id}, {"$set": {"account_id": account["id"]}})
     return {"account_id": account["id"]}
 
@@ -323,10 +328,39 @@ async def suggestions(import_id: str, current_user: dict = Depends(get_current_u
     rules = await _load_rules(db, current_user["id"])
     txs = await _transactions_near(db, current_user["id"], doc)
     done = set(doc.get("confirmed_lines", []))
-    lines = [_with_nested(suggest_line(l, account, accounts, rules, txs))
-             for l in doc.get("lines", []) if l["n"] not in done]
+    suggested = [suggest_line(l, account, accounts, rules, txs)
+                 for l in doc.get("lines", []) if l["n"] not in done]
+    await _add_ai_guesses(db, doc, suggested)
+    lines = [_with_nested(s) for s in suggested]
     return {"account_id": account["id"], "account_suggestions": [], "confirmed_lines": sorted(done),
             "lines": lines}
+
+
+async def _add_ai_guesses(db, doc: dict, suggested: List[dict]) -> None:
+    """For lines Hymn has never seen, add Claude's category guess. Guesses
+    are cached on the statement so each line is asked about once."""
+    cached = {int(k): v for k, v in (doc.get("ai_categories") or {}).items()}
+    new = [s for s in suggested if s.get("confidence") == "new"]
+    ask = [{"n": s["n"], "description": s["description"], "direction": "out" if s["kind"] == "expense" else "in"}
+           for s in new if s["n"] not in cached]
+    if ask:
+        try:
+            fresh = await statements_ai.guess_categories(
+                ask, [c for c in ledger.EXPENSE_CATEGORIES if c not in ("interest", "fees", "depreciation")],
+                list(ledger.INCOME_CATEGORIES))
+        except AssistantUnavailable:
+            fresh = {}
+        cached.update(fresh)
+        # Remember lines asked about, even without a confident guess.
+        cached.update({a["n"]: cached.get(a["n"], "") for a in ask})
+        await db.statement_imports.update_one(
+            {"id": doc["id"]}, {"$set": {"ai_categories": {str(k): v for k, v in cached.items()}}})
+    for s in new:
+        guess = cached.get(s["n"])
+        if guess:
+            s.update(category=guess, confidence="ai",
+                     why=f"Hymn's guess: {guess.split(':')[1].replace('_', ' ')}. "
+                         f"Confirm or change it once and Hymn learns.")
 
 
 _LINE_FIELDS = ("n", "date", "description", "debit", "credit")
