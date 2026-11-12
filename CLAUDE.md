@@ -56,7 +56,8 @@ short. Never ask them to paste secrets into chat.
 | `ledger.py` | double-entry ledger: transactions with inline postings summing to zero; accrual and cash views; starter categories |
 | `ledger_conversion.py` | one-time, self-verifying conversion of old finance data into the ledger (preview → fingerprinted apply) |
 | `statements.py`, `statements_ai.py` | Premium: PDF upload (password used in memory only), Claude reads lines (debit = money out, credit = money in), arithmetic verification, plain-language reasons |
-| `statement_matching.py` | Xero-style suggestions per line (already recorded / own-account match / learned rules / patterns), confirm into ledger, learning, opening balance, reconciliation |
+| `statement_matching.py` | Xero-style suggestions per line (already recorded / own-account match / learned rules / patterns / built-in merchant list / one AI guess per unknown merchant per user), confirm into ledger, learning, opening balance, reconciliation |
+| `merchant_directory.py` | free built-in list of ~900 well-known (mostly Indian) merchant keywords → spending category; mixed merchants and people's names deliberately left out |
 
 Plans and decisions: `docs/plans/finance-audit.md`. API notes for Emergent:
 `docs/INBOX_API.md`, `docs/NUDGES_API.md`. Deploy guide: `docs/DEPLOY_RAILWAY.md`.

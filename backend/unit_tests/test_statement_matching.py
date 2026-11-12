@@ -129,7 +129,8 @@ def test_hymn_learns_from_confirmations_and_corrections(client, user, server):
         _line(2, "2026-10-03", "NEFT SALARY ZEISS", credit="100000"),
     ], account_id="bank")
     s = _suggest(client, user, sid)["lines"]
-    assert (s[0]["confidence"], s[0]["category"]) == ("new", "expense:uncategorised")
+    assert (s[0]["confidence"], s[0]["category"]) == ("known", "expense:food")
+    assert s[0]["why"] == "Zomato is usually food. Change it once and Hymn learns."
     assert (s[1]["confidence"], s[1]["category"]) == ("guess", "income:salary")
     assert s[1]["suggestion"]["category"] == "income:salary" and "n" not in s[1]["suggestion"]
     _accept_all(client, user, sid, {1: {"category": "expense:food"}})
@@ -158,7 +159,7 @@ def test_always_makes_a_rule(client, user, server):
     assert client.patch(f"/api/statements/rules/{rule['id']}", headers=user["headers"],
                         json={"always": False}).status_code == 200
     assert client.delete(f"/api/statements/rules/{rule['id']}", headers=user["headers"]).status_code == 200
-    assert _suggest(client, user, nxt)["lines"][0]["confidence"] == "new"
+    assert _suggest(client, user, nxt)["lines"][0]["confidence"] == "known"  # back to the built-in list
 
 
 # ---------------------------------------------------------------------------
@@ -265,35 +266,88 @@ def test_rules_and_statements_are_private(client, user, server):
     assert client.get("/api/statements/rules/all", headers=h).json() == []
 
 
-def test_ai_guesses_categories_for_new_merchants_once(client, user, server, monkeypatch):
+def test_ai_guesses_each_unknown_merchant_once_per_user(client, user, server, monkeypatch):
     calls = []
 
     async def guess(lines, expense, income):
-        calls.append([l["n"] for l in lines])
+        calls.append(sorted(l["description"] for l in lines))
         assert "food" in expense and "salary" in income
-        return {1: "expense:food"}
+        return {l["n"]: "expense:food" for l in lines if "TIFFINS" in l["description"]}
     monkeypatch.setattr(statements_ai, "guess_categories", guess)
-    sid = _statement(server, user, [_line(1, "2026-10-02", "SWIGGY BANGALORE", debit="450"),
-                                    _line(2, "2026-10-03", "RAMESH K", debit="200")], account_id="bank")
+    sid = _statement(server, user, [_line(1, "2026-10-02", "UPI/111/SRI KRISHNA TIFFINS", debit="90"),
+                                    _line(2, "2026-10-09", "UPI/222/SRI KRISHNA TIFFINS", debit="60"),
+                                    _line(3, "2026-10-03", "UPI/333/RAMESH KUMAR", debit="200"),
+                                    _line(4, "2026-10-04", "SWIGGY BANGALORE", debit="450")], account_id="bank")
     lines = {l["n"]: l for l in _suggest(client, user, sid)["lines"]}
-    assert lines[1]["category"] == "expense:food" and lines[1]["confidence"] == "ai"
+    assert [lines[n]["confidence"] for n in (1, 2, 3, 4)] == ["ai", "ai", "new", "known"]
+    assert lines[1]["category"] == lines[2]["category"] == "expense:food"
     assert "guess" in lines[1]["why"].lower()
-    assert lines[2]["category"] == "expense:uncategorised" and lines[2]["confidence"] == "new"
+    # One line per unknown merchant; Swiggy came from the free list.
+    assert calls == [["UPI/111/SRI KRISHNA TIFFINS", "UPI/333/RAMESH KUMAR"]]
+    # The same merchants on another card's statement: no AI call at all.
+    sid2 = _statement(server, user, [_line(1, "2026-10-12", "SRI KRISHNA TIFFINS BLR", debit="80"),
+                                     _line(2, "2026-10-13", "RAMESH KUMAR", debit="100")],
+                      kind="credit_card", account_id="card", last4="9876")
+    lines2 = {l["n"]: l for l in _suggest(client, user, sid2)["lines"]}
+    assert lines2[1]["confidence"] == "ai" and lines2[2]["confidence"] == "new"
+    assert len(calls) == 1
+
+
+def test_ai_failure_is_not_remembered(client, user, server, monkeypatch, no_ai):
+    sid = _statement(server, user, [_line(1, "2026-10-02", "SRI KRISHNA TIFFINS", debit="90")], account_id="bank")
     _suggest(client, user, sid)
-    assert calls == [[1, 2]]  # cached: asked once per statement
+    _suggest(client, user, sid)
+    assert len(no_ai) == 2  # asked again next time, not cached as "no idea"
+
+
+def test_known_merchants_need_no_ai(client, user, server, no_ai):
+    sid = _statement(server, user, [_line(1, "2026-10-02", "UPI/4521/SWIGGY8/swiggy@icici", debit="450"),
+                                    _line(2, "2026-10-03", "INDIAN OIL CORP HSR", debit="2000"),
+                                    _line(3, "2026-10-04", "NETFLIX.COM", debit="649")], account_id="bank")
+    lines = {l["n"]: l for l in _suggest(client, user, sid)["lines"]}
+    assert [lines[n]["category"] for n in (1, 2, 3)] == ["expense:food", "expense:fuel", "expense:subscriptions"]
+    assert all(l["confidence"] == "known" for l in lines.values())
+    assert no_ai == []
+
+
+@pytest.mark.parametrize("desc,expected", [
+    ("UPI/4521/SWIGGY8/swiggy@icici", "food"),
+    ("SWIGGY INSTAMART BLR", "groceries"),
+    ("Uber India Systems", "transport"),
+    ("FASTAG RECHARGE", "transport"),
+    ("BESCOM BILL PAYMENT", "bills"),
+    ("GST ON ANNUAL FEE", "fees"),
+    ("POS COLA STORE", None),          # OLA must not match inside COLA
+    ("UPI/NANDINI R/xx", None),        # people's names are not merchants
+    ("RAMESH H M", None),
+    ("AMAZON PAY INDIA", None),        # mixed merchants are left to the user / AI
+    ("ATM CASH WDL", None),            # cash is a transfer, not spending
+])
+def test_merchant_directory(desc, expected):
+    import merchant_directory
+    hit = merchant_directory.lookup(desc)
+    assert (hit[0] if hit else None) == expected
+
+
+def test_directory_categories_exist_in_the_ledger():
+    import ledger
+    import merchant_directory
+    assert all(c in ledger.EXPENSE_CATEGORIES and c != "uncategorised" for _, c in merchant_directory.KEYWORDS)
+    assert len(merchant_directory.KEYWORDS) >= 500
 
 
 def test_learned_rules_beat_ai_guesses(client, user, server, monkeypatch, no_ai):
     sid = _statement(server, user, [_line(1, "2026-10-02", "SWIGGY BANGALORE", debit="450")], account_id="bank")
+    assert _suggest(client, user, sid)["lines"][0]["confidence"] == "known"
     _accept_all(client, user, sid, {1: {"category": "expense:groceries"}})
     sid2 = _statement(server, user, [_line(1, "2026-10-12", "SWIGGY BANGALORE", debit="300")], account_id="bank")
     line = _suggest(client, user, sid2)["lines"][0]
     assert line["category"] == "expense:groceries" and line["confidence"] == "learned"
-    assert no_ai == [[{"n": 1, "description": "SWIGGY BANGALORE", "direction": "out"}]]
+    assert no_ai == []
 
 
 def test_ai_down_still_suggests(client, user, server):
-    sid = _statement(server, user, [_line(1, "2026-10-02", "SWIGGY", debit="450")], account_id="bank")
+    sid = _statement(server, user, [_line(1, "2026-10-02", "SRI KRISHNA TIFFINS", debit="450")], account_id="bank")
     line = _suggest(client, user, sid)["lines"][0]
     assert line["confidence"] == "new"
 
