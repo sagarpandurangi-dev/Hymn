@@ -216,3 +216,39 @@ def test_statements_are_private_and_deletable(client, user, reader, server):
     r = client.delete("/api/statements", headers=user["headers"])
     assert r.json()["files_deleted"] == 1
     assert asyncio.run(server.db.statement_files.count_documents({})) == 0
+
+
+def test_reasons_explain_every_needs_review_in_plain_language():
+    v = _verify(_chunk([
+        _line("2026-10-02", debit="1500", balance="8500"),
+        _line("2026-10-05", credit="2900", balance="10500"),
+    ], opening="10000", closing="10500"))
+    assert v["reasons"] == [
+        "Line 2: the balance should be 11400 but the statement shows 10500. "
+        "This line's amount may have been misread.",
+        "The transactions don't add up to the closing balance: they give 11400, the statement says 10500. "
+        "A transaction may have been missed or misread.",
+    ]
+
+
+def test_reason_when_there_is_nothing_to_cross_check():
+    v = _verify(_chunk([_line("2026-10-02", debit="5")]))
+    assert v["problems"] == []
+    assert v["reasons"] == [
+        "This statement shows no opening/closing balance or running balance, so Hymn couldn't "
+        "double-check the amounts. Please look through them once."
+    ]
+
+
+def test_trusted_statements_have_no_reasons():
+    v = _verify(_chunk([_line("2026-10-02", debit="500", balance="500")], opening="1000", closing="500"))
+    assert (v["trusted"], v["reasons"]) == (True, [])
+
+
+def test_statements_read_earlier_get_reasons_when_opened(client, user, reader, server):
+    reader["queue"].append(_chunk([_line("2026-10-02", debit="5")]))
+    import_id = _upload(client, user, _pdf()).json()["id"]
+    asyncio.run(server.db.statement_imports.update_one(
+        {"id": import_id}, {"$unset": {"verification.reasons": ""}}))
+    doc = client.get(f"/api/statements/{import_id}", headers=user["headers"]).json()
+    assert doc["verification"]["reasons"]

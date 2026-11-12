@@ -199,6 +199,8 @@ def verify(statement: Dict[str, Any]) -> Dict[str, Any]:
     for p in problems:
         p["message"] = p["issue"]
         p["line_number"] = p["line"]
+    # Nothing to cross-check means a person must look before it's used.
+    trusted = not problems and (totals == "ok" or running_checked == len(lines) > 0)
     return {
         "totals_check": totals,
         "running_balance_lines_checked": running_checked,
@@ -206,9 +208,38 @@ def verify(statement: Dict[str, Any]) -> Dict[str, Any]:
         "total_debit": format(total_debit, "f"),
         "total_credit": format(total_credit, "f"),
         "problems": problems,
-        # Nothing to cross-check means a person must look before it's used.
-        "trusted": not problems and (totals == "ok" or running_checked == len(lines) > 0),
+        "trusted": trusted,
+        "reasons": [] if trusted else review_reasons(problems, totals, running_checked, len(lines)),
     }
+
+
+def review_reasons(problems: List[Dict[str, Any]], totals: str,
+                   running_checked: int, line_count: int) -> List[str]:
+    """Why a statement needs review, in plain language for the app."""
+    reasons = []
+    for p in problems:
+        if p["issue"] == "opening + movements ≠ closing":
+            reasons.append(
+                f"The transactions don't add up to the closing balance: they give {p['expected']}, "
+                f"the statement says {p['printed']}. A transaction may have been missed or misread."
+            )
+        elif p["issue"] == "running balance doesn't add up":
+            reasons.append(
+                f"Line {p['line']}: the balance should be {p['expected']} but the statement shows "
+                f"{p['printed']}. This line's amount may have been misread."
+            )
+        elif p["issue"] == "date is not YYYY-MM-DD":
+            reasons.append(f"Line {p['line']}: the date couldn't be read.")
+        else:
+            reasons.append(f"Line {p['line']}: the amount couldn't be read as a single debit or credit.")
+    if not problems and line_count == 0:
+        reasons.append("No transactions were found in this statement.")
+    elif not problems and totals == "not_available" and running_checked < line_count:
+        reasons.append(
+            "This statement shows no opening/closing balance or running balance, so Hymn couldn't "
+            "double-check the amounts. Please look through them once."
+        )
+    return reasons
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +336,10 @@ async def _get(db, user_id: str, import_id: str) -> dict:
 @statements_router.get("/{import_id}")
 async def get_statement(import_id: str, current_user: dict = Depends(get_current_user)):
     doc = await _get(get_db(), current_user["id"], import_id)
+    if doc.get("metadata"):
+        # Re-check on read so statements read earlier get today's checks
+        # and explanations; it is pure arithmetic, no AI call.
+        doc["verification"] = verify({"metadata": doc["metadata"], "lines": doc.get("lines", [])})
     return {**_summary(doc), "pages": doc.get("pages"), "lines": doc.get("lines", [])}
 
 
