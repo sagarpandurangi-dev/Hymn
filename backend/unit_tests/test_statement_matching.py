@@ -117,6 +117,7 @@ def test_hymn_learns_from_confirmations_and_corrections(client, user, server):
     s = _suggest(client, user, sid)["lines"]
     assert (s[0]["confidence"], s[0]["category"]) == ("new", "expense:uncategorised")
     assert (s[1]["confidence"], s[1]["category"]) == ("guess", "income:salary")
+    assert s[1]["suggestion"]["category"] == "income:salary" and "n" not in s[1]["suggestion"]
     _accept_all(client, user, sid, {1: {"category": "expense:food"}})
 
     nxt = _statement(server, user, [_line(1, "2026-11-04", "UPI/ZOMATO LTD/order 99", debit="350")],

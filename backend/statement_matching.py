@@ -323,9 +323,19 @@ async def suggestions(import_id: str, current_user: dict = Depends(get_current_u
     rules = await _load_rules(db, current_user["id"])
     txs = await _transactions_near(db, current_user["id"], doc)
     done = set(doc.get("confirmed_lines", []))
-    lines = [suggest_line(l, account, accounts, rules, txs) for l in doc.get("lines", []) if l["n"] not in done]
+    lines = [_with_nested(suggest_line(l, account, accounts, rules, txs))
+             for l in doc.get("lines", []) if l["n"] not in done]
     return {"account_id": account["id"], "account_suggestions": [], "confirmed_lines": sorted(done),
             "lines": lines}
+
+
+_LINE_FIELDS = ("n", "date", "description", "debit", "credit")
+
+
+def _with_nested(row: dict) -> dict:
+    """The app reads the suggestion as a nested ``suggestion`` object; keep
+    the flat fields too."""
+    return {**row, "suggestion": {k: v for k, v in row.items() if k not in _LINE_FIELDS}}
 
 
 class Decision(BaseModel):
