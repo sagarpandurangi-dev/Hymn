@@ -1019,7 +1019,7 @@ async def _current_position(db, user_id: str) -> dict:
     # the availability calculation both share ONE canonical number per
     # account. Legacy raw ``current_value`` is only used for liabilities
     # (which do not participate in the event pipeline yet).
-    from money_service import summarise_effective_balances, APPLIED_LIFECYCLE_STATUSES
+    from money_service import summarise_effective_balances, APPLIED_LIFECYCLE_STATUSES, ledger_balances
 
     docs = await db.financial_accounts.find({"user_id": user_id}, {"_id": 0}).to_list(length=5000)
     events = await db.financial_events.find(
@@ -1030,6 +1030,9 @@ async def _current_position(db, user_id: str) -> dict:
     ).to_list(length=50000)
     eff_rows = summarise_effective_balances(docs, events)
     eff_by_id = {r["account_id"]: r for r in eff_rows}
+    # After conversion the ledger is the truth for assets AND liabilities
+    # (card spends raise what's owed; bill payments lower it).
+    from_ledger = await ledger_balances(db, user_id) or {}
 
     by_currency: dict = {}
     for d in docs:
@@ -1051,7 +1054,9 @@ async def _current_position(db, user_id: str) -> dict:
         # Assets use effective balance; liabilities continue on snapshot
         # value until the event pipeline models negative-account
         # transactions (out of Batch 2A scope).
-        if is_asset:
+        if d.get("id") in from_ledger:
+            amt = from_ledger[d["id"]]
+        elif is_asset:
             eff = eff_by_id.get(d.get("id"), {})
             amt = eff.get("effective_current_balance", _decimal_from_stored(d.get("current_value")))
         else:

@@ -474,10 +474,44 @@ async def _load_reserved_totals(db, user_id: str) -> dict:
     return totals
 
 
+# ---------------------------------------------------------------------------
+# Switch-over: once a user has converted, balances and spending come from
+# the ledger (kept in step by ``ledger_sync``). Shapes stay the same, so
+# every screen follows without change. Users who haven't converted keep
+# the event-based numbers above.
+# ---------------------------------------------------------------------------
+
+LEDGER_ALL_DATES = "9999-12-31"  # same as the event path: every applied event counts
+
+
+async def ledger_balances(db, user_id: str) -> Optional[dict]:
+    """{account_id: balance as people read it} from the ledger, or None
+    when the user hasn't converted. Syncs first."""
+    import ledger
+    import ledger_sync
+
+    if not (await ledger_sync.sync(db, user_id))["converted"]:
+        return None
+    rows = await ledger.balances(db, user_id, LEDGER_ALL_DATES)
+    return {r["account_id"]: Decimal(r["balance"]) for r in rows
+            if r["account_type"] in ledger.ASSET_TYPES | ledger.LIABILITY_TYPES}
+
+
+def apply_ledger_balances(rows: list[dict], balances: Optional[dict]) -> list[dict]:
+    if balances is None:
+        return rows
+    for r in rows:
+        if r["account_id"] in balances:
+            r["effective_current_balance"] = balances[r["account_id"]]
+            r["source"] = "ledger"
+    return rows
+
+
 async def load_account_positions(db, user_id: str) -> list[dict]:
     accounts = await _load_user_accounts(db, user_id)
     applied_events, _ = await _load_applied_and_all_events(db, user_id)
-    return summarise_effective_balances(accounts, applied_events)
+    rows = summarise_effective_balances(accounts, applied_events)
+    return apply_ledger_balances(rows, await ledger_balances(db, user_id))
 
 
 async def load_availability(db, user_id: str) -> dict:
@@ -486,6 +520,7 @@ async def load_availability(db, user_id: str) -> dict:
     accounts = await _load_user_accounts(db, user_id)
     applied_events, all_events = await _load_applied_and_all_events(db, user_id)
     rows = summarise_effective_balances(accounts, applied_events)
+    rows = apply_ledger_balances(rows, await ledger_balances(db, user_id))
     liquid_totals = sum_liquid_effective_by_currency(rows)
     reserved_totals = await _load_reserved_totals(db, user_id)
     by_cur_raw = compute_available_unreserved(liquid_totals, reserved_totals)
@@ -542,6 +577,9 @@ async def monthly_actual_spending(
 ) -> Decimal:
     """Month-to-date spending in ``currency``, bucketed by ``event_date``
     (the user's calendar), never the UTC month of ``occurred_at``."""
+    ledger_total = await ledger_spending_total(db, user_id, f"{month}-01", f"{month}-31", currency)
+    if ledger_total is not None:
+        return ledger_total
     query = _spending_filter(user_id, {"$regex": "^" + re.escape(month) + "-"})
     query["currency"] = currency
     events = await db.financial_events.find(
@@ -549,6 +587,39 @@ async def monthly_actual_spending(
                 "lifecycle_status": 1, "account_id": 1, "event_date": 1},
     ).to_list(length=None)
     return sum((_to_decimal(e.get("amount")) for e in events if counts_as_spending(e)), Decimal(0))
+
+
+async def ledger_spending_total(db, user_id: str, start: str, end: str, currency: str) -> Optional[Decimal]:
+    """Accrual spending from the ledger, or None when not converted."""
+    import ledger
+    import ledger_sync
+
+    if not (await ledger_sync.sync(db, user_id))["converted"]:
+        return None
+    by_cur = ledger.accrual_spending(await ledger.load_transactions(db, user_id), start, end)
+    return sum(by_cur.get(currency, {}).values(), Decimal(0))
+
+
+async def ledger_day_entries(db, user_id: str, day: str) -> Optional[list[dict]]:
+    """That day's spending entries from the ledger (accrual: a card
+    purchase counts on its date), or None when not converted. Each entry:
+    {id, currency, amount, description, event_ids}."""
+    import ledger
+    import ledger_sync
+
+    if not (await ledger_sync.sync(db, user_id))["converted"]:
+        return None
+    out = []
+    for tx in await ledger.load_transactions(db, user_id):
+        if tx["date"] != day:
+            continue
+        spent = ledger.accrual_spending([tx], day, day).get(tx["currency"], {})
+        amount = sum(spent.values(), Decimal(0))
+        if amount:
+            out.append({"id": tx["id"], "currency": tx["currency"], "amount": amount,
+                        "description": tx.get("description") or "",
+                        "event_ids": [i for i in tx.get("evidence_ids") or [] if not str(i).startswith("stmt:")]})
+    return out
 
 
 async def daily_spending(db, user_id: str, day: str) -> dict:
