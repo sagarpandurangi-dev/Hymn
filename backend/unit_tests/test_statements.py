@@ -224,10 +224,35 @@ def test_reasons_explain_every_needs_review_in_plain_language():
         _line("2026-10-05", credit="2900", balance="10500"),
     ], opening="10000", closing="10500"))
     assert v["reasons"] == [
-        "Line 2: the balance should be 11400 but the statement shows 10500. "
-        "This line's amount may have been misread.",
-        "The transactions don't add up to the closing balance: they give 11400, the statement says 10500. "
-        "A transaction may have been missed or misread.",
+        "Line 2: the balance should be ₹11,400.00 but the statement shows ₹10,500.00 "
+        "(off by ₹900.00). This line's amount was probably misread.",
+        "₹900.00 is unaccounted for: the transactions give ₹11,400.00, the statement's closing "
+        "balance is ₹10,500.00. Look for a missing or misread transaction of about ₹900.00.",
+    ]
+
+
+def test_one_paisa_gap_is_rounding_not_a_missed_transaction():
+    # The owner's real case: transactions give 61876.57, statement says 61876.58.
+    v = _verify(_chunk([
+        _line("2026-10-02", debit="1000.00", balance="60876.57"),
+        _line("2026-10-05", credit="1000.00", balance="61876.57"),
+    ], opening="61876.57", closing="61876.58"))
+    assert (v["trusted"], v["totals_check"], v["problems"], v["reasons"]) == (True, "rounding", [], [])
+    assert v["notes"] == [
+        "All 2 line balances add up.",
+        "The statement's own closing balance differs from its transactions by ₹0.01, "
+        "a rounding difference in the statement.",
+    ]
+
+
+def test_summary_inconsistent_when_every_line_adds_up():
+    v = _verify(_chunk([
+        _line("2026-10-02", debit="1000", balance="9000"),
+    ], opening="10000", closing="8500"))
+    assert v["trusted"] is False
+    assert v["reasons"] == [
+        "All 1 line balances add up, but the statement's closing balance differs from them by "
+        "₹500.00. The statement's own summary looks inconsistent; check its closing balance."
     ]
 
 
@@ -252,3 +277,13 @@ def test_statements_read_earlier_get_reasons_when_opened(client, user, reader, s
         {"id": import_id}, {"$unset": {"verification.reasons": ""}}))
     doc = client.get(f"/api/statements/{import_id}", headers=user["headers"]).json()
     assert doc["verification"]["reasons"]
+
+
+def test_status_refreshes_when_checks_improve(client, user, reader, server):
+    reader["queue"].append(_chunk([_line("2026-10-02", debit="1000", balance="60876.57")],
+                                  opening="61876.57", closing="60876.58"))
+    import_id = _upload(client, user, _pdf()).json()["id"]
+    asyncio.run(server.db.statement_imports.update_one({"id": import_id}, {"$set": {"status": "needs_review"}}))
+    listed = client.get("/api/statements", headers=user["headers"]).json()
+    assert listed[0]["status"] == "ready"
+    assert asyncio.run(server.db.statement_imports.find_one({"id": import_id}))["status"] == "ready"
