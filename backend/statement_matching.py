@@ -13,7 +13,10 @@ For each statement line Hymn suggests what it is, in this order:
    merchant on this account.
 4. **Simple patterns** (card "payment received" → card bill, "salary" →
    salary).
-5. Otherwise uncategorised, and Hymn learns from what you choose.
+5. **Well-known merchants** from Hymn's built-in list (free, no AI).
+6. Otherwise one cheap AI guess per statement for the leftovers (each
+   merchant asked about once per user), else uncategorised; Hymn learns
+   from what you choose.
 
 Nothing is written until the user confirms. Every confirmation teaches the
 rule for that merchant; a correction replaces it; "always" makes it a rule.
@@ -34,6 +37,7 @@ from pydantic import BaseModel, Field
 from pymongo import ReplaceOne, UpdateOne
 
 import ledger
+import merchant_directory
 import statements_ai
 from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
@@ -183,7 +187,15 @@ def suggest_line(line: dict, account: dict, accounts: Dict[str, dict], rules: Di
         return {**base, "action": "create", "kind": "income", "category": "income:interest",
                 "confidence": "guess", "why": "Looks like interest."}
 
-    # 5. Unknown.
+    # 5. Well-known merchants.
+    known = merchant_directory.lookup(line["description"]) if out_of_account else None
+    if known:
+        category, keyword = known
+        return {**base, "action": "create", "kind": "expense", "category": f"expense:{category}",
+                "confidence": "known",
+                "why": f"{keyword.title()} is usually {category.replace('_', ' ')}. Change it once and Hymn learns."}
+
+    # 6. Unknown.
     if out_of_account:
         return {**base, "action": "create", "kind": "expense", "category": "expense:uncategorised",
                 "confidence": "new", "why": "New to Hymn. Pick a category once and Hymn learns it."}
@@ -330,37 +342,55 @@ async def suggestions(import_id: str, current_user: dict = Depends(get_current_u
     done = set(doc.get("confirmed_lines", []))
     suggested = [suggest_line(l, account, accounts, rules, txs)
                  for l in doc.get("lines", []) if l["n"] not in done]
-    await _add_ai_guesses(db, doc, suggested)
+    await _add_ai_guesses(db, current_user["id"], suggested)
     lines = [_with_nested(s) for s in suggested]
     return {"account_id": account["id"], "account_suggestions": [], "confirmed_lines": sorted(done),
             "lines": lines}
 
 
-async def _add_ai_guesses(db, doc: dict, suggested: List[dict]) -> None:
-    """For lines Hymn has never seen, add Claude's category guess. Guesses
-    are cached on the statement so each line is asked about once."""
-    cached = {int(k): v for k, v in (doc.get("ai_categories") or {}).items()}
+async def _add_ai_guesses(db, user_id: str, suggested: List[dict]) -> None:
+    """Lines nothing else recognised get one AI guess per merchant, ever.
+
+    Guesses are remembered per user by merchant and direction, so the same
+    merchant on ten cards or twelve months of statements is asked about once,
+    and each statement sends only merchants never seen before, one line per
+    merchant. If the AI is unavailable nothing is remembered and the lines
+    stay uncategorised.
+    """
     new = [s for s in suggested if s.get("confidence") == "new"]
-    ask = [{"n": s["n"], "description": s["description"], "direction": "out" if s["kind"] == "expense" else "in"}
-           for s in new if s["n"] not in cached]
-    if ask:
+    keyed = {}
+    for s in new:
+        key = merchant_key(s["description"])
+        if key:  # no merchant words at all: nothing to guess from
+            keyed.setdefault((key, "out" if s["kind"] == "expense" else "in"), []).append(s)
+    if not keyed:
+        return
+    known = {(g["merchant_key"], g["direction"]): g["category"] async for g in db.merchant_guesses.find(
+        {"user_id": user_id, "merchant_key": {"$in": sorted({k for k, _ in keyed})}})}
+    unseen = [k for k in keyed if k not in known]
+    if unseen:
+        ask = [{"n": i, "description": keyed[k][0]["description"], "direction": k[1]} for i, k in enumerate(unseen)]
         try:
             fresh = await statements_ai.guess_categories(
                 ask, [c for c in ledger.EXPENSE_CATEGORIES if c not in ("interest", "fees", "depreciation")],
                 list(ledger.INCOME_CATEGORIES))
         except AssistantUnavailable:
-            fresh = {}
-        cached.update(fresh)
-        # Remember lines asked about, even without a confident guess.
-        cached.update({a["n"]: cached.get(a["n"], "") for a in ask})
-        await db.statement_imports.update_one(
-            {"id": doc["id"]}, {"$set": {"ai_categories": {str(k): v for k, v in cached.items()}}})
-    for s in new:
-        guess = cached.get(s["n"])
+            fresh = None
+        if fresh is not None:
+            now = datetime.now(timezone.utc).isoformat()
+            for i, k in enumerate(unseen):
+                known[k] = fresh.get(i, "")  # "" = asked, no confident guess
+            await db.merchant_guesses.bulk_write([
+                UpdateOne({"user_id": user_id, "merchant_key": k[0], "direction": k[1]},
+                          {"$set": {"category": known[k], "updated_at": now}}, upsert=True)
+                for k in unseen])
+    for k, lines in keyed.items():
+        guess = known.get(k)
         if guess:
-            s.update(category=guess, confidence="ai",
-                     why=f"Hymn's guess: {guess.split(':')[1].replace('_', ' ')}. "
-                         f"Confirm or change it once and Hymn learns.")
+            for s in lines:
+                s.update(category=guess, confidence="ai",
+                         why=f"Hymn's guess: {guess.split(':')[1].replace('_', ' ')}. "
+                             f"Confirm or change it once and Hymn learns.")
 
 
 _LINE_FIELDS = ("n", "date", "description", "debit", "credit")
@@ -546,5 +576,7 @@ async def delete_rule(rule_id: str, current_user: dict = Depends(get_current_use
 
 
 async def ensure_matching_indexes(db) -> None:
+    await db.merchant_guesses.create_index(
+        [("user_id", 1), ("merchant_key", 1), ("direction", 1)], unique=True)
     await db.match_rules.create_index(
         [("user_id", 1), ("merchant_key", 1), ("account_id", 1), ("direction", 1)], unique=True)
