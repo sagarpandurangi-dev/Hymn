@@ -817,6 +817,60 @@ export const api = {
     request<LedgerConversionPreview>("/ledger/conversion/preview", { auth: true }),
   applyLedgerConversion: (fingerprint: string) =>
     request<any>("/ledger/conversion/apply", { method: "POST", body: { fingerprint }, auth: true }),
+
+  // -- Statement review & confirm --
+  getStatementSuggestions: (id: string) =>
+    request<StatementSuggestions>(`/statements/${id}/suggestions`, { auth: true }),
+  linkStatementAccount: (id: string, accountId: string) =>
+    request<any>(`/statements/${id}/link`, { method: "POST", body: { account_id: accountId }, auth: true }),
+  confirmStatement: (id: string, decisions: StatementDecision[]) =>
+    request<StatementConfirmResult>(`/statements/${id}/confirm`, { method: "POST", body: { decisions }, auth: true }),
+};
+
+export type StatementSuggestion = {
+  action?: string | null;
+  kind?: string | null;
+  category?: string | null;
+  counter_account_id?: string | null;
+  duplicate_of?: string | null;
+  merge_with?: string | null;
+  confidence?: string | null;
+  why?: string | null;
+};
+export type StatementSuggestionLine = {
+  n: number;
+  date?: string;
+  description?: string;
+  debit?: string | number | null;
+  credit?: string | number | null;
+  suggestion?: StatementSuggestion | null;
+};
+export type StatementSuggestions = {
+  account_id?: string | null;
+  account_suggestions?: string[];
+  lines?: StatementSuggestionLine[];
+};
+export type StatementDecision = {
+  n: number;
+  action: string | null;
+  kind: string | null;
+  category: string | null;
+  counter_account_id: string | null;
+  duplicate_of: string | null;
+  merge_with: string | null;
+  always?: boolean;
+};
+export type StatementConfirmResult = {
+  created?: number;
+  linked_to_existing?: number;
+  merged?: number;
+  skipped?: number;
+  balance_check?: {
+    available?: boolean;
+    matches?: boolean;
+    ledger_balance?: string | number | null;
+    statement_closing?: string | number | null;
+  } | null;
 };
 
 /** GET /statements/{id}/file with auth, then open (web) or share (native) the PDF. */

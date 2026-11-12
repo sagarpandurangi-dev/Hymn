@@ -135,6 +135,11 @@ export default function StatementDetailScreen() {
           ) : null}
 
           {doc ? (
+            <Pressable style={styles.reviewBtn} onPress={() => router.push(`/finance/statements/${doc.id}/review`)} testID="statement-review-button">
+              <Text style={styles.primaryText}>Review & confirm</Text>
+            </Pressable>
+          ) : null}
+          {doc ? (
             <View style={styles.actions}>
               <Pressable style={[styles.primary, downloading && styles.disabled]} onPress={download} disabled={downloading} testID="statement-download-button">
                 {downloading ? <ActivityIndicator color="#FBFBF6" /> : <Text style={styles.primaryText}>Download PDF</Text>}
@@ -173,6 +178,7 @@ const styles = StyleSheet.create({
   cDesc: { width: 200 },
   cAmt: { width: 96, textAlign: "right", fontVariant: ["tabular-nums"] },
   actions: { flexDirection: "row", gap: financeSpace.md, marginTop: financeSpace.md },
+  reviewBtn: { backgroundColor: financeColors.ink, minHeight: 48, borderRadius: financeRadius.pill, alignItems: "center", justifyContent: "center", marginTop: financeSpace.md },
   primary: { flex: 1, backgroundColor: financeColors.ink, minHeight: 48, borderRadius: financeRadius.pill, alignItems: "center", justifyContent: "center" },
   primaryText: { color: "#FBFBF6", fontSize: 14, fontWeight: "700" },
   danger: { flex: 1, minHeight: 48, borderRadius: financeRadius.pill, borderWidth: 1, borderColor: financeColors.negative, alignItems: "center", justifyContent: "center" },
