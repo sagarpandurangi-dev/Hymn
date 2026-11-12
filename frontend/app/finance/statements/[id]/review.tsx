@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams } from "expo-router";
 import {
@@ -28,6 +28,11 @@ const EXPENSE_CATEGORIES = [
   "subscriptions", "uncategorised",
 ];
 const INCOME_CATEGORIES = ["salary", "bonus", "interest", "gift", "refund", "other", "uncategorised"];
+const ACCOUNT_TYPES: { value: "bank" | "credit_card" | "wallet"; label: string }[] = [
+  { value: "bank", label: "Bank" },
+  { value: "credit_card", label: "Credit card" },
+  { value: "wallet", label: "Wallet" },
+];
 
 const titleCase = (s: string) => s.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 const categoryName = (c?: string | null) => (c ? c.split(":").pop() || "" : "");
@@ -70,6 +75,13 @@ export default function StatementReviewScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [linking, setLinking] = useState<string | null>(null);
+  const [pickingAccount, setPickingAccount] = useState(false);
+  const [addingAccount, setAddingAccount] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newType, setNewType] = useState<"bank" | "credit_card" | "wallet">("bank");
+  const [newCurrency, setNewCurrency] = useState("INR");
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [accountError, setAccountError] = useState("");
   const [editing, setEditing] = useState<StatementSuggestionLine | null>(null);
   const [draft, setDraft] = useState<Choice | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -97,16 +109,49 @@ export default function StatementReviewScreen() {
   }, [load]);
 
   const link = async (accountId: string) => {
-    if (linking) return;
+    if (linking) return false;
     setLinking(accountId);
     setError("");
     try {
       await api.linkStatementAccount(importId, accountId);
+      setPickingAccount(false);
       await load();
+      return true;
     } catch (e) {
+      // e.g. 409: show the backend's reason; the current account stays linked.
       setError((e as ApiError).message);
+      return false;
     } finally {
       setLinking(null);
+    }
+  };
+
+  const saveNewAccount = async () => {
+    const name = newName.trim();
+    const currency = newCurrency.trim().toUpperCase();
+    if (!name) { setAccountError("Enter a name."); return; }
+    if (!currency) { setAccountError("Enter a currency."); return; }
+    if (savingAccount) return;
+    setSavingAccount(true);
+    setAccountError("");
+    try {
+      const created = await api.createFinancialAccount({
+        name,
+        account_type: newType,
+        currency,
+        current_value: 0,
+        liquidity_type: "liquid",
+        fixed_or_flexible: "flexible",
+      });
+      setAddingAccount(false);
+      setNewName("");
+      setNewType("bank");
+      setNewCurrency("INR");
+      await link(created.id);
+    } catch (e) {
+      setAccountError((e as ApiError).message);
+    } finally {
+      setSavingAccount(false);
     }
   };
 
@@ -198,7 +243,7 @@ export default function StatementReviewScreen() {
         <ScrollView contentContainerStyle={styles.scroll}>
           {error ? <Text style={styles.error} testID="statement-review-error">{error}</Text> : null}
 
-          {data && !data.account_id ? (
+          {data && (!data.account_id || pickingAccount) ? (
             <>
               <Text style={styles.question}>Which account is this statement for?</Text>
               <FoldCard>
@@ -208,7 +253,7 @@ export default function StatementReviewScreen() {
                     key={a.id}
                     first={i === 0}
                     label={a.name}
-                    meta={a.currency}
+                    meta={a.id === data.account_id ? `${a.currency} · Current` : a.currency}
                     right={linking === a.id ? <ActivityIndicator color={financeColors.ink} /> : a.id === suggested[0] ? <Text style={styles.suggested}>Suggested</Text> : undefined}
                     onPress={() => link(a.id)}
                     chevron
@@ -216,9 +261,29 @@ export default function StatementReviewScreen() {
                   />
                 ))}
               </FoldCard>
+              <Pressable
+                style={styles.secondary}
+                onPress={() => { setAccountError(""); setAddingAccount(true); }}
+                testID="statement-add-account-button"
+              >
+                <Text style={styles.secondaryText}>+ Add account</Text>
+              </Pressable>
+              {data.account_id ? (
+                <Pressable onPress={() => setPickingAccount(false)} hitSlop={8} testID="statement-change-account-cancel">
+                  <Text style={styles.linkText}>Cancel</Text>
+                </Pressable>
+              ) : null}
             </>
           ) : data ? (
             <>
+              <View style={styles.accountRow} testID="statement-linked-account">
+                <Text style={styles.accountName} numberOfLines={1}>
+                  {accountName(data.account_id) || "Linked account"}
+                </Text>
+                <Pressable onPress={() => { setError(""); setPickingAccount(true); }} hitSlop={8} testID="statement-change-account-link">
+                  <Text style={styles.linkText}>Change account</Text>
+                </Pressable>
+              </View>
               {result ? renderResult(result) : null}
               <FoldCard>
                 {(data.lines ?? []).length === 0 ? <Text style={styles.empty}>No lines to review.</Text> : null}
@@ -237,11 +302,18 @@ export default function StatementReviewScreen() {
                         <Text style={styles.lineDesc} numberOfLines={2}>{l.description || ""}</Text>
                         <Text style={[styles.lineAmt, amt.out ? styles.out : styles.in]}>{amt.text}</Text>
                       </View>
-                      <Text style={[styles.sugLabel, { color: confidenceColor(c?.confidence) }]}>
-                        {suggestionLabel(c)}
-                        {c?.counter_account_id && accountName(c.counter_account_id) ? ` → ${accountName(c.counter_account_id)}` : ""}
-                        {c?.always ? " · Always" : ""}
-                      </Text>
+                      <View style={styles.sugRow}>
+                        <Text style={[styles.sugLabel, { color: confidenceColor(c?.confidence) }]}>
+                          {suggestionLabel(c)}
+                          {c?.counter_account_id && accountName(c.counter_account_id) ? ` → ${accountName(c.counter_account_id)}` : ""}
+                          {c?.always ? " · Always" : ""}
+                        </Text>
+                        {c?.confidence === "ai" ? (
+                          <View style={styles.guessTag} testID={`statement-guess-tag-${l.n}`}>
+                            <Text style={styles.guessTagText}>Hymn&apos;s guess</Text>
+                          </View>
+                        ) : null}
+                      </View>
                       {c?.why ? <Text style={styles.why}>{c.why}</Text> : null}
                     </Pressable>
                   );
@@ -256,6 +328,49 @@ export default function StatementReviewScreen() {
           ) : null}
         </ScrollView>
       )}
+
+      <Modal visible={addingAccount} transparent animationType="fade" onRequestClose={() => !savingAccount && setAddingAccount(false)}>
+        <View style={[styles.backdrop, styles.centered]}>
+          <View style={styles.formCard}>
+            <Text style={styles.sheetTitle}>Add account</Text>
+            <Text style={styles.fieldLabel}>Name</Text>
+            <TextInput
+              style={styles.input}
+              value={newName}
+              onChangeText={setNewName}
+              placeholder="e.g. HDFC Savings"
+              placeholderTextColor={financeColors.inkFaint}
+              testID="statement-new-account-name"
+            />
+            <Text style={styles.fieldLabel}>Type</Text>
+            <View style={styles.chipWrap}>
+              {ACCOUNT_TYPES.map((t) => (
+                <Chip key={t.value} label={t.label} selected={newType === t.value} onPress={() => setNewType(t.value)} testID={`statement-new-account-type-${t.value}`} />
+              ))}
+            </View>
+            <Text style={styles.fieldLabel}>Currency</Text>
+            <TextInput
+              style={styles.input}
+              value={newCurrency}
+              onChangeText={setNewCurrency}
+              autoCapitalize="characters"
+              maxLength={3}
+              placeholder="INR"
+              placeholderTextColor={financeColors.inkFaint}
+              testID="statement-new-account-currency"
+            />
+            {accountError ? <Text style={styles.error} testID="statement-new-account-error">{accountError}</Text> : null}
+            <View style={styles.sheetActions}>
+              <Pressable style={styles.secondary} onPress={() => setAddingAccount(false)} disabled={savingAccount} testID="statement-new-account-cancel">
+                <Text style={styles.secondaryText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={[styles.primary, styles.flex1, savingAccount && styles.disabled]} onPress={saveNewAccount} disabled={savingAccount} testID="statement-new-account-save">
+                {savingAccount ? <ActivityIndicator color="#FBFBF6" /> : <Text style={styles.primaryText}>Save</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
 
       <Modal visible={!!editing} transparent animationType="slide" onRequestClose={() => setEditing(null)}>
         <View style={styles.backdrop}>
@@ -346,7 +461,16 @@ const styles = StyleSheet.create({
   lineAmt: { fontSize: 13.5, fontWeight: "700", fontVariant: ["tabular-nums"] },
   out: { color: financeColors.ink },
   in: { color: financeColors.positive },
-  sugLabel: { fontSize: 13, fontWeight: "700", marginLeft: 78 + financeSpace.md },
+  sugLabel: { fontSize: 13, fontWeight: "700" },
+  sugRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: financeSpace.sm, marginLeft: 78 + financeSpace.md },
+  guessTag: { backgroundColor: financeColors.pillInfoBg, borderRadius: financeRadius.pill, paddingHorizontal: 8, paddingVertical: 2 },
+  guessTagText: { fontSize: 10.5, fontWeight: "700", color: financeColors.pillInfoInk },
+  accountRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: financeSpace.md, minHeight: 44 },
+  accountName: { flex: 1, fontSize: 15, fontWeight: "700", color: financeColors.ink },
+  linkText: { fontSize: 13.5, fontWeight: "700", color: financeColors.pillInfoInk, textDecorationLine: "underline", textAlign: "center" },
+  centered: { justifyContent: "center", padding: financeSpace.xl },
+  formCard: { backgroundColor: financeColors.card, borderRadius: financeRadius.lg, padding: financeSpace.xl, gap: financeSpace.md },
+  input: { borderWidth: 1, borderColor: financeColors.cardBorder, borderRadius: financeRadius.md, paddingHorizontal: financeSpace.md, minHeight: 48, fontSize: 15, color: financeColors.ink },
   why: { fontSize: 11.5, color: financeColors.inkMuted, marginLeft: 78 + financeSpace.md },
   resultCard: { padding: financeSpace.lg, gap: financeSpace.xs },
   resultText: { fontSize: 14, color: financeColors.ink, fontWeight: "600" },
