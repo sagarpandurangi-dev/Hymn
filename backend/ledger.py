@@ -59,17 +59,17 @@ LIABILITY_TYPES = frozenset({
 })
 LOAN_TYPES = frozenset({"personal_loan", "home_loan", "vehicle_loan", "other_liability"})
 
+# Starter categories; user-defined ones will join as ``category:<id>``.
+EXPENSE_CATEGORIES = (
+    "uncategorised", "food", "groceries", "fuel", "transport", "shopping", "bills", "rent",
+    "health", "education", "entertainment", "travel", "family", "personal_care",
+    "insurance", "taxes", "charity", "subscriptions", "interest", "fees", "depreciation",
+)
+INCOME_CATEGORIES = ("uncategorised", "salary", "bonus", "interest", "gift", "refund", "other")
+
 NOMINAL_ACCOUNTS: Dict[str, str] = {
-    "expense:uncategorised": "expense",
-    "expense:interest": "expense",
-    "expense:fees": "expense",
-    "expense:depreciation": "expense",
-    "income:uncategorised": "income",
-    "income:salary": "income",
-    "income:bonus": "income",
-    "income:gift": "income",
-    "income:interest": "income",
-    "income:other": "income",
+    **{f"expense:{c}": "expense" for c in EXPENSE_CATEGORIES},
+    **{f"income:{c}": "income" for c in INCOME_CATEGORIES},
     "equity:opening": "equity",
 }
 
@@ -373,12 +373,13 @@ async def real_accounts_for(db, user_id: str) -> Dict[str, dict]:
     return {r["id"]: r for r in rows}
 
 
-async def record(db, user_id: str, draft: Draft, *, provenance: str = "user",
-                 evidence_ids: Optional[List[str]] = None) -> dict:
-    accounts = await real_accounts_for(db, user_id)
+def build_transaction(user_id: str, draft: Draft, accounts: Dict[str, dict], *, provenance: str = "user",
+                      evidence_ids: Optional[List[str]] = None,
+                      references: Optional[List[str]] = None) -> dict:
+    """Validate and assemble a transaction without writing it."""
     postings = build_postings(draft, accounts)
     now = _now()
-    tx = {
+    return {
         "id": str(uuid.uuid4()),
         "user_id": user_id,
         "kind": draft.kind,
@@ -391,10 +392,25 @@ async def record(db, user_id: str, draft: Draft, *, provenance: str = "user",
         # What a person entered or corrected is never rewritten by automation.
         "locked": provenance == "user",
         "evidence_ids": evidence_ids or [],
+        # Bank / UPI reference numbers, used to recognise the same payment
+        # reported by another statement.
+        "references": [r for r in (references or []) if r],
         "created_at": now,
         "updated_at": now,
     }
-    await db.ledger_transactions.insert_one({**tx, "postings": _store(postings)})
+
+
+def storable(tx: dict) -> dict:
+    return {**tx, "postings": _store(tx["postings"])}
+
+
+async def record(db, user_id: str, draft: Draft, *, provenance: str = "user",
+                 evidence_ids: Optional[List[str]] = None,
+                 references: Optional[List[str]] = None) -> dict:
+    accounts = await real_accounts_for(db, user_id)
+    tx = build_transaction(user_id, draft, accounts, provenance=provenance,
+                           evidence_ids=evidence_ids, references=references)
+    await db.ledger_transactions.insert_one(storable(tx))
     return tx
 
 
@@ -432,6 +448,7 @@ async def ensure_ledger_indexes(db) -> None:
     await db.ledger_transactions.create_index([("user_id", 1), ("status", 1), ("date", 1)])
     await db.ledger_transactions.create_index([("user_id", 1), ("postings.account_id", 1), ("date", 1)])
     await db.ledger_transactions.create_index("evidence_ids")
+    await db.ledger_transactions.create_index([("user_id", 1), ("references", 1)])
 
 
 # ---------------------------------------------------------------------------
