@@ -489,6 +489,8 @@ async def create_transaction(body: TransactionCreate, current_user: dict = Depen
 @ledger_router.get("/transactions")
 async def list_transactions(account_id: Optional[str] = None,
                             current_user: dict = Depends(get_current_user)):
+    import ledger_sync
+    await ledger_sync.sync(get_db(), current_user["id"])
     txs = await load_transactions(get_db(), current_user["id"], account_id=account_id)
     return [_public(t) for t in reversed(txs)]
 
@@ -498,7 +500,7 @@ async def void_transaction(tx_id: str, current_user: dict = Depends(get_current_
     # A person may void anything, locked included; automation never voids.
     result = await get_db().ledger_transactions.update_one(
         {"id": tx_id, "user_id": current_user["id"], "status": "posted"},
-        {"$set": {"status": "void", "voided_at": _now(), "updated_at": _now()}},
+        {"$set": {"status": "void", "voided_by": "person", "voided_at": _now(), "updated_at": _now()}},
     )
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Transaction not found or already void")
@@ -511,6 +513,8 @@ async def get_balances(as_of: Optional[str] = None, current_user: dict = Depends
         day = valid_date(as_of) if as_of else date_type.today().isoformat()
     except LedgerError as exc:
         raise _bad_request(exc)
+    import ledger_sync
+    await ledger_sync.sync(get_db(), current_user["id"])
     return await balances(get_db(), current_user["id"], day)
 
 
@@ -525,6 +529,8 @@ async def get_spending_report(
     except LedgerError as exc:
         raise _bad_request(exc)
     db = get_db()
+    import ledger_sync
+    await ledger_sync.sync(db, current_user["id"])
     txs = await load_transactions(db, current_user["id"])
     if basis == "accrual":
         report = accrual_spending(txs, start, end)
