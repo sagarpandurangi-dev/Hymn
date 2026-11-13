@@ -28,6 +28,7 @@ const EXPENSE_CATEGORIES = [
   "subscriptions", "uncategorised",
 ];
 const INCOME_CATEGORIES = ["salary", "bonus", "interest", "gift", "refund", "other", "uncategorised"];
+const ACCEPTED_CONFIDENCE = new Set(["known", "similar", "habit", "ai", "learned", "rule", "matched"]);
 const ACCOUNT_TYPES: { value: "bank" | "credit_card" | "wallet"; label: string }[] = [
   { value: "bank", label: "Bank" },
   { value: "credit_card", label: "Credit card" },
@@ -82,10 +83,15 @@ export default function StatementReviewScreen() {
   const [newCurrency, setNewCurrency] = useState("INR");
   const [savingAccount, setSavingAccount] = useState(false);
   const [accountError, setAccountError] = useState("");
-  const [editing, setEditing] = useState<StatementSuggestionLine | null>(null);
+  const [editing, setEditing] = useState<{ ns: number[]; title: string; bulk: boolean } | null>(null);
   const [draft, setDraft] = useState<Choice | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [accepting, setAccepting] = useState(false);
   const [result, setResult] = useState<StatementConfirmResult | null>(null);
+  // Lines already sent to /confirm (by Accept all guesses or Confirm all).
+  const [confirmedNs, setConfirmedNs] = useState<Set<number>>(new Set());
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
 
   const load = useCallback(async () => {
     setError("");
@@ -156,13 +162,38 @@ export default function StatementReviewScreen() {
   };
 
   const openEdit = (l: StatementSuggestionLine) => {
-    setEditing(l);
+    setEditing({ ns: [l.n], title: l.description || "", bulk: false });
     setDraft({ ...(choices[l.n] ?? {}) });
   };
 
+  const openBulkEdit = () => {
+    if (selected.size === 0) return;
+    setEditing({ ns: [...selected], title: `${selected.size} line${selected.size === 1 ? "" : "s"} selected`, bulk: true });
+    setDraft({});
+  };
+
+  const toggleSelected = (n: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(n)) next.delete(n); else next.add(n);
+      return next;
+    });
+
+  const exitSelect = () => {
+    setSelectMode(false);
+    setSelected(new Set());
+  };
+
+  // Only the on-screen choices change; nothing is saved until Confirm.
   const saveEdit = () => {
     if (!editing || !draft) return;
-    setChoices((prev) => ({ ...prev, [editing.n]: { ...draft, changed: true } }));
+    if (editing.bulk && !draft.kind) return;
+    setChoices((prev) => {
+      const next = { ...prev };
+      for (const n of editing.ns) next[n] = { ...draft, changed: true };
+      return next;
+    });
+    if (editing.bulk) exitSelect();
     setEditing(null);
     setDraft(null);
   };
@@ -181,31 +212,56 @@ export default function StatementReviewScreen() {
     }));
   };
 
+  const toDecision = (l: StatementSuggestionLine): StatementDecision => {
+    const c = choices[l.n] ?? {};
+    const d: StatementDecision = {
+      n: l.n,
+      action: c.action ?? null,
+      kind: c.kind ?? null,
+      category: c.category ?? null,
+      counter_account_id: c.counter_account_id ?? null,
+      duplicate_of: c.duplicate_of ?? null,
+      merge_with: c.merge_with ?? null,
+    };
+    if (c.always) d.always = true;
+    return d;
+  };
+
+  const sendLines = async (lines: StatementSuggestionLine[]) => {
+    const res = await api.confirmStatement(importId, lines.map(toDecision));
+    setResult(res);
+    setConfirmedNs((prev) => new Set([...prev, ...lines.map((l) => l.n)]));
+    exitSelect();
+  };
+
+  const openLines = (data?.lines ?? []).filter((l) => !confirmedNs.has(l.n));
+  const guessLines = openLines.filter((l) => ACCEPTED_CONFIDENCE.has(l.suggestion?.confidence ?? ""));
+
   const confirmAll = async () => {
-    const lines = data?.lines ?? [];
-    if (confirming || lines.length === 0) return;
+    if (confirming || accepting || openLines.length === 0) return;
     setConfirming(true);
     setError("");
     try {
-      const decisions: StatementDecision[] = lines.map((l) => {
-        const c = choices[l.n] ?? {};
-        const d: StatementDecision = {
-          n: l.n,
-          action: c.action ?? null,
-          kind: c.kind ?? null,
-          category: c.category ?? null,
-          counter_account_id: c.counter_account_id ?? null,
-          duplicate_of: c.duplicate_of ?? null,
-          merge_with: c.merge_with ?? null,
-        };
-        if (c.always) d.always = true;
-        return d;
-      });
-      setResult(await api.confirmStatement(importId, decisions));
+      await sendLines(openLines);
     } catch (e) {
       setError((e as ApiError).message);
     } finally {
       setConfirming(false);
+    }
+  };
+
+  // Confirms every line whose suggestion confidence is accepted, using each
+  // line's current on-screen choice. Lines with "new" stay open to pick.
+  const acceptAllGuesses = async () => {
+    if (confirming || accepting || guessLines.length === 0) return;
+    setAccepting(true);
+    setError("");
+    try {
+      await sendLines(guessLines);
+    } catch (e) {
+      setError((e as ApiError).message);
+    } finally {
+      setAccepting(false);
     }
   };
 
@@ -285,19 +341,61 @@ export default function StatementReviewScreen() {
                 </Pressable>
               </View>
               {result ? renderResult(result) : null}
+              {openLines.length > 0 ? (
+                <View style={styles.toolbar}>
+                  {selectMode ? (
+                    <>
+                      <Pressable onPress={exitSelect} hitSlop={8} testID="statement-select-cancel">
+                        <Text style={styles.linkText}>Cancel</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.toolBtn, selected.size === 0 && styles.disabled]}
+                        onPress={openBulkEdit}
+                        disabled={selected.size === 0}
+                        testID="statement-bulk-edit-button"
+                      >
+                        <Text style={styles.toolBtnText}>Set kind & category{selected.size ? ` (${selected.size})` : ""}</Text>
+                      </Pressable>
+                    </>
+                  ) : (
+                    <>
+                      <Pressable style={styles.toolBtn} onPress={() => setSelectMode(true)} testID="statement-select-button">
+                        <Text style={styles.toolBtnText}>Select</Text>
+                      </Pressable>
+                      {guessLines.length > 0 ? (
+                        <Pressable
+                          style={[styles.toolBtn, (accepting || confirming) && styles.disabled]}
+                          onPress={acceptAllGuesses}
+                          disabled={accepting || confirming}
+                          testID="statement-accept-guesses-button"
+                        >
+                          {accepting ? <ActivityIndicator color={financeColors.ink} /> : <Text style={styles.toolBtnText}>Accept all guesses ({guessLines.length})</Text>}
+                        </Pressable>
+                      ) : null}
+                    </>
+                  )}
+                </View>
+              ) : null}
               <FoldCard>
                 {(data.lines ?? []).length === 0 ? <Text style={styles.empty}>No lines to review.</Text> : null}
                 {(data.lines ?? []).map((l, i) => {
                   const c = choices[l.n];
                   const amt = lineAmount(l);
+                  const done = confirmedNs.has(l.n);
+                  const isSel = selected.has(l.n);
                   return (
                     <Pressable
                       key={l.n}
-                      onPress={() => !result && openEdit(l)}
-                      style={[styles.line, i > 0 && styles.lineBorder]}
+                      onPress={() => { if (done) return; if (selectMode) toggleSelected(l.n); else openEdit(l); }}
+                      style={[styles.line, i > 0 && styles.lineBorder, done && styles.lineDone]}
                       testID={`statement-review-line-${l.n}`}
                     >
                       <View style={styles.lineHead}>
+                        {selectMode && !done ? (
+                          <View style={[styles.checkbox, isSel && styles.checkboxOn]} testID={`statement-line-checkbox-${l.n}`}>
+                            {isSel ? <Text style={styles.checkMark}>✓</Text> : null}
+                          </View>
+                        ) : null}
                         <Text style={styles.lineDate}>{l.date || ""}</Text>
                         <Text style={styles.lineDesc} numberOfLines={2}>{l.description || ""}</Text>
                         <Text style={[styles.lineAmt, amt.out ? styles.out : styles.in]}>{amt.text}</Text>
@@ -307,6 +405,7 @@ export default function StatementReviewScreen() {
                           {suggestionLabel(c)}
                           {c?.counter_account_id && accountName(c.counter_account_id) ? ` → ${accountName(c.counter_account_id)}` : ""}
                           {c?.always ? " · Always" : ""}
+                          {done ? " · Confirmed" : ""}
                         </Text>
                         {c?.confidence === "ai" ? (
                           <View style={styles.guessTag} testID={`statement-guess-tag-${l.n}`}>
@@ -319,8 +418,8 @@ export default function StatementReviewScreen() {
                   );
                 })}
               </FoldCard>
-              {!result && (data.lines ?? []).length > 0 ? (
-                <Pressable style={[styles.primary, confirming && styles.disabled]} onPress={confirmAll} disabled={confirming} testID="statement-confirm-all-button">
+              {openLines.length > 0 && !selectMode ? (
+                <Pressable style={[styles.primary, (confirming || accepting) && styles.disabled]} onPress={confirmAll} disabled={confirming || accepting} testID="statement-confirm-all-button">
                   {confirming ? <ActivityIndicator color="#FBFBF6" /> : <Text style={styles.primaryText}>Confirm all</Text>}
                 </Pressable>
               ) : null}
@@ -376,7 +475,7 @@ export default function StatementReviewScreen() {
         <View style={styles.backdrop}>
           <View style={styles.sheet}>
             <ScrollView contentContainerStyle={{ gap: financeSpace.md }}>
-              <Text style={styles.sheetTitle} numberOfLines={2}>{editing?.description}</Text>
+              <Text style={styles.sheetTitle} numberOfLines={2}>{editing?.title}</Text>
               <Text style={styles.fieldLabel}>Kind</Text>
               <View style={styles.chipWrap}>
                 {KINDS.map((k) => (
@@ -435,7 +534,12 @@ export default function StatementReviewScreen() {
                 <Pressable style={styles.secondary} onPress={() => { setEditing(null); setDraft(null); }} testID="statement-edit-cancel">
                   <Text style={styles.secondaryText}>Cancel</Text>
                 </Pressable>
-                <Pressable style={[styles.primary, styles.flex1]} onPress={saveEdit} testID="statement-edit-save">
+                <Pressable
+                  style={[styles.primary, styles.flex1, editing?.bulk && !draft?.kind && styles.disabled]}
+                  onPress={saveEdit}
+                  disabled={!!editing?.bulk && !draft?.kind}
+                  testID="statement-edit-save"
+                >
                   <Text style={styles.primaryText}>Done</Text>
                 </Pressable>
               </View>
@@ -463,6 +567,13 @@ const styles = StyleSheet.create({
   in: { color: financeColors.positive },
   sugLabel: { fontSize: 13, fontWeight: "700" },
   sugRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: financeSpace.sm, marginLeft: 78 + financeSpace.md },
+  toolbar: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: financeSpace.md },
+  toolBtn: { minHeight: 40, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, alignItems: "center", justifyContent: "center" },
+  toolBtnText: { fontSize: 13, fontWeight: "700", color: financeColors.ink },
+  lineDone: { opacity: 0.55 },
+  checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: financeColors.inkMuted, alignItems: "center", justifyContent: "center", marginTop: 1 },
+  checkboxOn: { backgroundColor: financeColors.ink, borderColor: financeColors.ink },
+  checkMark: { color: "#FBFBF6", fontSize: 13, fontWeight: "800" },
   guessTag: { backgroundColor: financeColors.pillInfoBg, borderRadius: financeRadius.pill, paddingHorizontal: 8, paddingVertical: 2 },
   guessTagText: { fontSize: 10.5, fontWeight: "700", color: financeColors.pillInfoInk },
   accountRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: financeSpace.md, minHeight: 44 },

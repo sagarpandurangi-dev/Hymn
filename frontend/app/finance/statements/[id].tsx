@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { api, ApiError, StatementDetail, StatementLine, StatementProblem } from "@/src/lib/api";
@@ -24,6 +24,7 @@ export default function StatementDetailScreen() {
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -71,6 +72,19 @@ export default function StatementDetailScreen() {
   const problems = doc?.verification?.problems ?? [];
   const flagged = new Set(problems.map(problemLine).filter((n): n is number => n !== null));
   const lines = doc?.lines ?? [];
+  const q = query.trim().toLowerCase();
+  const qDigits = q.replace(/[^\d.]/g, "");
+  const matches = (l: StatementLine) => {
+    if (!q) return true;
+    if ((l.description || "").toLowerCase().includes(q)) return true;
+    if (!qDigits) return false;
+    return [l.debit, l.credit, l.balance].some((v) => {
+      if (v === null || v === undefined || v === "") return false;
+      const raw = String(v);
+      return raw.includes(qDigits) || amount(v).replace(/[^\d.]/g, "").includes(qDigits);
+    });
+  };
+  const visible = lines.map((l, i) => ({ l, i })).filter(({ l }) => matches(l));
 
   return (
     <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
@@ -102,6 +116,20 @@ export default function StatementDetailScreen() {
           ) : null}
 
           {lines.length > 0 ? (
+            <TextInput
+              style={styles.search}
+              value={query}
+              onChangeText={setQuery}
+              placeholder="Search description or amount"
+              placeholderTextColor={financeColors.inkFaint}
+              autoCapitalize="none"
+              autoCorrect={false}
+              clearButtonMode="while-editing"
+              testID="statement-search-input"
+            />
+          ) : null}
+
+          {lines.length > 0 ? (
             <FoldCard style={styles.tableCard}>
               <ScrollView horizontal showsHorizontalScrollIndicator>
                 <View>
@@ -113,7 +141,10 @@ export default function StatementDetailScreen() {
                     <Text style={[styles.cell, styles.cAmt, styles.thText]}>Credit</Text>
                     <Text style={[styles.cell, styles.cAmt, styles.thText]}>Balance</Text>
                   </View>
-                  {lines.map((l, i) => {
+                  {visible.length === 0 ? (
+                    <Text style={[styles.empty, { textAlign: "left" }]} testID="statement-search-empty">No lines match “{query.trim()}”.</Text>
+                  ) : null}
+                  {visible.map(({ l, i }) => {
                     const n = lineNo(l, i);
                     const bad = flagged.has(n);
                     return (
@@ -168,6 +199,7 @@ const styles = StyleSheet.create({
   problemLine: { width: 64, fontSize: 12.5, fontWeight: "700", color: financeColors.pillWarnInk },
   problemText: { flex: 1, fontSize: 13, color: financeColors.ink },
   tableCard: { paddingVertical: financeSpace.sm },
+  search: { borderWidth: 1, borderColor: financeColors.cardBorder, borderRadius: financeRadius.pill, paddingHorizontal: financeSpace.lg, minHeight: 44, fontSize: 14, color: financeColors.ink, backgroundColor: financeColors.card },
   tr: { flexDirection: "row", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: financeColors.divider, paddingVertical: financeSpace.sm },
   trBad: { backgroundColor: financeColors.pillWarnBg },
   th: { borderBottomColor: financeColors.cardBorder },
