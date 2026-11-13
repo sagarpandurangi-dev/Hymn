@@ -670,8 +670,11 @@ def _validate_time_commitment(body, *, is_create: bool, existing: dict | None = 
 
     start_m = _hhmm_to_minutes(merged["start_time"])
     end_m = _hhmm_to_minutes(merged["end_time"])
-    _require(end_m > start_m, "end_time must be later than start_time")
-    _require(end_m <= 24 * 60, "commitment may not cross midnight; split into two records instead")
+    # An end before the start runs overnight into the next morning (sleep
+    # 23:00 → 07:00 is one block on the day it starts).
+    _require(end_m != start_m, "end_time must differ from start_time")
+    _require(end_m <= 24 * 60, "end_time must be 24:00 or earlier")
+    _require(start_m < 24 * 60, "start_time must be before 24:00")
 
     _require_in(merged.get("source_type", "manual"), COMMITMENT_SOURCE_TYPES, "source_type")
     merged["source_id"] = merged.get("source_id") or None
@@ -878,6 +881,36 @@ async def create_time_commitment(body: TimeCommitmentCreate, current_user: dict 
     return doc
 
 
+def overnight_pairs(docs: List[dict]) -> List[tuple]:
+    """Blocks saved in two halves before overnight blocks existed
+    (Mon 23:00→24:00 + Tue 00:00→07:00, same title and settings):
+    (first, second) pairs to join into one Mon 23:00→07:00 block."""
+    same = ("title", "commitment_type", "flexibility", "effective_from", "effective_until", "source_type")
+    pairs, used = [], set()
+    for a in docs:
+        if a.get("end_time") != "24:00" or a["id"] in used:
+            continue
+        nxt = DAY_OF_WEEK[(DAY_OF_WEEK.index(a["day_of_week"]) + 1) % 7]
+        b = next((x for x in docs if x["id"] not in used and x["id"] != a["id"] and x.get("day_of_week") == nxt
+                  and x.get("start_time") == "00:00" and x.get("end_time") != "24:00"
+                  and all(x.get(k) == a.get(k) for k in same)), None)
+        if b and _hhmm_to_minutes(b["end_time"]) < _hhmm_to_minutes(a["start_time"]):
+            pairs.append((a, b))
+            used.update({a["id"], b["id"]})
+    return pairs
+
+
+async def join_overnight_halves(user_id: str) -> int:
+    docs = await db.time_commitments.find({"user_id": user_id}, {"_id": 0}).to_list(length=5000)
+    pairs = overnight_pairs(docs)
+    for a, b in pairs:
+        await db.time_commitments.update_one(
+            {"id": a["id"], "user_id": user_id},
+            {"$set": {"end_time": b["end_time"], "updated_at": _now()}})
+        await db.time_commitments.delete_one({"id": b["id"], "user_id": user_id})
+    return len(pairs)
+
+
 @portfolio_router.get("/time-commitments", response_model=List[TimeCommitmentResponse])
 async def list_time_commitments(
     current_user: dict = Depends(get_current_user),
@@ -886,6 +919,7 @@ async def list_time_commitments(
     flexibility: Optional[str] = None,
     source_type: Optional[str] = None,
 ):
+    await join_overnight_halves(current_user["id"])
     q: dict = {"user_id": current_user["id"]}
     if day_of_week:
         _require_in(day_of_week, DAY_OF_WEEK, "day_of_week")
