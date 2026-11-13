@@ -57,7 +57,7 @@ short. Never ask them to paste secrets into chat.
 | `ledger_conversion.py` | one-time, self-verifying conversion of old finance data into the ledger (preview → fingerprinted apply) |
 | `ledger_sync.py` | after conversion, keeps the ledger in step with old finance records (new/changed/rejected events, retyped balances) using the conversion's own rules; only touches derived entries; links to statement entries instead of double counting; runs before ledger reads and statement suggestions |
 | `statements.py`, `statements_ai.py` | Premium: PDF upload (password used in memory only), Claude reads lines (debit = money out, credit = money in), arithmetic verification, plain-language reasons |
-| `statement_matching.py` | Xero-style suggestions per line (already recorded / own-account match / learned rules / patterns / built-in merchant list / one AI guess per unknown merchant per user), confirm into ledger, learning, opening balance, reconciliation |
+| `statement_matching.py` | Xero-style suggestions per line (already recorded / own-account match / learned rules / patterns / built-in merchant list / similar names the user filed / spending habits by amount / one AI guess per unknown merchant per user), confirm into ledger, learning, opening balance, reconciliation |
 | `merchant_directory.py` | free built-in list of ~900 well-known (mostly Indian) merchant keywords → spending category; mixed merchants and people's names deliberately left out |
 
 Plans and decisions: `docs/plans/finance-audit.md`. API notes for Emergent:
