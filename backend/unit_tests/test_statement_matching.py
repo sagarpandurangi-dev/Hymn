@@ -272,10 +272,10 @@ def test_ai_guesses_each_unknown_merchant_once_per_user(client, user, server, mo
     async def guess(lines, expense, income):
         calls.append(sorted(l["description"] for l in lines))
         assert "food" in expense and "salary" in income
-        return {l["n"]: "expense:food" for l in lines if "TIFFINS" in l["description"]}
+        return {l["n"]: "expense:food" for l in lines if "VARIETIES" in l["description"]}
     monkeypatch.setattr(statements_ai, "guess_categories", guess)
-    sid = _statement(server, user, [_line(1, "2026-10-02", "UPI/111/SRI KRISHNA TIFFINS", debit="90"),
-                                    _line(2, "2026-10-09", "UPI/222/SRI KRISHNA TIFFINS", debit="60"),
+    sid = _statement(server, user, [_line(1, "2026-10-02", "UPI/111/SRI KRISHNA VARIETIES", debit="90"),
+                                    _line(2, "2026-10-09", "UPI/222/SRI KRISHNA VARIETIES", debit="60"),
                                     _line(3, "2026-10-03", "UPI/333/RAMESH KUMAR", debit="200"),
                                     _line(4, "2026-10-04", "SWIGGY BANGALORE", debit="450")], account_id="bank")
     lines = {l["n"]: l for l in _suggest(client, user, sid)["lines"]}
@@ -283,9 +283,9 @@ def test_ai_guesses_each_unknown_merchant_once_per_user(client, user, server, mo
     assert lines[1]["category"] == lines[2]["category"] == "expense:food"
     assert "guess" in lines[1]["why"].lower()
     # One line per unknown merchant; Swiggy came from the free list.
-    assert calls == [["UPI/111/SRI KRISHNA TIFFINS", "UPI/333/RAMESH KUMAR"]]
+    assert calls == [["UPI/111/SRI KRISHNA VARIETIES", "UPI/333/RAMESH KUMAR"]]
     # The same merchants on another card's statement: no AI call at all.
-    sid2 = _statement(server, user, [_line(1, "2026-10-12", "SRI KRISHNA TIFFINS BLR", debit="80"),
+    sid2 = _statement(server, user, [_line(1, "2026-10-12", "SRI KRISHNA VARIETIES BLR", debit="80"),
                                      _line(2, "2026-10-13", "RAMESH KUMAR", debit="100")],
                       kind="credit_card", account_id="card", last4="9876")
     lines2 = {l["n"]: l for l in _suggest(client, user, sid2)["lines"]}
@@ -294,7 +294,7 @@ def test_ai_guesses_each_unknown_merchant_once_per_user(client, user, server, mo
 
 
 def test_ai_failure_is_not_remembered(client, user, server, monkeypatch, no_ai):
-    sid = _statement(server, user, [_line(1, "2026-10-02", "SRI KRISHNA TIFFINS", debit="90")], account_id="bank")
+    sid = _statement(server, user, [_line(1, "2026-10-02", "SRI KRISHNA VARIETIES", debit="90")], account_id="bank")
     _suggest(client, user, sid)
     _suggest(client, user, sid)
     assert len(no_ai) == 2  # asked again next time, not cached as "no idea"
@@ -347,7 +347,7 @@ def test_learned_rules_beat_ai_guesses(client, user, server, monkeypatch, no_ai)
 
 
 def test_ai_down_still_suggests(client, user, server):
-    sid = _statement(server, user, [_line(1, "2026-10-02", "SRI KRISHNA TIFFINS", debit="450")], account_id="bank")
+    sid = _statement(server, user, [_line(1, "2026-10-02", "SRI KRISHNA VARIETIES", debit="450")], account_id="bank")
     line = _suggest(client, user, sid)["lines"][0]
     assert line["confidence"] == "new"
 
@@ -361,3 +361,59 @@ def test_account_can_be_changed_until_lines_are_confirmed(client, user, server):
     assert r.status_code == 409
     r = client.post(f"/api/statements/{sid}/link", headers=user["headers"], json={"account_id": "bank"})
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Similar names and habits
+# ---------------------------------------------------------------------------
+
+def _rule(key, category, times=1, direction="out", account="bank"):
+    return {(key, account, direction): {"merchant_key": key, "account_id": account, "direction": direction,
+                                        "kind": "expense", "category": category, "times_confirmed": times}}
+
+
+def test_similar_names_share_what_you_taught():
+    from statement_matching import similar_category
+    rules = {**_rule("ANNAPOORNA NAIVEDHYA", "expense:food"), **_rule("RAJU MOTORS", "expense:transport", account="card")}
+    assert similar_category("ANNAPOORNA KITCHENETTE", rules, "out") == ("expense:food", "ANNAPOORNA NAIVEDHYA")
+    assert similar_category("GOPAL NAIVEDYA", rules, "out")[0] == "expense:food"     # one letter off
+    assert similar_category("RAJU MOTOR", rules, "out")[0] == "expense:transport"    # across accounts
+    assert similar_category("SRI LAKSHMI", {**rules, **_rule("SRI GANESH", "expense:food")}, "out") is None
+    assert similar_category("ANNAPOORNA NAIVEDHYA", rules, "in") is None
+    split = {**_rule("RAJU STORES", "expense:groceries", 2), **_rule("RAJU MOTORS", "expense:transport", 2)}
+    assert similar_category("RAJU TAILORS", split, "out") is None                  # no clear winner
+
+
+def test_habits_need_repetition_and_agreement():
+    from decimal import Decimal as D
+    from statement_matching import habit_category
+    hist = [{"date": f"2026-10-{d:02d}", "amount": D(a), "category": "expense:personal_care"}
+            for d, a in [(1, "40"), (3, "40"), (6, "45"), (9, "40")]]
+    h = habit_category(D("42"), "2026-10-20", hist)
+    assert (h["category"], h["times"], h["since"]) == ("expense:personal_care", 4, "2026-10-01")
+    assert habit_category(D("42"), "2026-10-20", hist[:3]) is None                      # not often enough
+    assert habit_category(D("90"), "2026-10-20", hist) is None                          # different amount
+    assert habit_category(D("42"), "2027-06-01", hist) is None                          # too long ago
+    mixed = hist + [{"date": f"2026-10-1{d}", "amount": D("40"), "category": "expense:food"} for d in range(3)]
+    assert habit_category(D("42"), "2026-10-20", mixed) is None                         # no clear habit
+
+
+def test_review_uses_names_and_habits(client, user, server):
+    first = _statement(server, user, [_line(1, "2026-10-02", "UPI/111/ANNAPOORNA NAIVEDHYA/x", debit="120")]
+                       + [_line(n, f"2026-10-{n + 2:02d}", f"UPI/{n}/RAMESH KUMAR/x", debit="40") for n in range(2, 7)],
+                       account_id="bank")
+    _accept_all(client, user, first, {n: {"category": "expense:food" if n == 1 else "expense:personal_care"}
+                                      for n in range(1, 7)})
+    nxt = _statement(server, user, [_line(1, "2026-10-20", "UPI/9/ANNAPOORNA DELIGHTS/x", debit="200"),
+                                    _line(2, "2026-10-21", "UPI/8/SURESH BABU/x", debit="42")],
+                     account_id="card", kind="credit_card", last4="9876", period=("2026-10-16", "2026-10-31"))
+    lines = {l["n"]: l for l in _suggest(client, user, nxt)["lines"]}
+    assert (lines[1]["confidence"], lines[1]["category"]) == ("similar", "expense:food")
+    assert lines[1]["why"] == "Similar to ANNAPOORNA NAIVEDHYA, which you marked food."
+    assert (lines[2]["confidence"], lines[2]["category"]) == ("habit", "expense:personal_care")
+    assert lines[2]["why"] == "You often spend about ₹42.00 on personal care: 5 times since 4 Oct."
+
+
+def test_directory_keywords_stay_short():
+    import merchant_directory
+    assert all(1 <= len(k) <= 4 for k, _ in merchant_directory.KEYWORDS)  # catches a missing comma

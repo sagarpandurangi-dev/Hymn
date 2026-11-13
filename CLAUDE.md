@@ -52,12 +52,12 @@ short. Never ask them to paste secrets into chat.
 | `inbox.py`, `inbox_ai.py` | brain dump → task/reminder/idea/plan; daily review; nuggets → task/calendar/wishlist; weekly patterns |
 | `nudges.py` | scheduler (every minute): daily review (adaptive time), reminders, weekly summary; Expo push; in-app feed |
 | `planning_engine.py`, `goal_merge.py` | AI planning chat with web search; plan hierarchy; goal merge |
-| `finance_manager.py`, `finance_advanced.py`, `money_service.py`, `portfolio_manager.py` | existing finance engine (being replaced by the ledger for actuals) |
+| `finance_manager.py`, `finance_advanced.py`, `money_service.py`, `portfolio_manager.py` | existing finance engine: plans, commitments, forecasts. For converted users `money_service` (balances, availability, monthly spending), Finance position and Today `/spending` read the ledger; shapes unchanged |
 | `ledger.py` | double-entry ledger: transactions with inline postings summing to zero; accrual and cash views; starter categories |
 | `ledger_conversion.py` | one-time, self-verifying conversion of old finance data into the ledger (preview → fingerprinted apply) |
 | `ledger_sync.py` | after conversion, keeps the ledger in step with old finance records (new/changed/rejected events, retyped balances) using the conversion's own rules; only touches derived entries; links to statement entries instead of double counting; runs before ledger reads and statement suggestions |
 | `statements.py`, `statements_ai.py` | Premium: PDF upload (password used in memory only), Claude reads lines (debit = money out, credit = money in), arithmetic verification, plain-language reasons |
-| `statement_matching.py` | Xero-style suggestions per line (already recorded / own-account match / learned rules / patterns / built-in merchant list / one AI guess per unknown merchant per user), confirm into ledger, learning, opening balance, reconciliation |
+| `statement_matching.py` | Xero-style suggestions per line (already recorded / own-account match / learned rules / patterns / built-in merchant list / similar names the user filed / spending habits by amount / one AI guess per unknown merchant per user), confirm into ledger, learning, opening balance, reconciliation |
 | `merchant_directory.py` | free built-in list of ~900 well-known (mostly Indian) merchant keywords → spending category; mixed merchants and people's names deliberately left out |
 
 Plans and decisions: `docs/plans/finance-audit.md`. API notes for Emergent:
@@ -87,7 +87,7 @@ with learning.
 
 Next:
 1. Owner tests statement review/confirm; fix what they find.
-2. Money book switch-over: Finance screens and Today read the ledger.
+2. Money book switch-over: done for balances, availability, monthly and Today spending (converted users). Left: recent-activity list still shows old events; owner must run the conversion (Money book screen) for the switch to apply.
 3. Categories/life objects (car, house, habits) per area; depreciation; fuel
    and mileage; loans (principal/interest, documents); cash vs accrual views.
 4. Speed: Railway → Singapore; reduce round trips per screen.

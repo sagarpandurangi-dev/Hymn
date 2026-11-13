@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections import defaultdict
 from datetime import date as date_type, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Literal, Optional
@@ -42,7 +43,7 @@ import merchant_directory
 import statements_ai
 from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
-from statements import statements_router
+from statements import money, statements_router
 
 DUPLICATE_DAYS = 2
 TRANSFER_DAYS = 5
@@ -116,8 +117,97 @@ def find_rule(rules: Dict[tuple, dict], key: str, account_id: str, direction: st
     return max(similar, key=lambda r: (bool(r.get("always")), r.get("times_confirmed", 0)), default=None)
 
 
+# ---------------------------------------------------------------------------
+# Similar names and habits: learning beyond the exact merchant
+# ---------------------------------------------------------------------------
+
+# Words that say nothing about what a shop sells.
+_GENERIC_WORDS = frozenset({
+    "SRI", "SHRI", "SREE", "SHREE", "NEW", "STORE", "STORES", "SHOP", "SHOPPE", "ENTERPRISES", "ENTERPRISE",
+    "TRADERS", "TRADING", "SERVICES", "SERVICE", "CENTRE", "CENTER", "AGENCIES", "AGENCY", "CORNER",
+    "MART", "GENERAL", "COMPANY", "CORP", "CORPORATION", "INTERNATIONAL", "GROUP", "SONS", "BROTHERS",
+    "BANGALORE", "BENGALURU", "MUMBAI", "DELHI", "CHENNAI", "HYDERABAD", "PUNE", "KOLKATA",
+})
+HABIT_WINDOW_DAYS = 120
+HABIT_MIN_TIMES = 4
+HABIT_SHARE = Decimal("0.75")
+SIMILAR_SHARE = Decimal("0.66")
+
+
+def _close(a: str, b: str) -> bool:
+    """Same word, or one letter off for words of 5+ letters (KRISHA ~ KRISHNA)."""
+    if a == b:
+        return True
+    if min(len(a), len(b)) < 5 or a[0] != b[0] or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    short, long_ = (a, b) if len(a) < len(b) else (b, a)
+    return any(long_[:i] + long_[i + 1:] == short for i in range(len(long_)))
+
+
+def similar_category(key: str, rules: Dict[tuple, dict], direction: str) -> Optional[tuple]:
+    """(category, example merchant) when the user's confirmed merchants that
+    share a meaningful word with this one mostly agree, else None."""
+    words = [w for w in key.split(" ") if w and w not in _GENERIC_WORDS]
+    if not words:
+        return None
+    votes: Dict[str, int] = defaultdict(int)
+    example: Dict[str, tuple] = {}
+    for (k, _acct, d), r in rules.items():
+        cat = r.get("category") or ""
+        if d != direction or r.get("kind") != "expense" or not cat or cat.endswith(":uncategorised") or k == key:
+            continue
+        theirs = [w for w in k.split(" ") if w not in _GENERIC_WORDS]
+        if any(_close(w, t) for w in words for t in theirs):
+            weight = max(1, r.get("times_confirmed", 1))
+            votes[cat] += weight
+            if weight > example.get(cat, (0, ""))[0]:  # most-confirmed example
+                example[cat] = (weight, k)
+    if not votes:
+        return None
+    best = max(votes, key=votes.get)
+    if Decimal(votes[best]) / sum(votes.values()) < SIMILAR_SHARE:
+        return None
+    return best, example[best][1]
+
+
+def habit_category(amount: Decimal, day: str, history: List[dict]) -> Optional[dict]:
+    """When the user often spends about this amount (±10%, at least ₹5) and
+    usually files it the same way, that category; else None. ``history``
+    rows: {date, amount, category} of confirmed, categorised spending."""
+    start = (date_type.fromisoformat(day) - timedelta(days=HABIT_WINDOW_DAYS)).isoformat()
+    band = max(amount * Decimal("0.10"), Decimal(5))
+    near = [h for h in history if start <= h["date"] <= day and abs(h["amount"] - amount) <= band]
+    if len({h["date"] for h in near}) < HABIT_MIN_TIMES:
+        return None
+    counts: Dict[str, int] = defaultdict(int)
+    for h in near:
+        counts[h["category"]] += 1
+    best = max(counts, key=counts.get)
+    if Decimal(counts[best]) / len(near) < HABIT_SHARE:
+        return None
+    return {"category": best, "times": counts[best], "since": min(h["date"] for h in near)}
+
+
+def spending_history(transactions: List[dict], currency: str) -> List[dict]:
+    """Confirmed, categorised spending (one row per category posting)."""
+    out = []
+    for tx in transactions:
+        if tx["kind"] != "expense" or tx["currency"] != currency:
+            continue
+        for p in tx["postings"]:
+            if p["account_id"].startswith("expense:") and not p["account_id"].endswith(":uncategorised"):
+                out.append({"date": tx["date"], "amount": p["amount"], "category": p["account_id"]})
+    return out
+
+
+def _label(category: str) -> str:
+    return category.split(":", 1)[-1].replace("_", " ")
+
+
 def suggest_line(line: dict, account: dict, accounts: Dict[str, dict], rules: Dict[tuple, dict],
-                 transactions: List[dict]) -> Dict[str, Any]:
+                 transactions: List[dict], history: Optional[List[dict]] = None) -> Dict[str, Any]:
     """Pure: one suggestion for one line."""
     effect = line_effect(line, account)
     base = {"n": line["n"], "date": line["date"], "description": line["description"],
@@ -196,7 +286,26 @@ def suggest_line(line: dict, account: dict, accounts: Dict[str, dict], rules: Di
                 "confidence": "known",
                 "why": f"{keyword.title()} is usually {category.replace('_', ' ')}. Change it once and Hymn learns."}
 
-    # 6. Unknown.
+    # 6. Names like ones the user already filed (UDUPI FOOD KITCHEN ~ UDUPI NAIVEDHYA).
+    if out_of_account:
+        similar = similar_category(key, rules, "out")
+        if similar:
+            category, example = similar
+            return {**base, "action": "create", "kind": "expense", "category": category,
+                    "confidence": "similar",
+                    "why": f"Similar to {example}, which you marked {_label(category)}."}
+
+    # 7. Habits: about the same amount, filed the same way, again and again.
+    if out_of_account and history:
+        habit = habit_category(-effect, line["date"], history)
+        if habit:
+            when = date_type.fromisoformat(habit["since"]).strftime("%-d %b")
+            return {**base, "action": "create", "kind": "expense", "category": habit["category"],
+                    "confidence": "habit",
+                    "why": f"You often spend about {money(-effect, account.get('currency', 'INR'))} on "
+                           f"{_label(habit['category'])}: {habit['times']} times since {when}."}
+
+    # 8. Unknown.
     if out_of_account:
         return {**base, "action": "create", "kind": "expense", "category": "expense:uncategorised",
                 "confidence": "new", "why": "New to Hymn. Pick a category once and Hymn learns it."}
@@ -343,8 +452,9 @@ async def suggestions(import_id: str, current_user: dict = Depends(get_current_u
     await ledger_sync.sync(db, current_user["id"])
     rules = await _load_rules(db, current_user["id"])
     txs = await _transactions_near(db, current_user["id"], doc)
+    history = spending_history(await ledger.load_transactions(db, current_user["id"]), account.get("currency"))
     done = set(doc.get("confirmed_lines", []))
-    suggested = [suggest_line(l, account, accounts, rules, txs)
+    suggested = [suggest_line(l, account, accounts, rules, txs, history)
                  for l in doc.get("lines", []) if l["n"] not in done]
     await _add_ai_guesses(db, current_user["id"], suggested)
     lines = [_with_nested(s) for s in suggested]

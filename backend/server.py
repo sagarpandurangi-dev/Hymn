@@ -2434,6 +2434,55 @@ async def list_required_checkins(
     return result
 
 
+async def _spending_from_ledger(user_id: str, date: str, entries: list, day: dict) -> dict:
+    """Today's spending after conversion: ledger entries for the day, shown
+    with their check-in's details when they came from one."""
+    from decimal import Decimal as _Dec
+
+    event_ids = [i for e in entries for i in e["event_ids"]]
+    checkin_of = {
+        ev["id"]: ev.get("checkin_id")
+        for ev in await db.financial_events.find(
+            {"user_id": user_id, "id": {"$in": event_ids}}, {"_id": 0, "id": 1, "checkin_id": 1},
+        ).to_list(length=None)
+    } if event_ids else {}
+    checkin_ids = [c for c in checkin_of.values() if c]
+    checkins = {
+        c["id"]: c
+        for c in await db.checkins.find(
+            {"user_id": user_id, "id": {"$in": checkin_ids}},
+            {"_id": 0, "id": 1, "title": 1, "time": 1, "notes": 1,
+             "goal_id": 1, "task_id": 1, "expected_outcome_id": 1},
+        ).to_list(length=None)
+    } if checkin_ids else {}
+    groups: dict = {}
+    for e in entries:
+        c = next((checkins[checkin_of[i]] for i in e["event_ids"]
+                  if checkin_of.get(i) in checkins), {})
+        g = groups.setdefault(e["currency"], {"currency": e["currency"], "total": _Dec(0), "entries": []})
+        g["total"] += e["amount"]
+        g["entries"].append({
+            "id": c.get("id") or e["id"],
+            "title": c.get("title") or e["description"],
+            "time": c.get("time") or "",
+            "amount": str(e["amount"]),
+            "notes": c.get("notes") or "",
+            "goal_id": c.get("goal_id"),
+            "task_id": c.get("task_id"),
+            "expected_outcome_id": c.get("expected_outcome_id"),
+        })
+    return {
+        "date": date,
+        "groups": [
+            {"currency": g["currency"], "total": str(g["total"].quantize(_Dec("0.01"))),
+             "entries": sorted(g["entries"], key=lambda e: e.get("time") or "")}
+            for g in sorted(groups.values(), key=lambda g: g["currency"])
+        ],
+        "needs_account": day["needs_account"],
+        "needs_review": day["needs_review"],
+    }
+
+
 @api_router.get("/spending")
 async def get_spending(
     date: str = Query(..., description="Local YYYY-MM-DD to fetch spending for"),
@@ -2462,9 +2511,12 @@ async def get_spending(
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
 
     from decimal import Decimal as _Dec
-    from money_service import daily_spending, _to_decimal
+    from money_service import daily_spending, _to_decimal, ledger_day_entries as money_ledger_day_entries
 
     day = await daily_spending(db, current_user["id"], date)
+    ledger_entries = await money_ledger_day_entries(db, current_user["id"], date)
+    if ledger_entries is not None:
+        return await _spending_from_ledger(current_user["id"], date, ledger_entries, day)
     checkin_ids = [e["checkin_id"] for e in day["counted"] if e.get("checkin_id")]
     checkins = {
         c["id"]: c
