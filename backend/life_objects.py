@@ -113,6 +113,47 @@ def belongs(obj: dict, tx: dict, claimed: Dict[str, int], today: str) -> bool:
     return any(w.upper() in (tx.get("description") or "").upper() for w in words if w)
 
 
+def _add_months(day: str, n: int) -> str:
+    d = date_type.fromisoformat(day)
+    y, m = divmod(d.month - 1 + n, 12)
+    y, m = d.year + y, m + 1
+    import calendar
+    return date_type(y, m, min(d.day, calendar.monthrange(y, m)[1])).isoformat()
+
+
+def loan_schedule(obj: dict) -> List[dict]:
+    """EMI by EMI: date, EMI, interest, principal and what's still owed.
+
+    Reducing balance (the usual bank loan): EMI = P·r·(1+r)^n / ((1+r)^n − 1)
+    with r the monthly rate; each month's interest is on what's still owed.
+    Flat: interest on the original amount spread evenly. An EMI from the
+    loan document, if given, is used as is (the last EMI absorbs rounding).
+    """
+    principal = _dec(obj.get("loan_principal"))
+    n = int(obj.get("tenure_months") or 0)
+    start = obj.get("first_emi_date")
+    if not principal or not n or not start:
+        return []
+    rate = _dec(obj.get("annual_rate_percent")) / Decimal(1200)
+    if obj.get("method") == "flat":
+        interest_each = (principal * rate * n / n).quantize(CENT)
+        emi = _dec(obj.get("emi")) or ((principal / n) + interest_each).quantize(CENT)
+    elif rate:
+        growth = (1 + rate) ** n
+        emi = _dec(obj.get("emi")) or (principal * rate * growth / (growth - 1)).quantize(CENT)
+    else:
+        emi = _dec(obj.get("emi")) or (principal / n).quantize(CENT)
+    rows, owed = [], principal
+    for i in range(1, n + 1):
+        interest = interest_each if obj.get("method") == "flat" else (owed * rate).quantize(CENT)
+        pay = emi if i < n else (owed + interest).quantize(CENT)
+        part = min(pay - interest, owed)
+        owed -= part
+        rows.append({"n": i, "date": _add_months(start, i - 1), "emi": _out(pay), "interest": _out(interest),
+                     "principal": _out(part), "owed_after": _out(owed)})
+    return rows
+
+
 def value_lost_between(obj: dict, start: str, end: str) -> Decimal:
     """Straight-line value an asset lost between two dates (inclusive of
     whole days), 0 for anything else or without a price and life."""
@@ -249,6 +290,13 @@ class LifeObjectCreate(BaseModel):
     match_words: List[str] = Field(default_factory=list)
     unit: Optional[Literal["km", "visit", "session", "use", "pack", "day", "month"]] = None
     notes: str = ""
+    # Loans: the terms (or the EMI from the loan document).
+    loan_principal: Any = None
+    annual_rate_percent: Any = None
+    tenure_months: Optional[int] = Field(default=None, ge=1, le=480)
+    first_emi_date: Optional[str] = None
+    method: Literal["reducing", "flat"] = "reducing"
+    emi: Any = None
 
 
 class LifeObjectUpdate(BaseModel):
@@ -264,6 +312,12 @@ class LifeObjectUpdate(BaseModel):
     ended_on: Optional[str] = None
     sold_for: Any = None
     notes: Optional[str] = None
+    loan_principal: Any = None
+    annual_rate_percent: Any = None
+    tenure_months: Optional[int] = Field(default=None, ge=1, le=480)
+    first_emi_date: Optional[str] = None
+    method: Optional[Literal["reducing", "flat"]] = None
+    emi: Any = None
 
 
 class TagRequest(BaseModel):
@@ -287,7 +341,10 @@ def _valid_date(v: Optional[str], field: str) -> None:
 
 
 def _clean(doc: dict) -> dict:
-    for f in ("purchase_price", "acquisition_costs", "residual_value", "sold_for"):
+    if doc.get("first_emi_date"):
+        _valid_date(doc["first_emi_date"], "first_emi_date")
+    for f in ("purchase_price", "acquisition_costs", "residual_value", "sold_for", "loan_principal",
+              "annual_rate_percent", "emi"):
         if doc.get(f) not in (None, ""):
             amount = _dec(doc[f])
             if amount < 0:
@@ -301,7 +358,8 @@ def _clean(doc: dict) -> dict:
 
 def _public(obj: dict) -> dict:
     out = {k: v for k, v in obj.items() if k not in ("_id", "user_id")}
-    for f in ("purchase_price", "acquisition_costs", "residual_value", "sold_for"):
+    for f in ("purchase_price", "acquisition_costs", "residual_value", "sold_for", "loan_principal",
+              "annual_rate_percent", "emi"):
         if out.get(f) is not None:
             out[f] = _out(_dec(out[f]))
     return out
@@ -372,6 +430,19 @@ async def detail(obj_id: str, current_user: dict = Depends(get_current_user)):
     objs, txs, claimed = await _load(db, current_user["id"])
     today = date_type.today().isoformat()
     return {**_public(o), "ltc": compute_ltc(o, txs, await _checkins(db, current_user["id"], o), claimed, today)}
+
+
+@life_objects_router.get("/{obj_id}/schedule")
+async def schedule(obj_id: str, current_user: dict = Depends(get_current_user)):
+    """The loan's EMI schedule with principal and interest."""
+    _premium(current_user)
+    o = await _own(get_db(), current_user["id"], obj_id)
+    rows = loan_schedule(o)
+    if not rows:
+        raise HTTPException(status_code=400, detail="Add the loan amount, rate, tenure and first EMI date first.")
+    total_interest = sum((Decimal(r["interest"]) for r in rows), ZERO)
+    return {"emi": rows[0]["emi"], "total_interest": _out(total_interest),
+            "total_paid": _out(sum((Decimal(r["emi"]) for r in rows), ZERO)), "rows": rows}
 
 
 @life_objects_router.patch("/{obj_id}")
