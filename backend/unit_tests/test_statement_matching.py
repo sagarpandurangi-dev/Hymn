@@ -129,8 +129,8 @@ def test_hymn_learns_from_confirmations_and_corrections(client, user, server):
         _line(2, "2026-10-03", "NEFT SALARY ZEISS", credit="100000"),
     ], account_id="bank")
     s = _suggest(client, user, sid)["lines"]
-    assert (s[0]["confidence"], s[0]["category"]) == ("known", "expense:food")
-    assert s[0]["why"] == "Zomato is usually food. Change it once and Hymn learns."
+    assert (s[0]["confidence"], s[0]["category"]) == ("known", "expense:ordering_in")
+    assert s[0]["why"] == "Zomato is usually ordering in. Change it once and Hymn learns."
     assert (s[1]["confidence"], s[1]["category"]) == ("guess", "income:salary")
     assert s[1]["suggestion"]["category"] == "income:salary" and "n" not in s[1]["suggestion"]
     _accept_all(client, user, sid, {1: {"category": "expense:food"}})
@@ -271,7 +271,7 @@ def test_ai_guesses_each_unknown_merchant_once_per_user(client, user, server, mo
 
     async def guess(lines, expense, income):
         calls.append(sorted(l["description"] for l in lines))
-        assert "food" in expense and "salary" in income
+        assert "eating_out" in expense and "salary" in income
         return {l["n"]: "expense:food" for l in lines if "VARIETIES" in l["description"]}
     monkeypatch.setattr(statements_ai, "guess_categories", guess)
     sid = _statement(server, user, [_line(1, "2026-10-02", "UPI/111/SRI KRISHNA VARIETIES", debit="90"),
@@ -305,17 +305,17 @@ def test_known_merchants_need_no_ai(client, user, server, no_ai):
                                     _line(2, "2026-10-03", "INDIAN OIL CORP HSR", debit="2000"),
                                     _line(3, "2026-10-04", "NETFLIX.COM", debit="649")], account_id="bank")
     lines = {l["n"]: l for l in _suggest(client, user, sid)["lines"]}
-    assert [lines[n]["category"] for n in (1, 2, 3)] == ["expense:food", "expense:fuel", "expense:subscriptions"]
+    assert [lines[n]["category"] for n in (1, 2, 3)] == ["expense:ordering_in", "expense:fuel", "expense:subscriptions"]
     assert all(l["confidence"] == "known" for l in lines.values())
     assert no_ai == []
 
 
 @pytest.mark.parametrize("desc,expected", [
-    ("UPI/4521/SWIGGY8/swiggy@icici", "food"),
+    ("UPI/4521/SWIGGY8/swiggy@icici", "ordering_in"),
     ("SWIGGY INSTAMART BLR", "groceries"),
-    ("Uber India Systems", "transport"),
-    ("FASTAG RECHARGE", "transport"),
-    ("BESCOM BILL PAYMENT", "bills"),
+    ("Uber India Systems", "cabs"),
+    ("FASTAG RECHARGE", "parking_tolls"),
+    ("BESCOM BILL PAYMENT", "electricity_water"),
     ("GST ON ANNUAL FEE", "fees"),
     ("POS COLA STORE", None),          # OLA must not match inside COLA
     ("UPI/NANDINI R/xx", None),        # people's names are not merchants

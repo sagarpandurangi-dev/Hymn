@@ -59,13 +59,12 @@ LIABILITY_TYPES = frozenset({
 })
 LOAN_TYPES = frozenset({"personal_loan", "home_loan", "vehicle_loan", "other_liability"})
 
-# Starter categories; user-defined ones will join as ``category:<id>``.
-EXPENSE_CATEGORIES = (
-    "uncategorised", "food", "groceries", "fuel", "transport", "shopping", "bills", "rent",
-    "health", "education", "entertainment", "travel", "family", "personal_care",
-    "insurance", "taxes", "charity", "subscriptions", "interest", "fees", "depreciation",
-)
-INCOME_CATEGORIES = ("uncategorised", "salary", "bonus", "interest", "gift", "refund", "other")
+# Categories come from the two-level tree in ``categories`` (older flat keys
+# stay valid); user-defined ones will join as ``category:<id>``.
+import categories as _categories  # noqa: E402
+
+EXPENSE_CATEGORIES = tuple(_categories.EXPENSE)
+INCOME_CATEGORIES = tuple(_categories.INCOME)
 
 NOMINAL_ACCOUNTS: Dict[str, str] = {
     **{f"expense:{c}": "expense" for c in EXPENSE_CATEGORIES},
@@ -505,6 +504,12 @@ async def void_transaction(tx_id: str, current_user: dict = Depends(get_current_
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Transaction not found or already void")
     return {"detail": "Voided"}
+
+
+@ledger_router.get("/categories")
+async def get_categories(current_user: dict = Depends(get_current_user)):
+    """The two-level category tree for pickers: groups → categories."""
+    return _categories.tree()
 
 
 @ledger_router.get("/balances")
