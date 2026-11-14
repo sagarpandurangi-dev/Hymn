@@ -141,3 +141,18 @@ def test_check_shows_price_and_counts_demand(client, server):
     assert later["how"] == "fixed" and later["price_inr"] > first["price_inr"]
     free = client.get("/api/hymn-id/check/S482915", headers=users[0]["headers"]).json()
     assert "price_inr" not in free or free["price_inr"] == 0
+
+
+def test_lookalike_aliases_are_the_same(client, server, monkeypatch):
+    from hymn_ids import skeleton
+    assert skeleton("SAGAR77") == skeleton("5AGAR77") == skeleton("SA6AR77")
+    assert alias_problem("S1Z3456") is not None          # reads as the real ID S123456
+    assert alias_problem("SB12345") is not None          # reads as S812345
+    monkeypatch.setenv("HYMN_ALIAS_GRANTS", "owner2@example.com=SAGAR77,copy@example.com=5AGAR77")
+    owner = _signup(client, "owner2@example.com", name="Sagar")
+    assert client.get("/api/auth/me", headers=owner["headers"]).json()["hymn_alias"] == "SAGAR77"
+    copy = _signup(client, "copy@example.com")
+    assert client.get("/api/auth/me", headers=copy["headers"]).json()["hymn_alias"] is None
+    assert client.get("/api/hymn-id/check/5AGAR77", headers=copy["headers"]).json()["available"] is False
+    found = client.get("/api/hymn-id/find/5AGAR77", headers=copy["headers"]).json()
+    assert found["alias"] == "SAGAR77"
