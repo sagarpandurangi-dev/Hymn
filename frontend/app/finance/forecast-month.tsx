@@ -27,12 +27,16 @@ export default function ForecastMonth() {
         <ScrollView contentContainerStyle={styles.scroll}>
           <FoldHero currency={currency} amount={formatMoney(m?.projected_liquid_end_of_month || "0")} size="xl" caption="Projected liquid end of month" />
           {m?.shortfall ? <FoldPill label="Shortfall" tone="err" /> : null}
+          {typeof cur?.basis === "string" && cur.basis.trim() ? (
+            <Text style={styles.basis} testID="forecast-month-basis">{cur.basis}</Text>
+          ) : null}
 
           <FoldSectionHeader label="Assumptions" />
           <FoldCard>
             {[
               ["Recurring income", m?.recurring_income],
               ["Recurring outflows", m?.recurring_outflows],
+              ["Everyday spending", m?.usual_spending],
               ["Reserved commitments", m?.reserved_commitments_amount],
               ["Projected net worth EoM", m?.projected_net_worth_end_of_month],
             ].map(([label, val], idx) => (
@@ -74,4 +78,5 @@ const styles = StyleSheet.create({
   rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: financeColors.divider },
   linkText: { fontSize: 13, color: financeColors.accent, fontWeight: "600" },
   empty: { fontSize: 13, color: financeColors.inkMuted, padding: financeSpace.lg, fontStyle: "italic", textAlign: "center" },
+  basis: { fontSize: 12, color: financeColors.inkMuted, lineHeight: 17 },
 });

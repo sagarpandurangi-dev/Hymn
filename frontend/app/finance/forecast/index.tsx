@@ -25,6 +25,9 @@ export default function ForecastFull() {
       {loading ? <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} /> : (
         <ScrollView contentContainerStyle={styles.scroll}>
           <Text style={styles.formula}>Projected liquid = opening liquid + income − outflows − reservations (per month, running).</Text>
+          {typeof cur?.basis === "string" && cur.basis.trim() ? (
+            <Text style={styles.basis} testID="forecast-basis">{cur.basis}</Text>
+          ) : null}
           {(cur?.months || []).length === 0 ? (
             <FoldCard><View style={{ padding: financeSpace.lg }}><Text style={styles.empty}>No forecast data yet.</Text></View></FoldCard>
           ) : (
@@ -34,7 +37,7 @@ export default function ForecastFull() {
                   key={m.month}
                   first={idx === 0}
                   label={monthLabel(m.month)}
-                  meta={`Income ${formatMoney(m.recurring_income)} · outflow ${formatMoney(m.recurring_outflows)} · reserved ${formatMoney(m.reserved_commitments_amount)}`}
+                  meta={`Income ${formatMoney(m.recurring_income)} · outflow ${formatMoney(m.recurring_outflows)}${m.usual_spending != null ? ` · everyday spending ${formatMoney(String(m.usual_spending))}` : ""} · reserved ${formatMoney(m.reserved_commitments_amount)}`}
                   right={<FoldAmount currency={currency} value={formatMoney(m.projected_liquid_end_of_month)} tone={m.shortfall ? "negative" : "ink"} />}
                   onPress={() => router.push(`/finance/forecast-month?currency=${currency}&month=${m.month}`)}
                   chevron
@@ -52,5 +55,6 @@ export default function ForecastFull() {
 const styles = StyleSheet.create({
   scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
   formula: { fontSize: 11.5, color: financeColors.inkMuted, fontStyle: "italic", letterSpacing: 0.3, marginBottom: 4 },
+  basis: { fontSize: 12, color: financeColors.inkMuted, lineHeight: 17, marginBottom: 4 },
   empty: { fontSize: 13, color: financeColors.inkMuted, textAlign: "center", fontStyle: "italic" },
 });

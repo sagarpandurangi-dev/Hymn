@@ -3,7 +3,7 @@
  *
  * These components ONLY change presentation. Any data, callbacks, testIDs and
  * IDs must be forwarded exactly as passed by the parent — the finance primitives
- * (position, commitments, forecast, events, scenarios) remain untouched.
+ * (position, commitments, forecast, events) remain untouched.
  */
 
 import React from "react";

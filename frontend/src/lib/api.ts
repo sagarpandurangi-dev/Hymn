@@ -696,19 +696,6 @@ export const api = {
   rebalanceCandidates: (currency: string, exclude_id?: string) =>
     request<any[]>(`/finance/rebalance-candidates?currency=${encodeURIComponent(currency)}${exclude_id ? `&exclude_id=${encodeURIComponent(exclude_id)}` : ""}`, { auth: true }),
 
-  saveScenario: (payload: { name: string; currency: string; assumptions: any }) =>
-    request<any>("/finance/scenarios/save", { method: "POST", body: payload, auth: true }),
-  listScenarios: () => request<any[]>("/finance/scenarios/list", { auth: true }),
-  getScenario: (id: string) => request<any>(`/finance/scenarios/detail/${id}`, { auth: true }),
-  updateScenario: (id: string, payload: { name: string; currency: string; assumptions: any }) =>
-    request<any>(`/finance/scenarios/detail/${id}`, { method: "PUT", body: payload, auth: true }),
-  duplicateScenario: (id: string) =>
-    request<any>(`/finance/scenarios/detail/${id}/duplicate`, { method: "POST", auth: true }),
-  deleteScenario: (id: string) =>
-    request<{ detail: string }>(`/finance/scenarios/detail/${id}`, { method: "DELETE", auth: true }),
-  evaluateScenario: (id: string) =>
-    request<any>(`/finance/scenarios/detail/${id}/evaluate`, { method: "POST", auth: true }),
-
   getPlanningSpace: (weekStartDate?: string) => {
     const query = weekStartDate
       ? `?week_start_date=${encodeURIComponent(weekStartDate)}`

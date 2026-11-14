@@ -388,12 +388,15 @@ export default function FinanceScreen() {
                   ))}
                 </FoldCard>
               ) : null}
+              {typeof f.basis === "string" && f.basis.trim() ? (
+                <Text style={styles.basisNote} testID={`finance-forecast-basis-${f.currency}`}>{f.basis}</Text>
+              ) : null}
             </View>
           );
         })}
 
         {/* ============================================================
-           5. Scenarios & Expected income — quick links
+           5. Expected income — quick link
         ============================================================ */}
         {position.length > 0 ? (
           <View style={styles.blockGap}>
@@ -401,13 +404,6 @@ export default function FinanceScreen() {
             <FoldCard>
               <FoldRow
                 first
-                label="Scenarios"
-                meta="Simulate salary, spend and one-off changes. Sandbox never touches real data."
-                onPress={() => router.push(`/finance/scenarios-index`)}
-                chevron
-                testID="finance-scenarios"
-              />
-              <FoldRow
                 label="Expected income"
                 meta="One-time future income. Expected items need confirmation before entering the forecast."
                 onPress={() => router.push(`/finance/expected-income`)}
@@ -576,6 +572,7 @@ const styles = StyleSheet.create({
   moreText: { color: financeColors.accent, fontSize: 12.5, fontWeight: "700", letterSpacing: 0.3 },
   subHead: { paddingHorizontal: financeSpace.lg, paddingTop: financeSpace.md, paddingBottom: 6 },
   subHeadText: { fontSize: 11.5, color: financeColors.inkMuted, fontStyle: "italic" },
+  basisNote: { fontSize: 12, color: financeColors.inkMuted, lineHeight: 17, marginTop: financeSpace.sm },
   emptyRow: { padding: financeSpace.lg, paddingVertical: financeSpace.xl },
   emptyRowText: { fontSize: 13, color: financeColors.inkMuted, lineHeight: 19 },
   fxNotice: {

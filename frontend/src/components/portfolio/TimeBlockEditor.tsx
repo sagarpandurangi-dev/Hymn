@@ -43,7 +43,7 @@ type SubmitPayload = {
   title: string;
   commitment_type: string;
   flexibility: "fixed" | "flexible";
-  /** One entry per record to persist. Cross-midnight blocks emit 2 entries per selected day. */
+  /** One entry per selected day, with the real start/end (overnight blocks are not split). */
   entries: { day: DayOfWeek; start_time: string; end_time: string }[];
 };
 
@@ -66,9 +66,9 @@ type Props = {
  *     existing block is single-day (no cloning) to avoid surprising deletes.
  *
  *  2. Cross-midnight: end_time may be earlier than start_time (e.g. sleep
- *     23:30 → 06:30). We surface an inline hint AND split each selected day
- *     into two records — the "night" half ends at 24:00 on day D and the
- *     "morning" half starts at 00:00 on day D+1.
+ *     23:30 → 06:30). We surface an inline "ends next day" hint and save ONE
+ *     record per selected day with the real times; the backend counts the
+ *     end into the next morning.
  */
 export default function TimeBlockEditor({ visible, day, initial, existingByDay, onSubmit, onClose }: Props) {
   const [title, setTitle] = useState(initial?.title || "");
@@ -117,11 +117,11 @@ export default function TimeBlockEditor({ visible, day, initial, existingByDay, 
     if (timeErr) { setError(timeErr); return; }
     if (selectedDays.length === 0) { setError("Select at least one day."); return; }
 
-    // Pre-flight overlap check per selected day, taking cross-midnight into
-    // account. When a block wraps, both the "night" half AND the "morning"
-    // half must fit their respective days without overlapping existing
-    // records. `initial.id` is treated as the block being replaced so we
-    // don't self-collide during an edit.
+    // Pre-flight overlap check per selected day. An overnight block is
+    // checked as its evening part on day D and its morning part on D+1, but
+    // it is SAVED as a single record (the backend counts an end earlier
+    // than the start into the next morning). `initial.id` is treated as the
+    // block being replaced so we don't self-collide during an edit.
     for (const d of selectedDays) {
       const pieces = splitCrossMidnight(d, startTime, endTime);
       for (const p of pieces) {
@@ -133,13 +133,12 @@ export default function TimeBlockEditor({ visible, day, initial, existingByDay, 
       }
     }
 
-    // Build final entries list: one splitCrossMidnight per selected day.
-    const entries: SubmitPayload["entries"] = [];
-    for (const d of selectedDays) {
-      for (const p of splitCrossMidnight(d, startTime, endTime)) {
-        entries.push(p);
-      }
-    }
+    // One entry per selected day with the real start and end (e.g. 23:00 → 07:00).
+    const entries: SubmitPayload["entries"] = selectedDays.map((d) => ({
+      day: d,
+      start_time: startTime,
+      end_time: endTime,
+    }));
 
     setSaving(true);
     try {
@@ -192,8 +191,8 @@ export default function TimeBlockEditor({ visible, day, initial, existingByDay, 
             </View>
             {wraps && (
               <Text style={styles.info} testID="time-block-crossmidnight-info">
-                Crosses midnight — will be saved as two blocks (
-                {selectedDays.map((d) => DAY_LABELS[d]).join(", ")} → {selectedDays.map((d) => DAY_LABELS[nextDay(d)]).join(", ")}).
+                Ends next day (
+                {selectedDays.map((d) => DAY_LABELS[d]).join(", ")} → {selectedDays.map((d) => DAY_LABELS[nextDay(d)]).join(", ")} morning).
               </Text>
             )}
 
