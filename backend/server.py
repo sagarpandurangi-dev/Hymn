@@ -507,6 +507,9 @@ class CheckInCreate(BaseModel):
     # (`updated_at` bumped) but its status is preserved — a check-in on a
     # task is an *update*, not necessarily a completion.
     complete_task: bool = False
+    # How long it took, in minutes. Required once HYMN_REQUIRE_CHECKIN_DURATION
+    # is on (switched on when the app's time buttons ship).
+    duration_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
 
 
 class CheckInUpdate(BaseModel):
@@ -521,6 +524,7 @@ class CheckInUpdate(BaseModel):
     money_currency: Optional[str] = None
     account_id: Optional[str] = None
     occurred_at: Optional[str] = None
+    duration_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
 
 
 class CheckInResponse(BaseModel):
@@ -544,6 +548,7 @@ class CheckInResponse(BaseModel):
     money_currency: Optional[str] = None
     # Batch 2A: authoritative account linkage for money-bearing check-ins.
     account_id: Optional[str] = None
+    duration_minutes: Optional[int] = None
     created_at: str
     updated_at: str
 
@@ -834,6 +839,7 @@ def checkin_to_response(c: dict) -> CheckInResponse:
         source=c.get("source", "manual"),
         outcome_type=c.get("outcome_type"),
         data=c.get("data") or {},
+        duration_minutes=c.get("duration_minutes"),
         money_spent=_money_str(c.get("money_spent")),
         money_currency=c.get("money_currency"),
         account_id=c.get("account_id"),
@@ -1974,6 +1980,8 @@ async def list_checkins(
 
 @api_router.post("/checkins", response_model=CheckInResponse, status_code=201)
 async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_current_user)):
+    if body.duration_minutes is None and os.environ.get("HYMN_REQUIRE_CHECKIN_DURATION", "").lower() in ("1", "true", "yes"):
+        raise HTTPException(status_code=400, detail="How long did it take? Pick a time.")
     if body.type not in CHECKIN_TYPES:
         raise HTTPException(status_code=400, detail=f"Type must be one of {sorted(CHECKIN_TYPES)}")
     if body.source not in CHECKIN_SOURCES:
@@ -2098,6 +2106,7 @@ async def create_checkin(body: CheckInCreate, current_user: dict = Depends(get_c
         "source": body.source,
         "outcome_type": outcome_type,
         "data": body.data or {},
+        "duration_minutes": body.duration_minutes,
         "money_spent": stored_money_spent,
         "money_currency": stored_money_currency,
         # Batch 2A: preserve the account linkage for money-bearing
@@ -2897,6 +2906,7 @@ from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
 import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
 from reports import reports_router  # noqa: E402
+from time_reports import time_reports_router  # noqa: E402
 from family import family_router, ensure_family_indexes  # noqa: E402
 from life_objects import life_objects_router, ensure_life_object_indexes  # noqa: E402
 from hymn_ids import hymn_id_router, ensure_hymn_id_indexes, ensure_hymn_id  # noqa: E402
@@ -2915,6 +2925,7 @@ api_router.include_router(inbox_router)
 api_router.include_router(nudges.nudges_router)
 api_router.include_router(ledger_router)
 api_router.include_router(reports_router)
+api_router.include_router(time_reports_router)
 api_router.include_router(family_router)
 api_router.include_router(life_objects_router)
 api_router.include_router(hymn_id_router)

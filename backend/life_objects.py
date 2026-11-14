@@ -280,7 +280,7 @@ def compute_ltc(obj: dict, txs: List[dict], checkins: List[dict], claimed: Dict[
     getting = acquisition - price if obj["type"] == "asset" else acquisition
     total = getting + value_lost + running_total + financing_total - recovered
 
-    minutes = sum(_dec((c.get("data") or {}).get("minutes")) for c in checkins)
+    minutes = sum((_dec(c.get("duration_minutes")) or _dec((c.get("data") or {}).get("minutes"))) for c in checkins)
     usage, unit = None, obj.get("unit")
     if unit == "km":
         readings = sorted(_dec((c.get("data") or {}).get("odometer")) for c in checkins
@@ -430,7 +430,8 @@ async def _checkins(db, user_id: str, obj: dict) -> List[dict]:
     if not obj.get("project_id"):
         return []
     return await db.checkins.find({"user_id": user_id, "project_id": obj["project_id"]},
-                                  {"_id": 0, "date": 1, "data": 1, "money_spent": 1}).to_list(length=None)
+                                  {"_id": 0, "date": 1, "data": 1, "money_spent": 1,
+                                   "duration_minutes": 1}).to_list(length=None)
 
 
 @life_objects_router.post("", status_code=201)
