@@ -79,7 +79,7 @@ Plans and decisions: `docs/plans/finance-audit.md`. API notes for Emergent:
 - Matching must learn from the user's choices and suggest next time.
 - One free Emergent publish: the published build must be the tester beta.
   Before beta: rotate the MongoDB password and Anthropic key (both appeared
-  in chat), move Railway to Singapore, push notifications need a native build
+  in chat), push notifications need a native build
   with Firebase.
 
 ## Roadmap
