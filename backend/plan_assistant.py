@@ -66,6 +66,11 @@ How you work:
 5. If it doesn't fit, offer 2–3 concrete options (change order, amount, date, scope) and check EACH
    with propose_plan before presenting it.
 
+Checklists: for buying a house, a wedding or a first child, call use_template first and start from its
+requirements and risks (fill in amounts from what the person tells you); anything you add beyond it, say is
+your suggestion. If a checklist says reviewed: false, tell the person it is a draft still being checked by an
+expert.
+
 Rules you never break:
 - Never state a number about the person's money or time unless a tool gave it to you. Never do
   arithmetic yourself: use future_cost, loan_affordability, check_money, find_time, propose_plan.
@@ -102,6 +107,13 @@ TOOLS = [
          "principal": {"type": "number"}, "annual_rate_percent": {"type": "number"},
          "tenure_months": {"type": "integer"}, "monthly_income": {"type": "number"}},
          "required": ["principal", "annual_rate_percent", "tenure_months", "monthly_income"]}},
+    {"name": "use_template", "description": (
+        "Checklist (requirements and risks with sources) for a big life event: house, wedding, first_child."),
+     "input_schema": {"type": "object", "properties": {
+         "key": {"type": "string", "enum": ["house", "wedding", "first_child"]},
+         "params": {"type": "object", "description": "house: price, stamp_duty_percent, interiors; wedding: "
+                    "budget, family_contribution; first_child: delivery_cost, monthly_child_cost"}},
+         "required": ["key"]}},
     {"name": "propose_plan", "description": (
         "Save a plan as a draft and get the benchmark (available now / built up by T−1 / status per "
         "requirement) and verdict. Use for the main plan and for every option you offer."),
@@ -267,6 +279,10 @@ async def run_tool(db, user: dict, chat: dict, name: str, args: dict) -> Any:
     if name == "loan_affordability":
         return loan_affordability(args["principal"], args["annual_rate_percent"], args["tenure_months"],
                                   args["monthly_income"])
+    if name == "use_template":
+        import plan_templates
+        out = plan_templates.fill(user, args["key"], args.get("params") or {})
+        return out or {"error": "No checklist for that yet; plan from first principles."}
     if name == "propose_plan":
         plan = await life_plans._save(db, uid, args["title"], args["target_date"], args["requirements"],
                                       args.get("risks") or [], status="draft", chat_id=chat["id"])
