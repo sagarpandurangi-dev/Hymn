@@ -281,10 +281,12 @@ def _clean_requirement(r: dict, target: str) -> dict:
     return {**r, "id": str(uuid.uuid4())}
 
 
-async def _save(db, user_id: str, title: str, target: str, requirements: List[dict], risks: List[dict]) -> dict:
+async def _save(db, user_id: str, title: str, target: str, requirements: List[dict], risks: List[dict],
+                status: str = "active", chat_id: Optional[str] = None) -> dict:
     _date(target, "target_date")
     plan = {"id": str(uuid.uuid4()), "user_id": user_id, "title": title.strip(), "target_date": target,
-            "status": "active", "requirements": [_clean_requirement(r, target) for r in requirements],
+            "status": status, "chat_id": chat_id,
+            "requirements": [_clean_requirement(r, target) for r in requirements],
             "risks": [{**k, "id": str(uuid.uuid4())} for k in risks], "created_at": _now(), "updated_at": _now()}
     await db.life_plans.insert_one(dict(plan))
     plan.pop("_id", None)
@@ -390,6 +392,20 @@ async def book(plan_id: str, body: Booking, current_user: dict = Depends(get_cur
            "life_plan_id": plan_id, "requirement_id": req["id"], "title": req["what"],
            "created_at": _now(), "updated_at": _now()}
     await db.resource_allocations.insert_one(dict(doc))
+    return await _evaluated(db, current_user["id"], await _own(db, current_user["id"], plan_id))
+
+
+@life_plans_router.post("/{plan_id}/accept")
+async def accept(plan_id: str, current_user: dict = Depends(get_current_user)):
+    """The person picks this plan (e.g. one of the planner's options): it
+    becomes active; other drafts from the same conversation are dropped."""
+    db = get_db()
+    plan = await _own(db, current_user["id"], plan_id)
+    await db.life_plans.update_one({"id": plan_id}, {"$set": {"status": "active", "updated_at": _now()}})
+    if plan.get("chat_id"):
+        await db.life_plans.update_many(
+            {"user_id": current_user["id"], "chat_id": plan["chat_id"], "status": "draft", "id": {"$ne": plan_id}},
+            {"$set": {"status": "dropped", "updated_at": _now()}})
     return await _evaluated(db, current_user["id"], await _own(db, current_user["id"], plan_id))
 
 

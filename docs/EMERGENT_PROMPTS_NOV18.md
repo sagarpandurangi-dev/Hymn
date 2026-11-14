@@ -76,6 +76,18 @@ Every prompt starts with the two safety lines; keep them.
 >
 > Tell me what you changed.
 
+## 7. The new planner
+
+> Do not modify anything under `backend/`. Do not change the backend URL in `frontend/src/lib/api.ts`.
+>
+> Replace the planning chat with the new planner (keep the old screen reachable from Settings as "Old planner" for now).
+> 1. **Chat:** `POST /api/plan-chat` with `{message, chat_id}` (no `chat_id` for a new conversation) → `{chat_id, reply, latest_plan, plan_ids}`. Show `reply` as the assistant's message. History: `GET /api/plan-chat/{chat_id}` → `turns[]` (`role`, `text`). A 503 means "The planner is unavailable right now" — show it and keep the typed message.
+> 2. **Plan card** under the chat whenever `latest_plan` is present: title, target date, a verdict badge (`fits_now` "Fits now", `fits_by_then` "Fits by then", `needs_answers` "Needs your answers", `doesnt_fit` "Doesn't fit yet"), then **What must go right** (`requirements[]`: area, `what`, and by `kind`: money → Needed `amount`, Available now `available_now`, By then `built_up_by_then`, Short `gap`; time → free `slots` with a "Book" button calling `POST /api/life-plans/{id}/book` with `{requirement_id, date, start, minutes}`; condition → Yes / No / Not yet buttons calling `POST /api/life-plans/{id}/requirements/{rid}/answer`), each with a status tick (`now` ✓, `by_then` ✓ "by then", `short` ✗, `unknown` ?). Then **What may stop it** (`risks[]`: what, likelihood, early warning, what to do).
+> 3. When the conversation produced several plans (`plan_ids`), let the person swipe between them (`GET /api/life-plans/{id}`) and pick one with **"Go with this"** (`POST /api/life-plans/{id}/accept`).
+> 4. A **My plans** list from `GET /api/life-plans` (active plans with their verdict), opening the same card.
+>
+> Tell me what you changed.
+
 ## Optional, if credits remain
 
 > Do not modify anything under `backend/`. Statement review screen: (1) "Accept all guesses" accepts every line's current suggestion except `confidence` = `new`, then shows the confirm summary; (2) "Select" mode to set the same kind/category on several lines; (3) a search box on statement detail filtering lines by description or amount; (4) the category picker uses the two-level tree from `GET /api/ledger/categories` (groups, then categories). Tell me what you changed.
