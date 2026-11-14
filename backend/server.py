@@ -85,6 +85,8 @@ class UserResponse(BaseModel):
     portfolio_reporting_currency: Optional[str] = None
     post_creation_decomposition_preference: str = "always_ask"
     plan: str = "free"
+    hymn_id: Optional[str] = None
+    hymn_alias: Optional[str] = None
 
 
 class PostCreationDecompositionPreferenceUpdate(BaseModel):
@@ -677,6 +679,8 @@ def user_to_response(u: dict) -> UserResponse:
             "post_creation_decomposition_preference", "always_ask",
         ),
         plan=user_plan(u),
+        hymn_id=u.get("hymn_id"),
+        hymn_alias=u.get("hymn_alias"),
     )
 
 
@@ -892,6 +896,7 @@ async def signup(body: SignUpRequest):
         "updated_at": now,
     }
     await db.users.insert_one(user_doc)
+    await ensure_hymn_id(db, user_doc)
     token = create_access_token(user_doc)
     return TokenResponse(
         access_token=token,
@@ -915,6 +920,7 @@ async def login(body: LoginRequest):
         raise invalid_credentials
     await auth_throttle.clear(db, "login", email)
     token = create_access_token(user)
+    await ensure_hymn_id(db, user)
     return TokenResponse(access_token=token, user=user_to_response(user))
 
 
@@ -960,7 +966,7 @@ async def forgot_password(body: ForgotPasswordRequest):
 
 @api_router.get("/auth/me", response_model=UserResponse)
 async def me(current_user: dict = Depends(get_current_user)):
-    return user_to_response(current_user)
+    return user_to_response(await ensure_hymn_id(db, current_user))
 
 
 @api_router.patch("/auth/profile", response_model=UserResponse)
@@ -2890,6 +2896,7 @@ from planning_space import planning_space_router  # noqa: E402
 from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
 import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
+from hymn_ids import hymn_id_router, ensure_hymn_id_indexes, ensure_hymn_id  # noqa: E402
 from planned_money import planned_money_router, ensure_planned_money_indexes  # noqa: E402
 import ledger_conversion  # noqa: F401,E402  (registers conversion routes on ledger_router)
 from statements import statements_router, ensure_statement_indexes  # noqa: E402
@@ -2904,6 +2911,7 @@ api_router.include_router(planning_space_router)
 api_router.include_router(inbox_router)
 api_router.include_router(nudges.nudges_router)
 api_router.include_router(ledger_router)
+api_router.include_router(hymn_id_router)
 api_router.include_router(planned_money_router)
 api_router.include_router(statements_router)
 app.include_router(api_router)
@@ -2941,6 +2949,7 @@ async def startup_indexes():
     await ensure_inbox_indexes(db)
     await nudges.ensure_nudge_indexes(db)
     await ensure_ledger_indexes(db)
+    await ensure_hymn_id_indexes(db)
     await ensure_planned_money_indexes(db)
     await ensure_statement_indexes(db)
     await ensure_matching_indexes(db)
