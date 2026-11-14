@@ -2897,6 +2897,7 @@ from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
 import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
 from reports import reports_router  # noqa: E402
+from family import family_router, ensure_family_indexes  # noqa: E402
 from life_objects import life_objects_router, ensure_life_object_indexes  # noqa: E402
 from hymn_ids import hymn_id_router, ensure_hymn_id_indexes, ensure_hymn_id  # noqa: E402
 from planned_money import planned_money_router, ensure_planned_money_indexes  # noqa: E402
@@ -2914,6 +2915,7 @@ api_router.include_router(inbox_router)
 api_router.include_router(nudges.nudges_router)
 api_router.include_router(ledger_router)
 api_router.include_router(reports_router)
+api_router.include_router(family_router)
 api_router.include_router(life_objects_router)
 api_router.include_router(hymn_id_router)
 api_router.include_router(planned_money_router)
@@ -2953,6 +2955,7 @@ async def startup_indexes():
     await ensure_inbox_indexes(db)
     await nudges.ensure_nudge_indexes(db)
     await ensure_ledger_indexes(db)
+    await ensure_family_indexes(db)
     await ensure_life_object_indexes(db)
     await ensure_hymn_id_indexes(db)
     await ensure_planned_money_indexes(db)

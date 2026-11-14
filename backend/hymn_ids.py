@@ -306,6 +306,14 @@ async def check(value: str, current_user: dict = Depends(get_current_user)):
             "can_claim_now": False}
 
 
+async def resolve(db, value: str) -> Optional[str]:
+    """The user id behind a real ID or alias (look-alikes allowed), or None."""
+    row = await db.hymn_ids.find_one({"_id": canonical(value), "status": "assigned"})
+    if not row and grade(value) == "alias":
+        row = await db.hymn_ids.find_one({"kind": "alias", "skeleton": skeleton(value), "status": "assigned"})
+    return row.get("owner_user_id") if row else None
+
+
 @hymn_id_router.get("/find/{value}")
 async def find(value: str, current_user: dict = Depends(get_current_user)):
     """Find a person by real ID or alias. Returns only what an invite

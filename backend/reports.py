@@ -204,6 +204,24 @@ def _valid(day: str, field: str) -> str:
         raise HTTPException(status_code=400, detail=f"{field} must be YYYY-MM-DD")
 
 
+async def net_worth_summary(db, user_id: str, as_of: str, currency: str) -> dict:
+    """Totals by group for one person (used by the family view)."""
+    accounts, names, txs, objects = await _data(db, user_id)
+    now = net_worth_at(txs, accounts, objects, as_of, currency)
+    out = {"assets": defaultdict(Decimal), "liabilities": defaultdict(Decimal)}
+    for k, v in now.items():
+        t = "real_estate" if k.startswith("object:") else (names.get(k) or {}).get("account_type")
+        for key, _label, types in ASSET_GROUPS:
+            if t in types and v > 0:
+                out["assets"][key] += v
+        for key, _label, types in LIABILITY_GROUPS:
+            if t in types and v < 0:
+                out["liabilities"][key] += -v
+    ta, tl = sum(out["assets"].values(), ZERO), sum(out["liabilities"].values(), ZERO)
+    return {"assets": dict(out["assets"]), "liabilities": dict(out["liabilities"]),
+            "total_assets": ta, "total_liabilities": tl, "net_worth": ta - tl}
+
+
 @reports_router.get("/net-worth")
 async def net_worth(as_of: Optional[str] = None, currency: Optional[str] = None,
                     current_user: dict = Depends(get_current_user)):
