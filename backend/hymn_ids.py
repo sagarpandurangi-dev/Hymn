@@ -54,6 +54,16 @@ BLOCKED_WORDS = (
 GRADES = ("standard", "pattern", "birthday", "special", "alias")
 
 
+_TO_LETTER = str.maketrans({"0": "O", "1": "I", "L": "I", "2": "Z", "5": "S", "6": "G", "8": "B"})
+_TO_DIGIT = str.maketrans({"O": "0", "I": "1", "L": "1", "Z": "2", "S": "5", "G": "6", "B": "8"})
+
+
+def skeleton(value: str) -> str:
+    """How an alias *looks*: 5/S, 8/B, 2/Z, 6/G, 0/O and 1/I/L read alike,
+    so SAGAR77 and 5AGAR77 have the same skeleton and can't both exist."""
+    return (value or "").strip().upper().translate(_TO_LETTER)
+
+
 def canonical(value: str) -> str:
     """The form used for uniqueness: upper case, O→0, I→1."""
     return (value or "").strip().upper().replace("O", "0").replace("I", "1")
@@ -98,7 +108,7 @@ def alias_problem(value: str) -> Optional[str]:
         return "Use only letters A–Z and numbers 0–9."
     if sum(c.isalpha() for c in v) < 2:
         return "An alias needs at least 2 letters."
-    if REAL_ID.match(canonical(v)):
+    if REAL_ID.match(canonical(v)) or REAL_ID.match(v[0] + v[1:].translate(_TO_DIGIT)):
         return "That looks like a real Hymn ID (1 letter + 6 numbers); pick something else."
     if any(w in v or w in canonical(v) for w in BLOCKED_WORDS):
         return "That alias isn't available."
@@ -146,8 +156,12 @@ async def grant_alias(db, user: dict, alias: str) -> Optional[str]:
     the user ends up with (None if it couldn't be given)."""
     if user.get("hymn_alias") or alias_problem(alias) or grade(alias) != "alias":
         return user.get("hymn_alias")
+    lookalike = await db.hymn_ids.find_one({"kind": "alias", "skeleton": skeleton(alias)}, {"owner_user_id": 1})
+    if lookalike and lookalike.get("owner_user_id") != user["id"]:
+        return None  # someone has an alias that reads the same
     try:
         await db.hymn_ids.insert_one({"_id": canonical(alias), "display": alias, "kind": "alias",
+                                      "skeleton": skeleton(alias),
                                       "grade": "alias", "owner_user_id": user["id"], "status": "assigned",
                                       "granted_by": "owner", "created_at": _now()})
     except DuplicateKeyError:
@@ -280,6 +294,8 @@ async def check(value: str, current_user: dict = Depends(get_current_user)):
         return {"value": v, "valid": False, "reason": alias_problem(v)}
     db = get_db()
     taken = await db.hymn_ids.find_one({"_id": canonical(v)}, {"_id": 1})
+    if taken is None and g == "alias":
+        taken = await db.hymn_ids.find_one({"kind": "alias", "skeleton": skeleton(v)}, {"_id": 1})
     price: dict = {}
     if taken is None and g != "standard":
         await _record_interest(db, v, current_user["id"])
@@ -296,6 +312,8 @@ async def find(value: str, current_user: dict = Depends(get_current_user)):
     needs: their IDs and first name."""
     _rate_limit(current_user["id"])
     row = await get_db().hymn_ids.find_one({"_id": canonical(value), "status": "assigned"})
+    if not row and grade(value) == "alias":  # 5AGAR77 finds SAGAR77
+        row = await get_db().hymn_ids.find_one({"kind": "alias", "skeleton": skeleton(value), "status": "assigned"})
     if not row:
         raise HTTPException(status_code=404, detail="No one has that Hymn ID.")
     user = await get_db().users.find_one({"id": row["owner_user_id"]}, {"_id": 0, "name": 1, "hymn_id": 1,
@@ -309,3 +327,6 @@ async def find(value: str, current_user: dict = Depends(get_current_user)):
 async def ensure_hymn_id_indexes(db) -> None:
     await db.hymn_ids.create_index([("owner_user_id", 1), ("kind", 1)])
     await db.hymn_id_interest.create_index([("id", 1), ("day", 1)])
+    await db.hymn_ids.create_index([("kind", 1), ("skeleton", 1)])
+    async for row in db.hymn_ids.find({"kind": "alias", "skeleton": {"$exists": False}}, {"display": 1}):
+        await db.hymn_ids.update_one({"_id": row["_id"]}, {"$set": {"skeleton": skeleton(row["display"])}})
