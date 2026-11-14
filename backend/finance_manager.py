@@ -3113,9 +3113,11 @@ async def _forecast_12_months(db, user_id: str) -> dict:
       unreserved < 1x fixed_outflows for that month);
     * 'low' when any month goes negative.
     """
-    from money_service import monthly_actual_spending, reservation_amount_for_commitment  # noqa: WPS433
+    from money_service import monthly_actual_spending  # noqa: WPS433
+    import planned_money
 
     pos = await _current_position(db, user_id)
+    planned = await planned_money.load_items(db, user_id)
     liquid_by_cur = {c["currency"]: _decimal_from_stored(c["liquid_assets"]) for c in pos["currencies"]}
     assets_by_cur = {c["currency"]: _decimal_from_stored(c["total_assets"]) for c in pos["currencies"]}
     liab_by_cur = {c["currency"]: _decimal_from_stored(c["total_liabilities"]) for c in pos["currencies"]}
@@ -3134,6 +3136,8 @@ async def _forecast_12_months(db, user_id: str) -> dict:
     all_currencies = set(liquid_by_cur.keys())
     for c in reserved_docs:
         all_currencies.add(c.get("currency") or "")
+    all_currencies.update(i["currency"] for i in planned if i["currency"] and i["status"] == "active")
+    all_currencies.discard("")
 
     for cur in sorted(all_currencies):
         # Bucket reserved commitments by month
@@ -3162,20 +3166,13 @@ async def _forecast_12_months(db, user_id: str) -> dict:
         any_negative = False
         any_tight = False
         for m in months:
-            summary = await _monthly_summary(db, user_id, m, cur)
-            income = _decimal_from_stored(summary["recurring_income"])
-            outflows = (
-                _decimal_from_stored(summary["recurring_expenses"])
-                + _decimal_from_stored(summary["debt_payments"])
-                + _decimal_from_stored(summary["savings"])
-                + _decimal_from_stored(summary["investments"])
-            )
-            reserved_this_month = sum(
-                (reservation_amount_for_commitment(x) for x in reserved_by_month[m]),
-                Decimal(0),
-            )
-            planned_spend = (_decimal_from_stored(summary["recurring_expenses"])
-                             + _decimal_from_stored(summary["debt_payments"]))
+            # Everything planned, from one place (new items and the older
+            # monthly commitments, one-off commitments and expected income).
+            t = planned_money.month_totals(planned, m, cur)
+            income = t["income"]
+            planned_spend = t["spend"]
+            reserved_this_month = t["set_aside"]
+            outflows = planned_spend + t["moves"]
             # Everyday spending the plans don't cover; for this month, only
             # the days still ahead (what's spent so far is in the balance).
             everyday = max(usual - planned_spend, Decimal(0))
@@ -3192,7 +3189,9 @@ async def _forecast_12_months(db, user_id: str) -> dict:
                 any_tight = True
             rows.append({
                 "month": m,
-                "recurring_income": summary["recurring_income"],
+                "recurring_income": _quantize_out(income),
+                "maybe_income": _quantize_out(t["maybe_in"]),
+                "maybe_spending": _quantize_out(t["maybe_out"]),
                 "recurring_outflows": _quantize_out(outflows),
                 "reserved_commitments_amount": _quantize_out(reserved_this_month),
                 "reserved_commitment_ids": [x["id"] for x in reserved_by_month[m]],

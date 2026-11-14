@@ -2890,6 +2890,7 @@ from planning_space import planning_space_router  # noqa: E402
 from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
 import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
+from planned_money import planned_money_router, ensure_planned_money_indexes  # noqa: E402
 import ledger_conversion  # noqa: F401,E402  (registers conversion routes on ledger_router)
 from statements import statements_router, ensure_statement_indexes  # noqa: E402
 from statement_matching import ensure_matching_indexes  # noqa: E402  (registers matching routes)
@@ -2903,6 +2904,7 @@ api_router.include_router(planning_space_router)
 api_router.include_router(inbox_router)
 api_router.include_router(nudges.nudges_router)
 api_router.include_router(ledger_router)
+api_router.include_router(planned_money_router)
 api_router.include_router(statements_router)
 app.include_router(api_router)
 
@@ -2939,6 +2941,7 @@ async def startup_indexes():
     await ensure_inbox_indexes(db)
     await nudges.ensure_nudge_indexes(db)
     await ensure_ledger_indexes(db)
+    await ensure_planned_money_indexes(db)
     await ensure_statement_indexes(db)
     await ensure_matching_indexes(db)
     try:
