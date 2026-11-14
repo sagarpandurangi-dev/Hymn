@@ -177,13 +177,80 @@ _DIRECTORY: Dict[str, str] = {
 }
 
 
+# Finer categories within a group (see ``categories``). Anything in a
+# group's list that isn't named here goes to the group default, if any.
+_REFINE: Dict[str, Dict[str, str]] = {
+    "food": {
+        "_default": "eating_out",
+        "ordering_in": """SWIGGY, ZOMATO, EATSURE, BEHROUZ, BEHROUZ BIRYANI, FAASOS, OVEN STORY, BOX8, FRESHMENU,
+                          REBEL FOODS, MAGICPIN""",
+        "groceries": "CONDIMENTS",
+    },
+    "bills": {
+        "electricity_water": """ADANI ELECTRICITY, APEPDCL, APSPDCL, AVVNL, BESCOM, BSES, BSES RAJDHANI, BSES YAMUNA,
+                                BWSSB, CESC, CSPDCL, DGVCL, DHBVN, ELECTRIC SUPPLY, ELECTRICITY, GESCOM, HESCOM,
+                                JAL BOARD, JDVVNL, JVVNL, KSEB, MAHAVITARAN, MESCOM, MGVCL, MPPKVVCL, MSEDCL, NDPL,
+                                PGVCL, POWER DISTRIBUTION, PSPCL, TANGEDCO, TATA POWER, TNEB, TORRENT POWER, TSNPDCL,
+                                TSSPDCL, UGVCL, UHBVN, UPPCL, WATER BOARD, WATER SUPPLY, WBSEDCL""",
+        "internet_phone": """ACT BROADBAND, ACT FIBERNET, AIRTEL, AIRTEL DTH, ATRIA CONVERGENCE, BHARTI AIRTEL,
+                             BROADBAND, BSNL, D2H, DISH TV, DISHTV, EXCITEL, FIBERNET, HATHWAY, JIO, JIO FIBER,
+                             JIOFIBER, MOBILE BILL, MTNL, POSTPAID, PREPAID, RECHARGE, RELIANCE JIO, SUN DIRECT,
+                             TATA PLAY, TATA SKY, TATASKY, VIDEOCON D2H, VODAFONE, VODAFONE IDEA, YOU BROADBAND""",
+        "gas": "BHARAT GAS, BHARATGAS, HP GAS, HPGAS, INDANE, LPG, PIPED GAS",
+        "maintenance": "APARTMENT, MAINTENANCE, MYGATE, NOBROKERHOOD, SOCIETY",
+        "property_tax": "BBMP, GHMC, MCGM, PROPERTY TAX",
+    },
+    "transport": {
+        "cabs": """ANI TECHNOLOGIES, AUTO RICKSHAW, BLUSMART, CAB, CABS, MERU, NAMMA YATRI, NAMMAYATRI, OLA, OLA CABS,
+                   OLACABS, RAPIDO, ROPPEN, TAXI, UBER, UBER INDIA, UBERINDIA""",
+        "public_transport": """BEST UNDERTAKING, BMRCL, BMTC, CHENNAI METRO, DMRC, DTC, HYDERABAD METRO, KOCHI METRO,
+                               METRO, METRO CARD, METRO RAIL, METRO RECHARGE, MMRDA, MUMBAI METRO, NAMMA METRO""",
+        "parking_tolls": "FASTAG, FASTAG RECHARGE, NETC, NHAI, PARK PLUS, PARKING, PARKPLUS, TOLL, TOLL PLAZA",
+    },
+    "health": {
+        "_default": "doctor_tests",
+        "medicines": """1MG, APOLLO PHARMACY, CHEMIST, CHEMISTS, DRUG, DRUGS, FRANK ROSS, GUARDIAN PHARMACY, MEDICAL,
+                        MEDICALS, MEDPLUS, NETMEDS, NOBLE PLUS, PHARM EASY, PHARMA, PHARMACY, PHARMEASY, TATA 1MG,
+                        TRUEMEDS, WELLNESS FOREVER""",
+        "fitness": """ANYTIME FITNESS, CULT FIT, CULTFIT, CURE FIT, CUREFIT, FITNESS, FITTR, GOLDS GYM, GYM,
+                      HEALTHIFYME, YOGA""",
+    },
+    "insurance": {
+        "health_insurance": """ADITYA BIRLA HEALTH, CARE HEALTH, MANIPAL CIGNA, MAX BUPA, NIVA BUPA, RELIGARE HEALTH,
+                               STAR HEALTH""",
+    },
+    "education": {
+        "_default": "courses",
+        "school_fees": "COLLEGE, EXAM FEE, SCHOOL, SCHOOL FEE, SCHOOLS, UNIVERSITY, VIDYALAYA",
+    },
+    "taxes": {
+        "income_tax": """ADVANCE TAX, CBDT, INCOME TAX, INCOMETAX, OLTAS, PROTEAN, SELF ASSESSMENT TAX, TDS PAYMENT,
+                         TIN NSDL""",
+    },
+    "charity": {
+        "_default": "donations",
+        "religious": "CHURCH, DEVASTHANAM, GURUDWARA, ISKCON, MANDIR, MASJID, TEMPLE, TIRUMALA, TTD",
+    },
+}
+
+
+def _refined(category: str, keyword: str) -> str:
+    rules = _REFINE.get(category)
+    if not rules:
+        return category
+    for fine, text in rules.items():
+        if fine != "_default" and keyword in {" ".join(w.split()) for w in text.split(",")}:
+            return fine
+    return rules.get("_default", category)
+
+
 def _keywords() -> List[Tuple[Tuple[str, ...], str]]:
     items = []
     for category, text in _DIRECTORY.items():
         for raw in text.split(","):
             words = tuple(raw.split())
             if words:
-                items.append((words, category))
+                items.append((words, _refined(category, " ".join(words))))
     # Longer, more specific keywords first ("SWIGGY INSTAMART" before "SWIGGY").
     items.sort(key=lambda kc: (-len(" ".join(kc[0])), " ".join(kc[0])))
     return items

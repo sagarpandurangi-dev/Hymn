@@ -37,6 +37,7 @@ from fastapi import Depends, HTTPException
 from pydantic import BaseModel, Field
 from pymongo import ReplaceOne, UpdateOne
 
+import categories
 import ledger
 import ledger_sync
 import merchant_directory
@@ -486,8 +487,7 @@ async def _add_ai_guesses(db, user_id: str, suggested: List[dict]) -> None:
         ask = [{"n": i, "description": keyed[k][0]["description"], "direction": k[1]} for i, k in enumerate(unseen)]
         try:
             fresh = await statements_ai.guess_categories(
-                ask, [c for c in ledger.EXPENSE_CATEGORIES if c not in ("interest", "fees", "depreciation")],
-                list(ledger.INCOME_CATEGORIES))
+                ask, categories.SUGGESTIBLE_EXPENSE, categories.SUGGESTIBLE_INCOME)
         except AssistantUnavailable:
             fresh = None
         if fresh is not None:
