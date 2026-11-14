@@ -812,6 +812,62 @@ export const api = {
     request<any>(`/statements/${id}/link`, { method: "POST", body: { account_id: accountId }, auth: true }),
   confirmStatement: (id: string, decisions: StatementDecision[]) =>
     request<StatementConfirmResult>(`/statements/${id}/confirm`, { method: "POST", body: { decisions }, auth: true }),
+
+  // -- Planned money --
+  listPlannedMoney: () => request<PlannedItem[]>("/planned-money", { auth: true }),
+  createPlannedMoney: (payload: PlannedItemInput) =>
+    request<PlannedItem>("/planned-money", { method: "POST", body: payload, auth: true }),
+  updatePlannedMoney: (id: string, payload: Partial<PlannedItemInput> & { status?: string }) =>
+    request<PlannedItem>(`/planned-money/${id}`, { method: "PATCH", body: payload, auth: true }),
+  deletePlannedMoney: (id: string) =>
+    request<any>(`/planned-money/${id}`, { method: "DELETE", auth: true }),
+  plannedMoneyMonths: (start: string, count = 12) =>
+    request<PlannedMonth[] | { months: PlannedMonth[] }>(`/planned-money/months?start=${start}&count=${count}`, { auth: true }),
+};
+
+export type PlannedPurpose = "income" | "spend" | "saving" | "investment" | "loan_payment" | "other";
+export type PlannedRepeat = "once" | "monthly" | "yearly";
+export type PlannedItem = {
+  id: string;
+  title: string;
+  direction: "in" | "out";
+  purpose: PlannedPurpose;
+  amount: string | number;
+  currency: string;
+  repeat: PlannedRepeat;
+  date?: string | null;
+  start_month?: string | null;
+  end_month?: string | null;
+  certainty: "sure" | "maybe";
+  set_aside?: boolean;
+  status?: string;
+  done_amount?: string | number | null;
+  remaining_amount?: string | number | null;
+  source?: string | null;
+  editable?: boolean;
+};
+export type PlannedItemInput = {
+  title: string;
+  direction: "in" | "out";
+  purpose: PlannedPurpose;
+  amount: string;
+  currency: string;
+  repeat: PlannedRepeat;
+  date?: string | null;
+  start_month?: string | null;
+  end_month?: string | null;
+  certainty: "sure" | "maybe";
+  set_aside: boolean;
+};
+export type PlannedMonth = {
+  month: string;
+  currency?: string;
+  income?: string | number;
+  spend?: string | number;
+  moves?: string | number;
+  set_aside?: string | number;
+  maybe_in?: string | number;
+  maybe_out?: string | number;
 };
 
 export type StatementSuggestion = {

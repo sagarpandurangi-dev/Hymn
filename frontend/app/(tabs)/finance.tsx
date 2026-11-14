@@ -11,13 +11,14 @@ import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, T
 import { SafeAreaView } from "react-native-safe-area-context";
 import Ionicons from "@react-native-vector-icons/ionicons";
 import { useRouter } from "expo-router";
-import { api } from "@/src/lib/api";
+import { api, PlannedItem } from "@/src/lib/api";
+import PlannedItemForm from "@/src/components/finance/PlannedItemForm";
+import PlannedRow from "@/src/components/finance/PlannedRow";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
 import {
   FoldAmount,
   FoldBanner,
   FoldCard,
-  FoldPill,
   FoldRow,
   FoldSectionHeader,
   foldPageStyle,
@@ -30,41 +31,27 @@ import {
   monthLabel,
 } from "@/src/lib/finance/format";
 
-// ---------------------------------------------------------------------------
-// State → pill tone mapping (muted Fold-style, replaces saturated stateColor).
-// ---------------------------------------------------------------------------
-const STATE_TONE: Record<string, "neutral" | "info" | "ok" | "err" | "warn"> = {
-  draft: "neutral",
-  reserved: "info",
-  completed: "ok",
-  cancelled: "neutral",
-  expired: "err",
-};
-
-const STATE_LABEL: Record<string, string> = {
-  draft: "Draft",
-  reserved: "Reserved",
-  completed: "Completed",
-  cancelled: "Cancelled",
-  expired: "Expired",
-};
-
 export default function FinanceScreen() {
   const router = useRouter();
   const [dash, setDash] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [planned, setPlanned] = useState<PlannedItem[]>([]);
+  const [plannedFormOpen, setPlannedFormOpen] = useState(false);
+  const [plannedEditing, setPlannedEditing] = useState<PlannedItem | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [d, twin, recon] = await Promise.all([
+      const [d, twin, recon, plannedList] = await Promise.all([
         api.getFinanceDashboard(),
         api.getTwinForecasts().catch(() => null),
         api.reconciliationSuggestions().catch(() => []),
+        api.listPlannedMoney().catch(() => [] as PlannedItem[]),
       ]);
       setDash({ ...d, _twin: twin, _recon_count: (recon || []).length });
+      setPlanned(Array.isArray(plannedList) ? plannedList : []);
     } catch (e: any) {
       setError(e?.message || "Could not load Finance");
     }
@@ -126,9 +113,13 @@ export default function FinanceScreen() {
 
   const position = dash?.position?.currencies || [];
   const monthlyWindows: any[] = dash?.monthly_windows || [];
-  const reserved: any[] = dash?.reserved?.by_currency || dash?.reserved || [];
-  const liquidity: any[] = dash?.available_liquidity?.by_currency || dash?.available_liquidity || [];
-  const activeCommitments: any[] = dash?.active_commitments || [];
+  // Up to 6 upcoming planned items (not done), soonest first.
+  const nextDate = (it: PlannedItem) => it.date || (it.start_month ? `${it.start_month}-01` : "") || "9999";
+  const upcomingPlanned = planned
+    .filter((it) => it.status !== "done")
+    .sort((a, b) => nextDate(a).localeCompare(nextDate(b)))
+    .slice(0, 6);
+  const plannedCurrency = planned[0]?.currency || position[0]?.currency || "INR";
   const dueForReview: any[] = dash?.commitments_due_for_review || [];
   const recentEvents: any[] = dash?.recent_events || [];
   const multiCurrency = dash?.position?.multi_currency;
@@ -260,88 +251,28 @@ export default function FinanceScreen() {
         })}
 
         {/* ============================================================
-           3. Financial Commitments — reserved lien + active list
+           3. Planned money — next items + quick add
         ============================================================ */}
-        <View style={styles.blockGap} testID="finance-commitments">
+        <View style={styles.blockGap} testID="finance-planned">
           <FoldSectionHeader
-            label="Commitments"
-            action={{ label: "New", onPress: () => router.push("/finance/commitments/new") }}
+            label="Planned money"
+            action={{ label: "+ New", onPress: () => { setPlannedEditing(null); setPlannedFormOpen(true); } }}
           />
-          {reserved.length === 0 && activeCommitments.length === 0 ? (
-            <FoldCard>
+          <FoldCard>
+            {upcomingPlanned.length === 0 ? (
               <View style={styles.emptyRow}>
-                <Text style={styles.emptyRowText}>No financial commitments yet.</Text>
+                <Text style={styles.emptyRowText}>Nothing planned yet.</Text>
               </View>
-            </FoldCard>
-          ) : (
-            <>
-              {reserved.length > 0 || liquidity.length > 0 ? (
-                <FoldCard>
-                  {reserved.map((r: any, idx: number) => (
-                    <FoldRow
-                      key={`res-${r.currency}`}
-                      first={idx === 0}
-                      label={`Reserved (${r.currency})`}
-                      meta={`${r.commitments.length} commitment${r.commitments.length === 1 ? "" : "s"} · lien on liquidity`}
-                      right={<FoldAmount currency={r.currency} value={formatMoney(r.reserved_total)} />}
-                      onPress={() => router.push(`/finance/commitments?currency=${r.currency}&state=reserved`)}
-                      chevron
-                      testID={`reserved-${r.currency}`}
-                    />
-                  ))}
-                  {liquidity.map((l: any) => (
-                    <FoldRow
-                      key={`liq-${l.currency}`}
-                      label={`Available (${l.currency})`}
-                      meta="Liquid minus reservations"
-                      right={<FoldAmount currency={l.currency} value={formatMoney(l.available_unreserved)} size="md" tone="positive" />}
-                    />
-                  ))}
-                  {liquidity.map((l: any) => (
-                    (l.pending_account_events && l.pending_account_events.length > 0) ? (
-                      <FoldRow
-                        key={`pending-${l.currency}`}
-                        label={`Pending account (${l.currency})`}
-                        meta={`${l.pending_account_events.length} spend${l.pending_account_events.length === 1 ? "" : "s"} waiting for an account`}
-                        right={<FoldPill label="Assign" tone="warn" size="xs" />}
-                        onPress={() => router.push(`/finance/events`)}
-                        chevron
-                        testID={`pending-account-${l.currency}`}
-                      />
-                    ) : null
-                  ))}
-                </FoldCard>
-              ) : null}
-              {activeCommitments.length > 0 ? (
-                <FoldCard style={{ marginTop: financeSpace.md }}>
-                  {activeCommitments.slice(0, 6).map((c: any, idx: number) => (
-                    <FoldRow
-                      key={c.id}
-                      first={idx === 0}
-                      onPress={() => router.push(`/finance/commitments/${c.id}`)}
-                      testID={`commitment-${c.id}`}
-                      chevron
-                      label={
-                        <View style={{ flexDirection: "row", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                          <Text style={[financeType.rowLabel, { maxWidth: 200 }]} numberOfLines={1}>{c.title}</Text>
-                          <FoldPill label={STATE_LABEL[c.state] || c.state} tone={STATE_TONE[c.state] || "neutral"} size="xs" />
-                          {c.is_overdue ? <FoldPill label="Overdue" tone="err" size="xs" /> : null}
-                        </View>
-                      }
-                      meta={`Due ${dateLabel(c.due_date)}`}
-                      right={<FoldAmount currency={c.currency} value={formatMoney(c.amount)} />}
-                    />
-                  ))}
-                  {activeCommitments.length > 6 ? (
-                    <Pressable onPress={() => router.push("/finance/commitments")} style={styles.moreRow}>
-                      <Text style={styles.moreText}>See all {activeCommitments.length}</Text>
-                      <Ionicons name="chevron-forward" size={14} color={financeColors.accent} />
-                    </Pressable>
-                  ) : null}
-                </FoldCard>
-              ) : null}
-            </>
-          )}
+            ) : (
+              upcomingPlanned.map((it, idx) => (
+                <PlannedRow key={it.id} item={it} first={idx === 0} onPress={() => { setPlannedEditing(it); setPlannedFormOpen(true); }} />
+              ))
+            )}
+            <Pressable onPress={() => router.push("/finance/planned")} style={styles.moreRow} testID="finance-planned-see-all">
+              <Text style={styles.moreText}>See all</Text>
+              <Ionicons name="chevron-forward" size={14} color={financeColors.accent} />
+            </Pressable>
+          </FoldCard>
         </View>
 
         {/* ============================================================
@@ -394,25 +325,6 @@ export default function FinanceScreen() {
             </View>
           );
         })}
-
-        {/* ============================================================
-           5. Expected income — quick link
-        ============================================================ */}
-        {position.length > 0 ? (
-          <View style={styles.blockGap}>
-            <FoldSectionHeader label="Planning" />
-            <FoldCard>
-              <FoldRow
-                first
-                label="Expected income"
-                meta="One-time future income. Expected items need confirmation before entering the forecast."
-                onPress={() => router.push(`/finance/expected-income`)}
-                chevron
-                testID="finance-expected-income"
-              />
-            </FoldCard>
-          </View>
-        ) : null}
 
         {/* Documents — statements and money book */}
         <View style={styles.blockGap}>
@@ -479,6 +391,13 @@ export default function FinanceScreen() {
           Generated {dash?.generated_at?.slice(0, 16).replace("T", " ")} UTC · month {currentMonthIso()}
         </Text>
       </ScrollView>
+      <PlannedItemForm
+        visible={plannedFormOpen}
+        item={plannedEditing}
+        defaultCurrency={plannedCurrency}
+        onClose={() => { setPlannedFormOpen(false); setPlannedEditing(null); }}
+        onSaved={async () => { setPlannedFormOpen(false); setPlannedEditing(null); await load(); }}
+      />
     </SafeAreaView>
   );
 }
