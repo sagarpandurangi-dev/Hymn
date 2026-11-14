@@ -40,6 +40,7 @@ from pymongo import ReplaceOne, UpdateOne
 import categories
 import ledger
 import ledger_sync
+import life_objects
 import merchant_directory
 import statements_ai
 from claude_client import AssistantUnavailable
@@ -207,8 +208,19 @@ def _label(category: str) -> str:
     return category.split(":", 1)[-1].replace("_", " ")
 
 
+def emi_match(amount: Decimal, day: str, loans: List[dict]) -> Optional[tuple]:
+    """(loan object, schedule row) when an outgoing amount is a loan's EMI
+    due within 10 days of this date (₹1 slack)."""
+    for loan in loans:
+        for row in loan["schedule"]:
+            if abs(Decimal(row["emi"]) - amount) <= 1 and _days_apart(row["date"], day) <= 10:
+                return loan, row
+    return None
+
+
 def suggest_line(line: dict, account: dict, accounts: Dict[str, dict], rules: Dict[tuple, dict],
-                 transactions: List[dict], history: Optional[List[dict]] = None) -> Dict[str, Any]:
+                 transactions: List[dict], history: Optional[List[dict]] = None,
+                 loans: Optional[List[dict]] = None) -> Dict[str, Any]:
     """Pure: one suggestion for one line."""
     effect = line_effect(line, account)
     base = {"n": line["n"], "date": line["date"], "description": line["description"],
@@ -248,6 +260,17 @@ def suggest_line(line: dict, account: dict, accounts: Dict[str, dict], rules: Di
                         "why": f"Matches {accounts[bank_leg[0]['account_id']].get('name', 'a bank')} "
                                f"paying {amount} on {tx['date']}, recorded as spending. This is your "
                                f"card bill: record it as a card payment instead."}
+
+    # 2b. A loan EMI: split into principal and interest from the schedule.
+    if loans and effect < 0 and account.get("account_type") in ("bank", "cash"):
+        hit = emi_match(-effect, line["date"], loans)
+        if hit:
+            loan, row = hit
+            return {**base, "action": "create", "kind": "loan_payment", "counter_account_id": loan["account_id"],
+                    "principal": row["principal"], "interest": row["interest"], "confidence": "loan",
+                    "why": f"EMI {row['n']} of {len(loan['schedule'])} for {loan['name']}: "
+                           f"{money(Decimal(row['principal']), account.get('currency', 'INR'))} principal, "
+                           f"{money(Decimal(row['interest']), account.get('currency', 'INR'))} interest."}
 
     # 3. Rules and past confirmations for this merchant on this account.
     key = merchant_key(line["description"])
@@ -333,6 +356,12 @@ def draft_for(decision: dict, line: dict, account: dict, currency: str) -> ledge
         if account.get("account_type") == "credit_card":
             return ledger.Draft(**common, from_account_id=counter, to_account_id=acct)
         return ledger.Draft(**common, from_account_id=acct, to_account_id=counter)
+    if kind == "loan_payment":
+        principal = Decimal(str(decision.get("principal") or 0))
+        interest = Decimal(abs(effect)) - principal  # whatever isn't principal is interest
+        return ledger.Draft(kind=kind, date=line["date"], currency=currency, description=line["description"],
+                            from_account_id=acct, to_account_id=counter, principal=str(principal),
+                            interest=str(max(interest, Decimal(0))))
     if kind in ("transfer", "investment", "redemption"):
         if effect < 0:
             return ledger.Draft(**common, from_account_id=acct, to_account_id=counter)
@@ -353,7 +382,7 @@ def learn(rules: Dict[tuple, dict], user_id: str, key: str, account_id: str, dir
           decision: dict, always: Optional[bool]) -> Optional[dict]:
     """Update ``rules`` in memory with what the user just confirmed and return
     the rule to save. A correction replaces what Hymn had learned."""
-    if not key:
+    if not key or decision["kind"] == "loan_payment":  # EMIs come from the schedule, not a rule
         return None
     result = {"kind": decision["kind"], "category": decision.get("category"),
               "counter_account_id": decision.get("counter_account_id")}
@@ -455,7 +484,13 @@ async def suggestions(import_id: str, current_user: dict = Depends(get_current_u
     txs = await _transactions_near(db, current_user["id"], doc)
     history = spending_history(await ledger.load_transactions(db, current_user["id"]), account.get("currency"))
     done = set(doc.get("confirmed_lines", []))
-    suggested = [suggest_line(l, account, accounts, rules, txs, history)
+    loans = []
+    for o in await db.life_objects.find({"user_id": current_user["id"], "type": "liability",
+                                         "account_id": {"$ne": None}}, {"_id": 0}).to_list(length=None):
+        rows = life_objects.loan_schedule(o)
+        if rows and o["account_id"] in accounts:
+            loans.append({"name": o["name"], "account_id": o["account_id"], "schedule": rows})
+    suggested = [suggest_line(l, account, accounts, rules, txs, history, loans)
                  for l in doc.get("lines", []) if l["n"] not in done]
     await _add_ai_guesses(db, current_user["id"], suggested)
     lines = [_with_nested(s) for s in suggested]
@@ -525,6 +560,7 @@ class Decision(BaseModel):
     duplicate_of: Optional[str] = None
     merge_with: Optional[str] = None
     always: Optional[bool] = None
+    principal: Optional[str] = None     # loan_payment: the principal part
 
 
 class ConfirmRequest(BaseModel):

@@ -113,6 +113,124 @@ def belongs(obj: dict, tx: dict, claimed: Dict[str, int], today: str) -> bool:
     return any(w.upper() in (tx.get("description") or "").upper() for w in words if w)
 
 
+def _add_months(day: str, n: int) -> str:
+    d = date_type.fromisoformat(day)
+    y, m = divmod(d.month - 1 + n, 12)
+    y, m = d.year + y, m + 1
+    import calendar
+    return date_type(y, m, min(d.day, calendar.monthrange(y, m)[1])).isoformat()
+
+
+def loan_schedule(obj: dict) -> List[dict]:
+    """EMI by EMI: date, EMI, interest, principal and what's still owed.
+
+    Reducing balance (the usual bank loan): EMI = P·r·(1+r)^n / ((1+r)^n − 1)
+    with r the monthly rate; each month's interest is on what's still owed.
+    Flat: interest on the original amount spread evenly. An EMI from the
+    loan document, if given, is used as is (the last EMI absorbs rounding).
+    """
+    principal = _dec(obj.get("loan_principal"))
+    n = int(obj.get("tenure_months") or 0)
+    start = obj.get("first_emi_date")
+    if not principal or not n or not start:
+        return []
+    rate = _dec(obj.get("annual_rate_percent")) / Decimal(1200)
+    if obj.get("method") == "flat":
+        interest_each = (principal * rate * n / n).quantize(CENT)
+        emi = _dec(obj.get("emi")) or ((principal / n) + interest_each).quantize(CENT)
+    elif rate:
+        growth = (1 + rate) ** n
+        emi = _dec(obj.get("emi")) or (principal * rate * growth / (growth - 1)).quantize(CENT)
+    else:
+        emi = _dec(obj.get("emi")) or (principal / n).quantize(CENT)
+    rows, owed = [], principal
+    for i in range(1, n + 1):
+        interest = interest_each if obj.get("method") == "flat" else (owed * rate).quantize(CENT)
+        pay = emi if i < n else (owed + interest).quantize(CENT)
+        part = min(pay - interest, owed)
+        owed -= part
+        rows.append({"n": i, "date": _add_months(start, i - 1), "emi": _out(pay), "interest": _out(interest),
+                     "principal": _out(part), "owed_after": _out(owed)})
+    return rows
+
+
+def fuel_report(checkins: List[dict]) -> dict:
+    """Mileage and fuel cost from fill check-ins.
+
+    A fill is a check-in whose data has an ``odometer`` and either
+    ``litres`` or an amount (``amount`` or the check-in's money spent) with
+    ``price_per_litre``. Mileage is measured between full-tank fills: km
+    driven ÷ litres put in since the previous full tank (partial fills in
+    between are added up). The cost of each stretch is spread over its days.
+    """
+    fills = []
+    for c in checkins:
+        d = c.get("data") or {}
+        odo = _dec(d.get("odometer"))
+        amount = _dec(d.get("amount")) or _dec(c.get("money_spent"))
+        price = _dec(d.get("price_per_litre"))
+        litres = _dec(d.get("litres")) or ((amount / price) if amount and price else ZERO)
+        if not odo or not litres:
+            continue
+        fills.append({"date": c.get("date") or "", "odometer": odo, "litres": litres,
+                      "amount": amount or (litres * price), "price_per_litre": price or (amount / litres),
+                      "full": str(d.get("full_tank", True)).lower() not in ("false", "0", "no")})
+    fills.sort(key=lambda f: (f["odometer"], f["date"]))
+    stretches, last_full, litres_since, cost_since = [], None, ZERO, ZERO
+    for f in fills:
+        if last_full is not None:
+            litres_since += f["litres"]
+            cost_since += f["amount"]
+        if f["full"]:
+            if last_full is not None and f["odometer"] > last_full["odometer"]:
+                km = f["odometer"] - last_full["odometer"]
+                days = max((date_type.fromisoformat(f["date"]) - date_type.fromisoformat(last_full["date"])).days, 1) \
+                    if f["date"] and last_full["date"] else 1
+                stretches.append({"from": last_full["date"], "to": f["date"], "km": _out(km),
+                                  "litres": _out(litres_since), "km_per_litre": _out(km / litres_since),
+                                  "cost": _out(cost_since), "cost_per_km": _out(cost_since / km),
+                                  "cost_per_day": _out(cost_since / days), "days": days})
+            last_full, litres_since, cost_since = f, ZERO, ZERO
+    total_km = sum((Decimal(s["km"]) for s in stretches), ZERO)
+    total_l = sum((Decimal(s["litres"]) for s in stretches), ZERO)
+    total_cost = sum((Decimal(s["cost"]) for s in stretches), ZERO)
+    return {
+        "fills": [{**f, "odometer": _out(f["odometer"]), "litres": _out(f["litres"]), "amount": _out(f["amount"]),
+                   "price_per_litre": _out(f["price_per_litre"])} for f in fills],
+        "stretches": stretches,
+        "km_per_litre": _out(total_km / total_l) if total_l else None,
+        "cost_per_km": _out(total_cost / total_km) if total_km else None,
+        "latest_price_per_litre": _out(fills[-1]["price_per_litre"]) if fills else None,
+    }
+
+
+def value_lost_between(obj: dict, start: str, end: str) -> Decimal:
+    """Straight-line value an asset lost between two dates (inclusive of
+    whole days), 0 for anything else or without a price and life."""
+    price, life = _dec(obj.get("purchase_price")), Decimal(obj.get("expected_life_months") or 0)
+    if obj.get("type") != "asset" or not price or not life:
+        return ZERO
+    last = min(end, obj.get("ended_on") or end)
+    first = max(start, obj["started_on"])
+    if first > last:
+        return ZERO
+    per_month = (price - _dec(obj.get("residual_value"))) / life
+    cap = price - _dec(obj.get("residual_value"))
+    before = min(per_month * _months_between(obj["started_on"], first), cap)
+    upto = min(per_month * _months_between(obj["started_on"], last), cap)
+    return max(upto - before, ZERO)
+
+
+def book_value(obj: dict, as_of: str) -> Decimal:
+    """What an asset is worth on the books on a date (0 once sold)."""
+    price = _dec(obj.get("purchase_price"))
+    if obj.get("type") != "asset" or not price or obj["started_on"] > as_of:
+        return ZERO
+    if obj.get("ended_on") and obj["ended_on"] <= as_of:
+        return ZERO
+    return price - value_lost_between(obj, obj["started_on"], as_of)
+
+
 def compute_ltc(obj: dict, txs: List[dict], checkins: List[dict], claimed: Dict[str, int], today: str) -> dict:
     """Pure: the lifetime cost of one object."""
     running: Dict[str, Decimal] = defaultdict(Decimal)
@@ -212,6 +330,7 @@ class LifeObjectCreate(BaseModel):
     kind: str = Field(default="other", max_length=40)          # car, house, credit_card, smoking, gym…
     name: str = Field(min_length=1, max_length=120)
     started_on: str
+    currency: str = Field(default="INR", pattern=r"^[A-Z]{3}$")
     purchase_price: Any = None
     acquisition_costs: Any = None       # registration, stamp duty, processing fee…
     expected_life_months: Optional[int] = Field(default=None, ge=1, le=1200)
@@ -221,6 +340,13 @@ class LifeObjectCreate(BaseModel):
     match_words: List[str] = Field(default_factory=list)
     unit: Optional[Literal["km", "visit", "session", "use", "pack", "day", "month"]] = None
     notes: str = ""
+    # Loans: the terms (or the EMI from the loan document).
+    loan_principal: Any = None
+    annual_rate_percent: Any = None
+    tenure_months: Optional[int] = Field(default=None, ge=1, le=480)
+    first_emi_date: Optional[str] = None
+    method: Literal["reducing", "flat"] = "reducing"
+    emi: Any = None
 
 
 class LifeObjectUpdate(BaseModel):
@@ -236,6 +362,12 @@ class LifeObjectUpdate(BaseModel):
     ended_on: Optional[str] = None
     sold_for: Any = None
     notes: Optional[str] = None
+    loan_principal: Any = None
+    annual_rate_percent: Any = None
+    tenure_months: Optional[int] = Field(default=None, ge=1, le=480)
+    first_emi_date: Optional[str] = None
+    method: Optional[Literal["reducing", "flat"]] = None
+    emi: Any = None
 
 
 class TagRequest(BaseModel):
@@ -259,7 +391,10 @@ def _valid_date(v: Optional[str], field: str) -> None:
 
 
 def _clean(doc: dict) -> dict:
-    for f in ("purchase_price", "acquisition_costs", "residual_value", "sold_for"):
+    if doc.get("first_emi_date"):
+        _valid_date(doc["first_emi_date"], "first_emi_date")
+    for f in ("purchase_price", "acquisition_costs", "residual_value", "sold_for", "loan_principal",
+              "annual_rate_percent", "emi"):
         if doc.get(f) not in (None, ""):
             amount = _dec(doc[f])
             if amount < 0:
@@ -273,7 +408,8 @@ def _clean(doc: dict) -> dict:
 
 def _public(obj: dict) -> dict:
     out = {k: v for k, v in obj.items() if k not in ("_id", "user_id")}
-    for f in ("purchase_price", "acquisition_costs", "residual_value", "sold_for"):
+    for f in ("purchase_price", "acquisition_costs", "residual_value", "sold_for", "loan_principal",
+              "annual_rate_percent", "emi"):
         if out.get(f) is not None:
             out[f] = _out(_dec(out[f]))
     return out
@@ -294,7 +430,7 @@ async def _checkins(db, user_id: str, obj: dict) -> List[dict]:
     if not obj.get("project_id"):
         return []
     return await db.checkins.find({"user_id": user_id, "project_id": obj["project_id"]},
-                                  {"_id": 0, "date": 1, "data": 1}).to_list(length=None)
+                                  {"_id": 0, "date": 1, "data": 1, "money_spent": 1}).to_list(length=None)
 
 
 @life_objects_router.post("", status_code=201)
@@ -344,6 +480,29 @@ async def detail(obj_id: str, current_user: dict = Depends(get_current_user)):
     objs, txs, claimed = await _load(db, current_user["id"])
     today = date_type.today().isoformat()
     return {**_public(o), "ltc": compute_ltc(o, txs, await _checkins(db, current_user["id"], o), claimed, today)}
+
+
+@life_objects_router.get("/{obj_id}/fuel")
+async def fuel(obj_id: str, current_user: dict = Depends(get_current_user)):
+    """Real mileage and fuel cost per km / per day from fill check-ins
+    (odometer + price per litre at each fill)."""
+    _premium(current_user)
+    db = get_db()
+    o = await _own(db, current_user["id"], obj_id)
+    return fuel_report(await _checkins(db, current_user["id"], o))
+
+
+@life_objects_router.get("/{obj_id}/schedule")
+async def schedule(obj_id: str, current_user: dict = Depends(get_current_user)):
+    """The loan's EMI schedule with principal and interest."""
+    _premium(current_user)
+    o = await _own(get_db(), current_user["id"], obj_id)
+    rows = loan_schedule(o)
+    if not rows:
+        raise HTTPException(status_code=400, detail="Add the loan amount, rate, tenure and first EMI date first.")
+    total_interest = sum((Decimal(r["interest"]) for r in rows), ZERO)
+    return {"emi": rows[0]["emi"], "total_interest": _out(total_interest),
+            "total_paid": _out(sum((Decimal(r["emi"]) for r in rows), ZERO)), "rows": rows}
 
 
 @life_objects_router.patch("/{obj_id}")

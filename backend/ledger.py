@@ -53,11 +53,12 @@ CENT = Decimal("0.01")
 ASSET_TYPES = frozenset({
     "cash", "bank", "fixed_deposit", "recurring_deposit", "mutual_fund",
     "stock", "bond", "crypto", "gold", "real_estate", "other_asset",
+    "epf", "ppf", "nps", "deposit_given", "money_lent",
 })
 LIABILITY_TYPES = frozenset({
-    "credit_card", "personal_loan", "home_loan", "vehicle_loan", "other_liability",
+    "credit_card", "personal_loan", "home_loan", "vehicle_loan", "other_liability", "money_borrowed",
 })
-LOAN_TYPES = frozenset({"personal_loan", "home_loan", "vehicle_loan", "other_liability"})
+LOAN_TYPES = frozenset({"personal_loan", "home_loan", "vehicle_loan", "other_liability", "money_borrowed"})
 
 # Categories come from the two-level tree in ``categories`` (older flat keys
 # stay valid); user-defined ones will join as ``category:<id>``.
@@ -74,7 +75,7 @@ NOMINAL_ACCOUNTS: Dict[str, str] = {
 
 KINDS = (
     "expense", "income", "gift", "transfer", "investment", "redemption",
-    "card_settlement", "loan_payment", "refund", "opening_balance",
+    "card_settlement", "loan_payment", "refund", "opening_balance", "borrowing",
 )
 # Kinds whose money only moves between the user's own accounts.
 OWN_ACCOUNT_KINDS = frozenset({"transfer", "investment", "redemption", "card_settlement"})
@@ -203,6 +204,13 @@ def build_postings(d: Draft, real_accounts: Dict[str, dict]) -> List[dict]:
         if k == "card_settlement" and real_accounts[dst].get("account_type") != "credit_card":
             raise LedgerError("card_settlement must pay a credit_card account")
         postings = [p(dst, amt, cash_date), p(src, -amt, cash_date)]
+    elif k == "borrowing":  # a loan paid out to you: you hold more and owe more
+        amt = positive(d.amount, "amount")
+        loan = real(d.from_account_id, "from_account_id", ("liability",))
+        if real_accounts[loan].get("account_type") not in LOAN_TYPES:
+            raise LedgerError("borrowing must come from a loan account")
+        dst = real(d.to_account_id, "to_account_id", ("asset",))
+        postings = [p(dst, amt, cash_date), p(loan, -amt, cash_date)]
     elif k == "loan_payment":
         principal = to_decimal(d.principal or 0, "principal")
         interest = to_decimal(d.interest or 0, "interest")
@@ -457,7 +465,7 @@ async def ensure_ledger_indexes(db) -> None:
 class TransactionCreate(BaseModel):
     kind: Literal[
         "expense", "income", "gift", "transfer", "investment", "redemption",
-        "card_settlement", "loan_payment", "refund", "opening_balance",
+        "card_settlement", "loan_payment", "refund", "opening_balance", "borrowing",
     ]
     date: str
     currency: str = Field(min_length=3, max_length=3)
