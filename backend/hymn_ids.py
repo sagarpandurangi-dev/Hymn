@@ -19,6 +19,7 @@ can take a confusing copy of someone else's ID.
 """
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import time
@@ -129,10 +130,43 @@ async def assign_real_id(db, user_id: str) -> str:
     raise RuntimeError("Could not find a free Hymn ID")
 
 
+def alias_grants() -> Dict[str, str]:
+    """Aliases the owner hands out before the shop opens, set on the
+    server as HYMN_ALIAS_GRANTS="email=ALIAS,email=ALIAS" (never in code)."""
+    out = {}
+    for pair in os.environ.get("HYMN_ALIAS_GRANTS", "").split(","):
+        email, _, alias = pair.partition("=")
+        if email.strip() and alias.strip():
+            out[email.strip().lower()] = alias.strip().upper()
+    return out
+
+
+async def grant_alias(db, user: dict, alias: str) -> Optional[str]:
+    """Give ``user`` this alias if it's valid and free. Returns the alias
+    the user ends up with (None if it couldn't be given)."""
+    if user.get("hymn_alias") or alias_problem(alias) or grade(alias) != "alias":
+        return user.get("hymn_alias")
+    try:
+        await db.hymn_ids.insert_one({"_id": canonical(alias), "display": alias, "kind": "alias",
+                                      "grade": "alias", "owner_user_id": user["id"], "status": "assigned",
+                                      "granted_by": "owner", "created_at": _now()})
+    except DuplicateKeyError:
+        row = await db.hymn_ids.find_one({"_id": canonical(alias)}, {"owner_user_id": 1})
+        if not row or row.get("owner_user_id") != user["id"]:
+            return None  # someone else has it
+    await db.users.update_one({"id": user["id"]}, {"$set": {"hymn_alias": alias}})
+    user["hymn_alias"] = alias
+    return alias
+
+
 async def ensure_hymn_id(db, user: dict) -> dict:
-    """Existing users get their ID the first time they're seen."""
+    """Existing users get their ID the first time they're seen, plus any
+    alias the owner granted them."""
     if not user.get("hymn_id"):
         user["hymn_id"] = await assign_real_id(db, user["id"])
+    granted = alias_grants().get((user.get("email") or "").lower())
+    if granted and not user.get("hymn_alias"):
+        await grant_alias(db, user, granted)
     return user
 
 
@@ -153,6 +187,87 @@ def _rate_limit(user_id: str) -> None:
     q.append(now)
 
 
+# ---------------------------------------------------------------------------
+# Dynamic pricing: nobody sets prices by hand
+# ---------------------------------------------------------------------------
+#
+# price = base for the grade
+#         × rarity within the grade (all-same digits, very short patterns)
+#         × demand: how many *different* people looked this ID up in the
+#           last 30 days (each extra searcher adds less than the one before)
+#         × name popularity for aliases (how many Hymn users share the name)
+# rounded to a familiar price point. Past the top price point, or when many
+# people want the same ID at once, it goes to auction instead.
+# The bases are the only numbers anyone sets, once; HYMN_ID_BASE_PRICES can
+# override them ("pattern=199,birthday=299,...").
+
+DEFAULT_BASE_PRICES = {"pattern": 199, "birthday": 299, "special": 999, "alias": 2999}
+PRICE_POINTS = (99, 149, 199, 249, 299, 399, 499, 699, 799, 999, 1499, 1999, 2499, 2999,
+                3999, 4999, 6999, 7999, 9999)
+AUCTION_ABOVE = 9999
+AUCTION_SEARCHERS = 10      # this many different people in 30 days → auction
+DEMAND_WINDOW_DAYS = 30
+
+
+def base_prices() -> Dict[str, int]:
+    prices = dict(DEFAULT_BASE_PRICES)
+    for pair in os.environ.get("HYMN_ID_BASE_PRICES", "").split(","):
+        g, _, amount = pair.partition("=")
+        if g.strip() in prices and amount.strip().isdigit():
+            prices[g.strip()] = int(amount.strip())
+    return prices
+
+
+def rarity(value: str, g: str) -> float:
+    v = value.upper()
+    if g == "special" and len(set(v[1:])) == 1:
+        return 3.0          # S777777: only 240 exist
+    if g == "alias":
+        letters = sum(c.isalpha() for c in v)
+        digits = 7 - letters
+        # SAGAR77 (a name and a short lucky number) is what people want most.
+        return 1.5 if digits <= 2 else 1.0
+    return 1.0
+
+
+def _nice(amount: float) -> int:
+    return next((p for p in PRICE_POINTS if p >= amount), PRICE_POINTS[-1])
+
+
+def quote(value: str, g: str, searchers: int, name_users: int = 0) -> dict:
+    """Pure: the price (or auction) for an ID right now."""
+    if g == "standard":
+        return {"price_inr": 0, "how": "free"}
+    import math
+    raw = base_prices()[g] * rarity(value, g) * (1 + math.log2(1 + max(searchers, 0)) / 2)
+    if g == "alias":
+        raw *= 1 + math.log10(1 + max(name_users, 0)) / 2
+    if raw > AUCTION_ABOVE or searchers >= AUCTION_SEARCHERS:
+        return {"price_inr": None, "how": "auction", "reserve_inr": _nice(min(raw, AUCTION_ABOVE))}
+    return {"price_inr": _nice(raw), "how": "fixed"}
+
+
+async def _record_interest(db, value: str, user_id: str) -> None:
+    day = datetime.now(timezone.utc).date().isoformat()
+    await db.hymn_id_interest.update_one(
+        {"_id": f"{canonical(value)}|{user_id}|{day}"},
+        {"$set": {"id": canonical(value), "user_id": user_id, "day": day}}, upsert=True)
+
+
+async def _searchers(db, value: str) -> int:
+    since = (datetime.now(timezone.utc).date().toordinal() - DEMAND_WINDOW_DAYS)
+    since_day = date_type.fromordinal(since).isoformat()
+    users = await db.hymn_id_interest.distinct("user_id", {"id": canonical(value), "day": {"$gte": since_day}})
+    return len(users)
+
+
+async def _name_users(db, value: str) -> int:
+    name = re.match(r"^[A-Z]+", value.upper())
+    if not name or len(name.group()) < 3:
+        return 0
+    return await db.users.count_documents({"name": {"$regex": f"^{name.group()}\\b", "$options": "i"}})
+
+
 @hymn_id_router.get("/check/{value}")
 async def check(value: str, current_user: dict = Depends(get_current_user)):
     """Is this a valid ID, what grade is it, and is it free?"""
@@ -163,9 +278,14 @@ async def check(value: str, current_user: dict = Depends(get_current_user)):
         return {"value": v, "valid": False, "reason": alias_problem(v) or "Not a valid Hymn ID."}
     if g == "alias" and alias_problem(v):
         return {"value": v, "valid": False, "reason": alias_problem(v)}
-    taken = await get_db().hymn_ids.find_one({"_id": canonical(v)}, {"_id": 1})
+    db = get_db()
+    taken = await db.hymn_ids.find_one({"_id": canonical(v)}, {"_id": 1})
+    price: dict = {}
+    if taken is None and g != "standard":
+        await _record_interest(db, v, current_user["id"])
+        price = quote(v, g, await _searchers(db, v), await _name_users(db, v) if g == "alias" else 0)
     return {"value": v, "valid": True, "kind": "alias" if g == "alias" else "real", "grade": g,
-            "available": taken is None,
+            "available": taken is None, **price,
             # The shop isn't open: only free standard IDs are handed out.
             "can_claim_now": False}
 
@@ -188,3 +308,4 @@ async def find(value: str, current_user: dict = Depends(get_current_user)):
 
 async def ensure_hymn_id_indexes(db) -> None:
     await db.hymn_ids.create_index([("owner_user_id", 1), ("kind", 1)])
+    await db.hymn_id_interest.create_index([("id", 1), ("day", 1)])

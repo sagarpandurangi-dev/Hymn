@@ -85,3 +85,59 @@ def test_lookups_are_rate_limited(client, server):
     hymn_ids._LOOKUPS.clear()
     codes = [client.get("/api/hymn-id/check/S482915", headers=a["headers"]).status_code for _ in range(21)]
     assert codes[-1] == 429 and set(codes[:-1]) == {200}
+
+
+def test_owner_granted_alias(client, server, monkeypatch):
+    monkeypatch.setenv("HYMN_ALIAS_GRANTS", "Owner@Example.com=sagar77, bad@example.com=PRIYA")
+    a = _signup(client, "owner@example.com", name="Sagar")
+    me = client.get("/api/auth/me", headers=a["headers"]).json()
+    assert me["hymn_alias"] == "SAGAR77" and grade(me["hymn_id"]) == "standard"
+    b = _signup(client, "someone@example.com")
+    found = client.get("/api/hymn-id/find/sagar77", headers=b["headers"]).json()
+    assert found == {"hymn_id": me["hymn_id"], "alias": "SAGAR77", "first_name": "Sagar"}
+    assert client.get("/api/hymn-id/check/SAGAR77", headers=b["headers"]).json()["available"] is False
+    bad = _signup(client, "bad@example.com")
+    assert client.get("/api/auth/me", headers=bad["headers"]).json()["hymn_alias"] is None  # invalid alias ignored
+
+
+def test_granted_alias_already_taken_is_not_stolen(client, server, monkeypatch):
+    a = _signup(client, "first@example.com")
+    asyncio.run(hymn_ids.grant_alias(server.db, {"id": a["id"]}, "SAGAR77"))
+    monkeypatch.setenv("HYMN_ALIAS_GRANTS", "second@example.com=SAGAR77")
+    b = _signup(client, "second@example.com")
+    assert client.get("/api/auth/me", headers=b["headers"]).json()["hymn_alias"] is None
+
+
+def test_prices_set_themselves():
+    from hymn_ids import quote
+    p = lambda v, g, s=0, n=0: quote(v, g, s, n)
+    assert p("S482915", "standard") == {"price_inr": 0, "how": "free"}
+    ladder = [p("S123456", "pattern")["price_inr"], p("S150890", "birthday")["price_inr"],
+              p("S000786", "special")["price_inr"], p("S777777", "special")["price_inr"],
+              p("SAGAR77", "alias")["price_inr"]]
+    assert ladder == sorted(ladder) and len(set(ladder)) == 5        # cheapest → dearest, SAGAR77 on top
+    assert p("S150890", "birthday", 3)["price_inr"] > p("S150890", "birthday", 0)["price_inr"]  # demand
+    assert p("PRIYA88", "alias", 0, 500)["price_inr"] is None or \
+        p("PRIYA88", "alias", 0, 500)["price_inr"] > p("XQZRT88", "alias")["price_inr"]   # popular names
+    hot = p("S150890", "birthday", 10)
+    assert hot["how"] == "auction" and hot["reserve_inr"] > 0                           # many want it
+
+
+def test_base_prices_can_be_tuned_without_code(monkeypatch):
+    from hymn_ids import quote
+    before = quote("S123456", "pattern", 0)["price_inr"]
+    monkeypatch.setenv("HYMN_ID_BASE_PRICES", "pattern=499")
+    assert quote("S123456", "pattern", 0)["price_inr"] > before
+
+
+def test_check_shows_price_and_counts_demand(client, server):
+    users = [_signup(client, f"buyer{i}@example.com") for i in range(3)]
+    first = client.get("/api/hymn-id/check/S150890", headers=users[0]["headers"]).json()
+    client.get("/api/hymn-id/check/S150890", headers=users[0]["headers"])   # same person again: no extra demand
+    assert client.get("/api/hymn-id/check/S150890", headers=users[0]["headers"]).json()["price_inr"] == first["price_inr"]
+    for u in users[1:]:
+        client.get("/api/hymn-id/check/S150890", headers=u["headers"])
+    later = client.get("/api/hymn-id/check/S150890", headers=users[0]["headers"]).json()
+    assert later["how"] == "fixed" and later["price_inr"] > first["price_inr"]
+    free = client.get("/api/hymn-id/check/S482915", headers=users[0]["headers"]).json()
+    assert "price_inr" not in free or free["price_inr"] == 0
