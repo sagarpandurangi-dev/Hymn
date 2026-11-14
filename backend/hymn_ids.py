@@ -19,6 +19,7 @@ can take a confusing copy of someone else's ID.
 """
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import time
@@ -129,10 +130,43 @@ async def assign_real_id(db, user_id: str) -> str:
     raise RuntimeError("Could not find a free Hymn ID")
 
 
+def alias_grants() -> Dict[str, str]:
+    """Aliases the owner hands out before the shop opens, set on the
+    server as HYMN_ALIAS_GRANTS="email=ALIAS,email=ALIAS" (never in code)."""
+    out = {}
+    for pair in os.environ.get("HYMN_ALIAS_GRANTS", "").split(","):
+        email, _, alias = pair.partition("=")
+        if email.strip() and alias.strip():
+            out[email.strip().lower()] = alias.strip().upper()
+    return out
+
+
+async def grant_alias(db, user: dict, alias: str) -> Optional[str]:
+    """Give ``user`` this alias if it's valid and free. Returns the alias
+    the user ends up with (None if it couldn't be given)."""
+    if user.get("hymn_alias") or alias_problem(alias) or grade(alias) != "alias":
+        return user.get("hymn_alias")
+    try:
+        await db.hymn_ids.insert_one({"_id": canonical(alias), "display": alias, "kind": "alias",
+                                      "grade": "alias", "owner_user_id": user["id"], "status": "assigned",
+                                      "granted_by": "owner", "created_at": _now()})
+    except DuplicateKeyError:
+        row = await db.hymn_ids.find_one({"_id": canonical(alias)}, {"owner_user_id": 1})
+        if not row or row.get("owner_user_id") != user["id"]:
+            return None  # someone else has it
+    await db.users.update_one({"id": user["id"]}, {"$set": {"hymn_alias": alias}})
+    user["hymn_alias"] = alias
+    return alias
+
+
 async def ensure_hymn_id(db, user: dict) -> dict:
-    """Existing users get their ID the first time they're seen."""
+    """Existing users get their ID the first time they're seen, plus any
+    alias the owner granted them."""
     if not user.get("hymn_id"):
         user["hymn_id"] = await assign_real_id(db, user["id"])
+    granted = alias_grants().get((user.get("email") or "").lower())
+    if granted and not user.get("hymn_alias"):
+        await grant_alias(db, user, granted)
     return user
 
 

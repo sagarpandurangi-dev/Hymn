@@ -85,3 +85,24 @@ def test_lookups_are_rate_limited(client, server):
     hymn_ids._LOOKUPS.clear()
     codes = [client.get("/api/hymn-id/check/S482915", headers=a["headers"]).status_code for _ in range(21)]
     assert codes[-1] == 429 and set(codes[:-1]) == {200}
+
+
+def test_owner_granted_alias(client, server, monkeypatch):
+    monkeypatch.setenv("HYMN_ALIAS_GRANTS", "Owner@Example.com=sagar77, bad@example.com=PRIYA")
+    a = _signup(client, "owner@example.com", name="Sagar")
+    me = client.get("/api/auth/me", headers=a["headers"]).json()
+    assert me["hymn_alias"] == "SAGAR77" and grade(me["hymn_id"]) == "standard"
+    b = _signup(client, "someone@example.com")
+    found = client.get("/api/hymn-id/find/sagar77", headers=b["headers"]).json()
+    assert found == {"hymn_id": me["hymn_id"], "alias": "SAGAR77", "first_name": "Sagar"}
+    assert client.get("/api/hymn-id/check/SAGAR77", headers=b["headers"]).json()["available"] is False
+    bad = _signup(client, "bad@example.com")
+    assert client.get("/api/auth/me", headers=bad["headers"]).json()["hymn_alias"] is None  # invalid alias ignored
+
+
+def test_granted_alias_already_taken_is_not_stolen(client, server, monkeypatch):
+    a = _signup(client, "first@example.com")
+    asyncio.run(hymn_ids.grant_alias(server.db, {"id": a["id"]}, "SAGAR77"))
+    monkeypatch.setenv("HYMN_ALIAS_GRANTS", "second@example.com=SAGAR77")
+    b = _signup(client, "second@example.com")
+    assert client.get("/api/auth/me", headers=b["headers"]).json()["hymn_alias"] is None
