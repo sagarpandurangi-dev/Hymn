@@ -68,7 +68,7 @@ short. Never ask them to paste secrets into chat.
 | `statement_matching.py` | Xero-style suggestions per line (already recorded / own-account match / learned rules / patterns / built-in merchant list / similar names the user filed / spending habits by amount / one AI guess per unknown merchant per user), confirm into ledger, learning, opening balance, reconciliation |
 | `merchant_directory.py` | free built-in list of ~900 well-known (mostly Indian) merchant keywords → spending category; mixed merchants and people's names deliberately left out |
 
-Plans and decisions: `docs/plans/finance-audit.md`. API notes for Emergent:
+Plans and decisions: `docs/plans/finance-audit.md`. Ready-to-paste Emergent prompts for the 18 Nov credit refresh: `docs/EMERGENT_PROMPTS_NOV18.md`. API notes for Emergent:
 `docs/INBOX_API.md`, `docs/NUDGES_API.md`. Deploy guide: `docs/DEPLOY_RAILWAY.md`.
 
 ## Owner decisions to respect
@@ -82,9 +82,12 @@ Plans and decisions: `docs/plans/finance-audit.md`. API notes for Emergent:
 - Statement upload is Premium; free users enter opening balances by hand.
 - Matching must learn from the user's choices and suggest next time.
 - One free Emergent publish: the published build must be the tester beta.
-  Before beta: rotate the MongoDB password and Anthropic key (both appeared
-  in chat), push notifications need a native build
-  with Firebase.
+  Before beta: push notifications need a native build with Firebase.
+- The MongoDB password and Anthropic key appeared in chat; the owner checked
+  where they're exposed (only this chat, behind their Claude login; repo
+  history clean; phone screenshot deleted) and chose **not** to rotate them
+  (14 Nov 2026). Don't raise it again unless the Claude account may be
+  compromised or is shared.
 
 ## Roadmap
 
