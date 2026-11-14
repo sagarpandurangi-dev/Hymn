@@ -157,6 +157,19 @@ async def is_converted(db, user_id: str) -> bool:
 async def sync(db, user_id: str) -> dict:
     """Bring the ledger up to date with the old records. Cheap no-op for
     users who haven't converted."""
+    import request_cache
+
+    remembered = request_cache.get(("sync", user_id))
+    if remembered is not None:
+        return remembered
+    result = await _sync(db, user_id)
+    if result["created"] or result["voided"] or result["linked"]:
+        request_cache.forget(user_id)
+    request_cache.put(("sync", user_id), result)
+    return result
+
+
+async def _sync(db, user_id: str) -> dict:
     if not await is_converted(db, user_id):
         return {"converted": False, "created": 0, "voided": 0, "linked": 0}
     accounts = await db.financial_accounts.find({"user_id": user_id}, {"_id": 0}).to_list(length=None)

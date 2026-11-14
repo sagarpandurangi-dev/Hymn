@@ -418,15 +418,26 @@ async def record(db, user_id: str, draft: Draft, *, provenance: str = "user",
     tx = build_transaction(user_id, draft, accounts, provenance=provenance,
                            evidence_ids=evidence_ids, references=references)
     await db.ledger_transactions.insert_one(storable(tx))
+    import request_cache
+    request_cache.forget(user_id)
     return tx
 
 
 async def load_transactions(db, user_id: str, *, account_id: Optional[str] = None) -> List[dict]:
+    import request_cache
+
+    if not account_id:
+        remembered = request_cache.get(("txs", user_id))
+        if remembered is not None:
+            return list(remembered)
     query: Dict[str, Any] = {"user_id": user_id, "status": "posted"}
     if account_id:
         query["postings.account_id"] = account_id
     rows = await db.ledger_transactions.find(query).sort("date", 1).to_list(length=None)
-    return [_load(r) for r in rows]
+    txs = [_load(r) for r in rows]
+    if not account_id:
+        request_cache.put(("txs", user_id), txs)
+    return list(txs)
 
 
 async def balances(db, user_id: str, as_of: str) -> List[dict]:

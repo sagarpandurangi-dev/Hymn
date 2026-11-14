@@ -2906,6 +2906,7 @@ from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
 import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
 from reports import reports_router  # noqa: E402
+from screens import screens_router  # noqa: E402
 from time_reports import time_reports_router  # noqa: E402
 from family import family_router, ensure_family_indexes  # noqa: E402
 from life_objects import life_objects_router, ensure_life_object_indexes  # noqa: E402
@@ -2925,6 +2926,7 @@ api_router.include_router(inbox_router)
 api_router.include_router(nudges.nudges_router)
 api_router.include_router(ledger_router)
 api_router.include_router(reports_router)
+api_router.include_router(screens_router)
 api_router.include_router(time_reports_router)
 api_router.include_router(family_router)
 api_router.include_router(life_objects_router)
@@ -2936,6 +2938,19 @@ app.include_router(api_router)
 # Auth is a bearer header, never a cookie, so credentialed CORS is not
 # needed. CORS_ORIGINS (comma-separated) narrows the allowed origins.
 _cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+@app.middleware("http")
+async def _request_memo(request, call_next):
+    """Reads within one GET request are computed once (see request_cache)."""
+    if request.method != "GET":
+        return await call_next(request)
+    import request_cache
+    token = request_cache.begin()
+    try:
+        return await call_next(request)
+    finally:
+        request_cache.finish(token)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=False,
