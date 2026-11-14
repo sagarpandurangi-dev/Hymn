@@ -28,7 +28,7 @@ short. Never ask them to paste secrets into chat.
   on purpose once and confirm a test fails.
 - **Hosting:** Railway (project "determined-patience", service "Hymn", root
   `/backend`, Dockerfile, healthcheck `/api/` for zero-downtime deploys,
-  region currently US-West — moving to Singapore is a parked speed fix).
+  region Singapore `asia-southeast1-eqsg3a` since 14 Nov 2026).
   MongoDB Atlas (Mumbai). Railway auto-deploys `main`.
 - **Railway access from a session:** the "Hymn" cloud environment holds a
   Railway project token (proxy-injected header `Project-Access-Token` for
@@ -56,6 +56,7 @@ short. Never ask them to paste secrets into chat.
 | `planned_money.py` | one list of expected money in/out (once / monthly / yearly; sure / maybe; set-aside one-offs); shows older monthly commitments, one-off commitments and expected income read-only; the forecast reads it. API notes: `docs/PLANNED_MONEY_API.md` |
 | `hymn_ids.py` | Hymn ID: every ID 7 characters. Real ID = 1 letter (no I/O) + 6 digits, free random standard one per user (assigned at signup / first seen), permanent, meant to be shared with Pamphlet. Alias = 7 letters+digits (2+ letters, never real-ID shaped, e.g. PRIYA88), costs more. Special numbers (repeats, sacred, sequences, palindromes, birthdays DDMMYY) and aliases are graded and reserved until the shop (payments) opens. Look-alikes O=0, I=1 are the same ID; aliases also can't share a look-alike skeleton (5/S, 8/B, 2/Z, 6/G, 0/O, 1/I/L) or read as a real ID. Rate-limited check/find. Owner can grant aliases before the shop via Railway var `HYMN_ALIAS_GRANTS` ("email=ALIAS,..."). Prices set themselves: base per grade (`HYMN_ID_BASE_PRICES` override) × rarity × demand (distinct people checking it in 30 days) × name popularity, rounded to price points; very wanted IDs go to auction |
 | `categories.py` | two-level category tree (group → category) for spending and income; older flat keys stay valid as "<Group> (other)"; `GET /api/ledger/categories` |
+| `life_objects.py` | Premium: assets, liabilities, habits, ventures, each backed by an auto-created project (check-ins, tasks). Lifetime cost (LTC): getting it + value lost (straight-line) + keeping it (tagged or auto-claimed categories, match words) + cost of money (interest, fees, penalties, annual fees; liabilities count only borrowing costs) − what came back; to date, per month, per unit (km from check-in odometer, visits, days), projected over life, hours from check-ins. No opportunity cost (owner decision) |
 | `ledger.py` | double-entry ledger: transactions with inline postings summing to zero; accrual and cash views; starter categories |
 | `ledger_conversion.py` | one-time, self-verifying conversion of old finance data into the ledger (preview → fingerprinted apply) |
 | `ledger_sync.py` | after conversion, keeps the ledger in step with old finance records (new/changed/rejected events, retyped balances) using the conversion's own rules; only touches derived entries; links to statement entries instead of double counting; runs before ledger reads and statement suggestions |
@@ -93,7 +94,7 @@ Next:
 2. Money book switch-over: done for balances, availability, monthly and Today spending (converted users). Left: recent-activity list still shows old events; owner must run the conversion (Money book screen) for the switch to apply.
 3. Categories/life objects (car, house, habits) per area; depreciation; fuel
    and mileage; loans (principal/interest, documents); cash vs accrual views.
-4. Speed: Railway → Singapore; reduce round trips per screen.
+4. Speed: Railway moved to Singapore (done); reduce round trips per screen.
 5. Dream journey (blueprint: shelved draft PRs #5 and #9 on the old July code
    — never merge them; rebuild on today's code): context review with
    corrections, feasibility on real time and money, editable plan map.

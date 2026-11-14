@@ -16,7 +16,7 @@ import os
 from fastapi import HTTPException
 
 PLANS = ("free", "premium")
-PREMIUM_FEATURES = frozenset({"statements"})
+PREMIUM_FEATURES = frozenset({"statements", "life_objects"})
 
 
 def user_plan(user: dict) -> str:
