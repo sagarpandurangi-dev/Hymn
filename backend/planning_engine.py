@@ -1877,7 +1877,7 @@ async def _materialize_proposal(
             def _mins(hhmm: str) -> int:
                 h, m = hhmm.split(":")
                 return int(h) * 60 + int(m)
-            if _mins(end) <= _mins(start):
+            if _mins(end) == _mins(start):  # end before start = overnight
                 continue
             ctype = (tc.get("commitment_type") or "personal").strip().lower()
             if ctype not in VALID_TC_TYPES:

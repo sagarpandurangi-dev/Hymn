@@ -3087,6 +3087,21 @@ async def _available_liquidity(db, user_id: str) -> list:
 # Twelve-month forecast
 # ============================================================================
 
+FORECAST_HISTORY_MONTHS = 3
+
+
+def _prev_month(month: str) -> str:
+    y, m = int(month[:4]), int(month[5:7])
+    return f"{y - 1}-12" if m == 1 else f"{y}-{m - 1:02d}"
+
+
+def _rest_of_month_share() -> Decimal:
+    import calendar
+    today = date_type.fromisoformat(_today_iso())
+    days = calendar.monthrange(today.year, today.month)[1]
+    return Decimal(days - today.day + 1) / Decimal(days)
+
+
 async def _forecast_12_months(db, user_id: str) -> dict:
     """Build a 12-month cash and net-worth forecast per currency.
 
@@ -3098,7 +3113,7 @@ async def _forecast_12_months(db, user_id: str) -> dict:
       unreserved < 1x fixed_outflows for that month);
     * 'low' when any month goes negative.
     """
-    from money_service import reservation_amount_for_commitment  # noqa: WPS433
+    from money_service import monthly_actual_spending, reservation_amount_for_commitment  # noqa: WPS433
 
     pos = await _current_position(db, user_id)
     liquid_by_cur = {c["currency"]: _decimal_from_stored(c["liquid_assets"]) for c in pos["currencies"]}
@@ -3133,6 +3148,16 @@ async def _forecast_12_months(db, user_id: str) -> dict:
         rolling_liquid = liquid_by_cur.get(cur, Decimal(0))
         rolling_net_worth = assets_by_cur.get(cur, Decimal(0)) - liab_by_cur.get(cur, Decimal(0))
 
+        # What the user actually spends: the last 3 full months (months with
+        # no spending recorded don't drag the average down).
+        past = []
+        m = current_month
+        for _ in range(FORECAST_HISTORY_MONTHS):
+            m = _prev_month(m)
+            past.append(await monthly_actual_spending(db, user_id, m, cur))
+        with_data = [x for x in past if x > 0]
+        usual = (sum(with_data, Decimal(0)) / len(with_data)) if with_data else Decimal(0)
+
         rows = []
         any_negative = False
         any_tight = False
@@ -3149,8 +3174,18 @@ async def _forecast_12_months(db, user_id: str) -> dict:
                 (reservation_amount_for_commitment(x) for x in reserved_by_month[m]),
                 Decimal(0),
             )
-            rolling_liquid = rolling_liquid + income - outflows - reserved_this_month
-            rolling_net_worth = rolling_net_worth + income - outflows  # reservations don't change net worth
+            planned_spend = (_decimal_from_stored(summary["recurring_expenses"])
+                             + _decimal_from_stored(summary["debt_payments"]))
+            # Everyday spending the plans don't cover; for this month, only
+            # the days still ahead (what's spent so far is in the balance).
+            everyday = max(usual - planned_spend, Decimal(0))
+            if m == current_month:
+                everyday = everyday * _rest_of_month_share()
+            everyday = everyday.quantize(Decimal("0.01"))
+            rolling_liquid = rolling_liquid + income - outflows - reserved_this_month - everyday
+            # Saving and investing move money, they don't lose it; planned
+            # one-off spends (reservations) do reduce what you're worth.
+            rolling_net_worth = rolling_net_worth + income - planned_spend - reserved_this_month - everyday
             if rolling_liquid < 0:
                 any_negative = True
             if reserved_this_month > 0 and rolling_liquid < outflows:
@@ -3161,6 +3196,7 @@ async def _forecast_12_months(db, user_id: str) -> dict:
                 "recurring_outflows": _quantize_out(outflows),
                 "reserved_commitments_amount": _quantize_out(reserved_this_month),
                 "reserved_commitment_ids": [x["id"] for x in reserved_by_month[m]],
+                "usual_spending": _quantize_out(everyday),
                 "projected_liquid_end_of_month": _quantize_out(rolling_liquid),
                 "projected_net_worth_end_of_month": _quantize_out(rolling_net_worth),
                 "shortfall": rolling_liquid < 0,
@@ -3172,9 +3208,21 @@ async def _forecast_12_months(db, user_id: str) -> dict:
             confidence = "medium"
         else:
             confidence = "high"
+        if not with_data and confidence == "high":
+            confidence = "medium"  # no spending history to go on yet
         per_currency[cur] = {
             "currency": cur,
             "confidence": confidence,
+            "usual_monthly_spending": _quantize_out(usual),
+            "history_months_used": len(with_data),
+            "basis": (
+                "Starts from your balance today, adds planned income and bills, and assumes you keep "
+                f"spending about {_quantize_out(usual)} {cur} a month as over your last "
+                f"{len(with_data)} month{'s' if len(with_data) != 1 else ''}."
+                if with_data else
+                "Starts from your balance today and adds planned income and bills. Record a few weeks "
+                "of spending so the forecast can include everyday costs."
+            ),
             "months": rows,
         }
 

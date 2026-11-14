@@ -161,6 +161,23 @@ def _record_interval(record: dict, record_kind: str) -> tuple:
     return start, end
 
 
+def is_overnight(record: dict) -> bool:
+    """A weekly block whose end is before its start runs past midnight."""
+    try:
+        return hhmm_to_minutes(record["end_time"]) < hhmm_to_minutes(record["start_time"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def commitment_interval(record: dict) -> tuple:
+    """The part of a weekly block on its own day: an overnight block
+    counts until midnight here and the rest on the next day."""
+    if is_overnight(record):
+        start = hhmm_to_minutes(record["start_time"])
+        return start, 1440
+    return _record_interval(record, "time_commitment")
+
+
 async def load_day_time_capacity(db, user_id: str, day: str) -> dict:
     """Compute recorded time capacity for a single ISO date.
 
@@ -196,8 +213,29 @@ async def load_day_time_capacity(db, user_id: str, day: str) -> dict:
         {"_id": 0},
     ).to_list(length=5000)
 
+    # Overnight blocks from the day before spill into this morning.
+    prev = (d - timedelta(days=1))
+    prev_day = prev.isoformat()
+    spill_docs = [
+        x for x in await db.time_commitments.find(
+            {
+                "user_id": user_id,
+                "day_of_week": _weekday_name(prev),
+                "effective_from": {"$lte": prev_day},
+                "$or": [
+                    {"effective_until": None},
+                    {"effective_until": {"$gte": prev_day}},
+                ],
+            },
+            {"_id": 0},
+        ).to_list(length=5000)
+        if is_overnight(x)
+    ]
+
     baseline_intervals = [
-        _record_interval(x, "time_commitment") for x in baseline_docs
+        commitment_interval(x) for x in baseline_docs
+    ] + [
+        (0, hhmm_to_minutes(x["end_time"])) for x in spill_docs
     ]
     reservation_intervals = [
         _record_interval(x, "resource_allocation") for x in reservation_docs
