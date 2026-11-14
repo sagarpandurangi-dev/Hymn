@@ -338,6 +338,36 @@ async def _weekly_patterns(db, user: dict, settings: dict, now: datetime) -> Opt
     return nudge
 
 
+PLAN_CHECK_TIME = "10:00"  # on the 1st of each month, local time
+
+
+async def _plan_check(db, user: dict, settings: dict, now: datetime) -> Optional[dict]:
+    """Once a month: tell the person if an accepted plan has slipped (something
+    that was on track is now short)."""
+    import life_plans
+
+    tz = _tz(user.get("timezone"))
+    local = now.astimezone(tz)
+    if local.day != 1:
+        return None
+    at = _due(local, hhmm_to_minute(PLAN_CHECK_TIME))
+    if at is None:
+        return None
+    plans = await db.life_plans.find({"user_id": user["id"], "status": "active",
+                                      "accepted_statuses": {"$exists": True}}, {"_id": 0}).to_list(length=None)
+    for plan in plans:
+        evaluated = await life_plans.benchmark(db, user["id"], plan, local.date(), local.replace(tzinfo=None))
+        if not evaluated["drift"]:
+            continue
+        first = evaluated["drift"][0]
+        gap = f" — short by ₹{float(first['gap']):,.0f}" if first.get("gap") not in (None, "0", 0) else ""
+        body = f"{first['what']} has slipped{gap}. Open the plan to see your options."
+        return await _claim(db, user["id"], "plan_drift", f"plan_drift:{plan['id']}:{local.strftime('%Y-%m')}",
+                            f"{plan['title']} needs attention", body,
+                            {"screen": "plans", "plan_id": plan["id"]}, at)
+    return None
+
+
 async def run_due_nudges(db, now: Optional[datetime] = None) -> List[dict]:
     """One scheduler tick: create and deliver every nudge that is due."""
     now = now or _now()
@@ -348,7 +378,7 @@ async def run_due_nudges(db, now: Optional[datetime] = None) -> List[dict]:
             stored = await db.nudge_settings.find_one({"user_id": user["id"]}, {"_id": 0})
             settings = merge_settings(stored)
             due = await _reminders(db, user, settings, now)
-            for job in (_daily_review, _weekly_patterns):
+            for job in (_daily_review, _weekly_patterns, _plan_check):
                 nudge = await job(db, user, settings, now)
                 if nudge:
                     due.append(nudge)

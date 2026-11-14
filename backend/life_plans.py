@@ -127,7 +127,7 @@ def _month_add(month: str, n: int) -> str:
     return f"{y + m // 12}-{m % 12 + 1:02d}"
 
 
-async def money_by(db, user_id: str, currency: str, by: str) -> Dict[str, Decimal]:
+async def money_by(db, user_id: str, currency: str, by: str, plan_id: Optional[str] = None) -> Dict[str, Decimal]:
     """Money available today, and projected for the end of the month before
     ``by`` (T−1): planned money in and out, savings moves, set-aside spends
     and usual everyday spending, month by month (the forecast's rules)."""
@@ -137,7 +137,9 @@ async def money_by(db, user_id: str, currency: str, by: str) -> Dict[str, Decima
 
     avail = (await load_availability(db, user_id))["by_currency"].get(currency, {})
     now_amount = Decimal(avail.get("available_unreserved", 0))
-    items = await planned_money.load_items(db, user_id)
+    # A plan's own savings are money kept for it, not money gone.
+    items = [i for i in await planned_money.load_items(db, user_id)
+             if not (plan_id and i.get("life_plan_id") == plan_id)]
     this_month = finance_manager._today_iso()[:7]
     past, m = [], this_month
     for _ in range(finance_manager.FORECAST_HISTORY_MONTHS):
@@ -184,7 +186,7 @@ async def benchmark(db, user_id: str, plan: dict, today: date_type, now: datetim
             r["gap"] = 0 if r["status"] != "short" else need - booked
         elif r["kind"] == "money":
             by = r.get("needed_by") or plan["target_date"]
-            m = await money_by(db, user_id, r.get("currency") or "INR", by)
+            m = await money_by(db, user_id, r.get("currency") or "INR", by, plan_id=plan.get("id"))
             need = _dec(r["amount"])
             r.update(available_now=format(m["now"].quantize(Decimal("0.01")), "f"),
                      built_up_by_then=format(m["by_then"].quantize(Decimal("0.01")), "f"), unit=r.get("currency") or "INR")
@@ -198,7 +200,12 @@ async def benchmark(db, user_id: str, plan: dict, today: date_type, now: datetim
     order = {"short": 3, "unknown": 2, "by_then": 1, "now": 0}
     worst = max((order[r["status"]] for r in out), default=0)
     verdict = {3: "doesnt_fit", 2: "needs_answers", 1: "fits_by_then", 0: "fits_now"}[worst]
-    return {**plan, "requirements": out, "verdict": verdict}
+    # Drift: what was on track when the plan was accepted and isn't any more.
+    at_accept = plan.get("accepted_statuses") or {}
+    drift = [{"requirement_id": r["id"], "what": r["what"], "was": at_accept[r["id"]], "now": r["status"],
+              "gap": r.get("gap")}
+             for r in out if r["id"] in at_accept and r["status"] == "short" and at_accept[r["id"]] != "short"]
+    return {**plan, "requirements": out, "verdict": verdict, "drift": drift}
 
 
 # ---------------------------------------------------------------------------
@@ -395,13 +402,91 @@ async def book(plan_id: str, body: Booking, current_user: dict = Depends(get_cur
     return await _evaluated(db, current_user["id"], await _own(db, current_user["id"], plan_id))
 
 
+def months_until(today: date_type, by: str) -> int:
+    """Whole months from this one to the month before ``by`` (≥ 0)."""
+    b = date_type.fromisoformat(by)
+    return max((b.year - today.year) * 12 + b.month - today.month, 0)
+
+
+def _task(user_id: str, plan_id: str, title: str, due: str, notes: str = "") -> dict:
+    now = _now()
+    return {"id": str(uuid.uuid4()), "user_id": user_id, "title": title[:200], "due_date": due,
+            "priority": "medium", "status": "todo", "notes": notes, "origin": "standalone",
+            "expected_outcome_id": None, "project_id": None, "component_id": None, "assigned_to_type": "self",
+            "assigned_to_name": "", "assigned_to_phone": "", "commitment_type": "postponable",
+            "deferred_until": None, "original_due_date": due or None, "defer_count": 0, "recurrence": None,
+            "series_id": None, "occurrence_index": 1, "life_plan_id": plan_id, "created_at": now, "updated_at": now}
+
+
+async def lock_in(db, user_id: str, plan: dict, today: date_type) -> dict:
+    """Turn an accepted plan into things that happen:
+
+    * money needed: a monthly saving in planned money until the month
+      before it's needed (or, if it's already there, the amount set aside
+      for that date);
+    * questions not yet answered or answered no: a "find out" / "sort out"
+      task;
+    * time not yet booked: a "book time" task;
+    * risks with a way to soften them: a task to do that.
+    """
+    from bson.decimal128 import Decimal128
+
+    planned, tasks = [], []
+    soon = (today + timedelta(days=14)).isoformat()
+    for r in plan["requirements"]:
+        by = r.get("needed_by") or plan["target_date"]
+        if r["kind"] == "money":
+            need, have = _dec(r["amount"]), _dec(r.get("available_now"))
+            months = months_until(today, by)
+            common = {"id": str(uuid.uuid4()), "user_id": user_id, "currency": r.get("currency") or "INR",
+                      "certainty": "sure", "status": "active", "done_amount": Decimal128("0"), "category": None,
+                      "account_id": None, "goal_id": None, "life_plan_id": plan["id"], "requirement_id": r["id"],
+                      "created_at": _now(), "updated_at": _now()}
+            if r["status"] == "now" or months == 0:
+                planned.append({**common, "title": f"Set aside: {r['what']}", "direction": "out", "purpose": "spend",
+                                "amount": Decimal128(need), "repeat": "once", "date": by, "start_month": None,
+                                "end_month": None, "set_aside": True,
+                                "notes": f"For your plan: {plan['title']}"})
+            else:
+                to_save = max(need - have, ZERO)
+                monthly = ((to_save / months) / 100).to_integral_value(rounding="ROUND_CEILING") * 100
+                if monthly > 0:
+                    last = _month_add(by[:7], -1)
+                    planned.append({**common, "title": f"Save for: {r['what']}", "direction": "out",
+                                    "purpose": "saving", "amount": Decimal128(monthly), "repeat": "monthly",
+                                    "date": None, "start_month": today.isoformat()[:7], "end_month": last,
+                                    "set_aside": False,
+                                    "notes": f"₹{monthly:,.0f} a month for {months} month(s) for: {plan['title']}"})
+                tasks.append(_task(user_id, plan["id"], f"Reach ₹{need:,.0f} for {r['what']}", by))
+        elif r["kind"] == "condition" and r["status"] != "now":
+            verb = "Sort out" if r["status"] == "short" else "Find out"
+            tasks.append(_task(user_id, plan["id"], f"{verb}: {r['what']}", min(soon, by)))
+        elif r["kind"] == "time" and r["status"] != "now":
+            tasks.append(_task(user_id, plan["id"], f"Book time: {r['what']}", by))
+    for k in plan.get("risks", []):
+        if k.get("mitigation"):
+            tasks.append(_task(user_id, plan["id"], f"Reduce a risk: {k['mitigation']}", min(soon, plan["target_date"]),
+                               notes=f"Risk: {k['what']}"))
+    if planned:
+        await db.planned_money.insert_many([dict(p) for p in planned])
+    if tasks:
+        await db.tasks.insert_many([dict(t) for t in tasks])
+    return {"planned_money_ids": [p["id"] for p in planned], "task_ids": [t["id"] for t in tasks]}
+
+
 @life_plans_router.post("/{plan_id}/accept")
 async def accept(plan_id: str, current_user: dict = Depends(get_current_user)):
     """The person picks this plan (e.g. one of the planner's options): it
     becomes active; other drafts from the same conversation are dropped."""
     db = get_db()
     plan = await _own(db, current_user["id"], plan_id)
-    await db.life_plans.update_one({"id": plan_id}, {"$set": {"status": "active", "updated_at": _now()}})
+    if plan.get("locked"):
+        return await _evaluated(db, current_user["id"], plan)
+    evaluated = await _evaluated(db, current_user["id"], plan)
+    locked = await lock_in(db, current_user["id"], evaluated, local_now(current_user).date())
+    await db.life_plans.update_one({"id": plan_id}, {"$set": {
+        "status": "active", "locked": locked, "updated_at": _now(),
+        "accepted_statuses": {r["id"]: r["status"] for r in evaluated["requirements"]}}})
     if plan.get("chat_id"):
         await db.life_plans.update_many(
             {"user_id": current_user["id"], "chat_id": plan["chat_id"], "status": "draft", "id": {"$ne": plan_id}},
@@ -414,6 +499,9 @@ async def drop_plan(plan_id: str, current_user: dict = Depends(get_current_user)
     db = get_db()
     await _own(db, current_user["id"], plan_id)
     await db.life_plans.update_one({"id": plan_id}, {"$set": {"status": "dropped", "updated_at": _now()}})
+    await db.planned_money.update_many({"user_id": current_user["id"], "life_plan_id": plan_id},
+                                       {"$set": {"status": "cancelled", "updated_at": _now()}})
+    await db.tasks.delete_many({"user_id": current_user["id"], "life_plan_id": plan_id, "status": "todo"})
     await db.resource_allocations.update_many({"user_id": current_user["id"], "life_plan_id": plan_id,
                                                "status": "reserved"}, {"$set": {"status": "released"}})
     return {"detail": "Dropped"}
