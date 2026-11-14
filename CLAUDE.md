@@ -60,6 +60,7 @@ short. Never ask them to paste secrets into chat.
 | `reports.py` | the three statements from the ledger + life objects: Statement of Net Worth (side by side; opening at 31 Mar + surplus + other changes), Income & Expenditure (vertical, group → category → entries; month / last month / FY to date; asset value loss included), Cash Flow (living / investing / borrowing). API notes: `docs/REPORTS_API.md` |
 | `family.py` | family net worth: households; members with accounts invited by Pamphlet ID/alias and must accept, each chooses to share total or full breakdown (never leaked via group lines), can leave; notional members (kids, parents) with entries only their creator edits; joint items with ownership shares counted once. `/api/family/...` |
 | `time_reports.py` | weekly time statements (168h) in one call `GET /api/reports/time?week_start=`: Time Commitments (fixed / flexible + set aside / free; time assets = hours this year per area), Time Spent (area planned vs actual vs gap; fixed blocks taken as kept + check-in durations; Soul = untracked, shown above 30%; % waking hours as planned), Time Flow (planned free − overruns + skipped = untracked). Sleep under Health. Check-ins carry `duration_minutes`; required when Railway var `HYMN_REQUIRE_CHECKIN_DURATION=1` (switch on once the app's time buttons ship) |
+| `request_cache.py`, `screens.py` | speed: within one GET request the ledger is synced and loaded once (per-request memo, cleared by writes); `GET /api/screens/finance` returns the whole Finance tab (dashboard + next 6 planned items + this month's planned totals) in one call |
 | `ledger.py` | double-entry ledger: transactions with inline postings summing to zero; accrual and cash views; starter categories |
 | `ledger_conversion.py` | one-time, self-verifying conversion of old finance data into the ledger (preview → fingerprinted apply) |
 | `ledger_sync.py` | after conversion, keeps the ledger in step with old finance records (new/changed/rejected events, retyped balances) using the conversion's own rules; only touches derived entries; links to statement entries instead of double counting; runs before ledger reads and statement suggestions |
@@ -97,7 +98,7 @@ Next:
 2. Money book switch-over: done for balances, availability, monthly and Today spending (converted users). Left: recent-activity list still shows old events; owner must run the conversion (Money book screen) for the switch to apply.
 3. Categories/life objects (car, house, habits) per area; depreciation; fuel
    and mileage; loans (principal/interest, documents); cash vs accrual views.
-4. Speed: Railway moved to Singapore (done); reduce round trips per screen.
+4. Speed: Singapore (done); one sync/load per request (done); one call per screen (Finance done: `/api/screens/finance`, app to adopt).
 5. Dream journey (blueprint: shelved draft PRs #5 and #9 on the old July code
    — never merge them; rebuild on today's code): context review with
    corrections, feasibility on real time and money, editable plan map.
