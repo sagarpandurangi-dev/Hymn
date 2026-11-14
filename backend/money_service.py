@@ -81,6 +81,7 @@ LIQUIDITY_LIQUID = "liquid"
 ASSET_ACCOUNT_TYPES: frozenset = frozenset({
     "cash", "bank", "fixed_deposit", "recurring_deposit", "mutual_fund",
     "stock", "bond", "crypto", "gold", "real_estate", "other_asset",
+    "epf", "ppf", "nps", "deposit_given", "money_lent",
 })
 
 

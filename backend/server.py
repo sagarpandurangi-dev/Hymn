@@ -2896,6 +2896,7 @@ from planning_space import planning_space_router  # noqa: E402
 from inbox import inbox_router, ensure_inbox_indexes  # noqa: E402
 import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
+from reports import reports_router  # noqa: E402
 from life_objects import life_objects_router, ensure_life_object_indexes  # noqa: E402
 from hymn_ids import hymn_id_router, ensure_hymn_id_indexes, ensure_hymn_id  # noqa: E402
 from planned_money import planned_money_router, ensure_planned_money_indexes  # noqa: E402
@@ -2912,6 +2913,7 @@ api_router.include_router(planning_space_router)
 api_router.include_router(inbox_router)
 api_router.include_router(nudges.nudges_router)
 api_router.include_router(ledger_router)
+api_router.include_router(reports_router)
 api_router.include_router(life_objects_router)
 api_router.include_router(hymn_id_router)
 api_router.include_router(planned_money_router)

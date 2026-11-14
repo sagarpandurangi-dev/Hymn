@@ -113,6 +113,33 @@ def belongs(obj: dict, tx: dict, claimed: Dict[str, int], today: str) -> bool:
     return any(w.upper() in (tx.get("description") or "").upper() for w in words if w)
 
 
+def value_lost_between(obj: dict, start: str, end: str) -> Decimal:
+    """Straight-line value an asset lost between two dates (inclusive of
+    whole days), 0 for anything else or without a price and life."""
+    price, life = _dec(obj.get("purchase_price")), Decimal(obj.get("expected_life_months") or 0)
+    if obj.get("type") != "asset" or not price or not life:
+        return ZERO
+    last = min(end, obj.get("ended_on") or end)
+    first = max(start, obj["started_on"])
+    if first > last:
+        return ZERO
+    per_month = (price - _dec(obj.get("residual_value"))) / life
+    cap = price - _dec(obj.get("residual_value"))
+    before = min(per_month * _months_between(obj["started_on"], first), cap)
+    upto = min(per_month * _months_between(obj["started_on"], last), cap)
+    return max(upto - before, ZERO)
+
+
+def book_value(obj: dict, as_of: str) -> Decimal:
+    """What an asset is worth on the books on a date (0 once sold)."""
+    price = _dec(obj.get("purchase_price"))
+    if obj.get("type") != "asset" or not price or obj["started_on"] > as_of:
+        return ZERO
+    if obj.get("ended_on") and obj["ended_on"] <= as_of:
+        return ZERO
+    return price - value_lost_between(obj, obj["started_on"], as_of)
+
+
 def compute_ltc(obj: dict, txs: List[dict], checkins: List[dict], claimed: Dict[str, int], today: str) -> dict:
     """Pure: the lifetime cost of one object."""
     running: Dict[str, Decimal] = defaultdict(Decimal)
@@ -212,6 +239,7 @@ class LifeObjectCreate(BaseModel):
     kind: str = Field(default="other", max_length=40)          # car, house, credit_card, smoking, gym…
     name: str = Field(min_length=1, max_length=120)
     started_on: str
+    currency: str = Field(default="INR", pattern=r"^[A-Z]{3}$")
     purchase_price: Any = None
     acquisition_costs: Any = None       # registration, stamp duty, processing fee…
     expected_life_months: Optional[int] = Field(default=None, ge=1, le=1200)

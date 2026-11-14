@@ -79,9 +79,10 @@ COMMITMENT_SOURCE_TYPES = (
 ASSET_ACCOUNT_TYPES = (
     "cash", "bank", "fixed_deposit", "recurring_deposit", "mutual_fund",
     "stock", "bond", "crypto", "gold", "real_estate", "other_asset",
+    "epf", "ppf", "nps", "deposit_given", "money_lent",
 )
 LIABILITY_ACCOUNT_TYPES = (
-    "credit_card", "personal_loan", "home_loan", "vehicle_loan", "other_liability",
+    "credit_card", "personal_loan", "home_loan", "vehicle_loan", "other_liability", "money_borrowed",
 )
 ACCOUNT_TYPES = ASSET_ACCOUNT_TYPES + LIABILITY_ACCOUNT_TYPES
 LIQUIDITY_TYPES = ("liquid", "semi_liquid", "illiquid")
