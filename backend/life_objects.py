@@ -154,6 +154,56 @@ def loan_schedule(obj: dict) -> List[dict]:
     return rows
 
 
+def fuel_report(checkins: List[dict]) -> dict:
+    """Mileage and fuel cost from fill check-ins.
+
+    A fill is a check-in whose data has an ``odometer`` and either
+    ``litres`` or an amount (``amount`` or the check-in's money spent) with
+    ``price_per_litre``. Mileage is measured between full-tank fills: km
+    driven ÷ litres put in since the previous full tank (partial fills in
+    between are added up). The cost of each stretch is spread over its days.
+    """
+    fills = []
+    for c in checkins:
+        d = c.get("data") or {}
+        odo = _dec(d.get("odometer"))
+        amount = _dec(d.get("amount")) or _dec(c.get("money_spent"))
+        price = _dec(d.get("price_per_litre"))
+        litres = _dec(d.get("litres")) or ((amount / price) if amount and price else ZERO)
+        if not odo or not litres:
+            continue
+        fills.append({"date": c.get("date") or "", "odometer": odo, "litres": litres,
+                      "amount": amount or (litres * price), "price_per_litre": price or (amount / litres),
+                      "full": str(d.get("full_tank", True)).lower() not in ("false", "0", "no")})
+    fills.sort(key=lambda f: (f["odometer"], f["date"]))
+    stretches, last_full, litres_since, cost_since = [], None, ZERO, ZERO
+    for f in fills:
+        if last_full is not None:
+            litres_since += f["litres"]
+            cost_since += f["amount"]
+        if f["full"]:
+            if last_full is not None and f["odometer"] > last_full["odometer"]:
+                km = f["odometer"] - last_full["odometer"]
+                days = max((date_type.fromisoformat(f["date"]) - date_type.fromisoformat(last_full["date"])).days, 1) \
+                    if f["date"] and last_full["date"] else 1
+                stretches.append({"from": last_full["date"], "to": f["date"], "km": _out(km),
+                                  "litres": _out(litres_since), "km_per_litre": _out(km / litres_since),
+                                  "cost": _out(cost_since), "cost_per_km": _out(cost_since / km),
+                                  "cost_per_day": _out(cost_since / days), "days": days})
+            last_full, litres_since, cost_since = f, ZERO, ZERO
+    total_km = sum((Decimal(s["km"]) for s in stretches), ZERO)
+    total_l = sum((Decimal(s["litres"]) for s in stretches), ZERO)
+    total_cost = sum((Decimal(s["cost"]) for s in stretches), ZERO)
+    return {
+        "fills": [{**f, "odometer": _out(f["odometer"]), "litres": _out(f["litres"]), "amount": _out(f["amount"]),
+                   "price_per_litre": _out(f["price_per_litre"])} for f in fills],
+        "stretches": stretches,
+        "km_per_litre": _out(total_km / total_l) if total_l else None,
+        "cost_per_km": _out(total_cost / total_km) if total_km else None,
+        "latest_price_per_litre": _out(fills[-1]["price_per_litre"]) if fills else None,
+    }
+
+
 def value_lost_between(obj: dict, start: str, end: str) -> Decimal:
     """Straight-line value an asset lost between two dates (inclusive of
     whole days), 0 for anything else or without a price and life."""
@@ -380,7 +430,7 @@ async def _checkins(db, user_id: str, obj: dict) -> List[dict]:
     if not obj.get("project_id"):
         return []
     return await db.checkins.find({"user_id": user_id, "project_id": obj["project_id"]},
-                                  {"_id": 0, "date": 1, "data": 1}).to_list(length=None)
+                                  {"_id": 0, "date": 1, "data": 1, "money_spent": 1}).to_list(length=None)
 
 
 @life_objects_router.post("", status_code=201)
@@ -430,6 +480,16 @@ async def detail(obj_id: str, current_user: dict = Depends(get_current_user)):
     objs, txs, claimed = await _load(db, current_user["id"])
     today = date_type.today().isoformat()
     return {**_public(o), "ltc": compute_ltc(o, txs, await _checkins(db, current_user["id"], o), claimed, today)}
+
+
+@life_objects_router.get("/{obj_id}/fuel")
+async def fuel(obj_id: str, current_user: dict = Depends(get_current_user)):
+    """Real mileage and fuel cost per km / per day from fill check-ins
+    (odometer + price per litre at each fill)."""
+    _premium(current_user)
+    db = get_db()
+    o = await _own(db, current_user["id"], obj_id)
+    return fuel_report(await _checkins(db, current_user["id"], o))
 
 
 @life_objects_router.get("/{obj_id}/schedule")
