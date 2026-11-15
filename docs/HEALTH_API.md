@@ -58,3 +58,31 @@ Needs the health consent. Numbers always come from Hymn's food list (200 everyda
 - `POST /api/food/my-foods` `{name, unit, kcal, protein_g, carbs_g, fat_g, fibre_g, veg_fruit_portions, protein_servings, sugary, fried}`, `GET`, `DELETE /api/food/my-foods/{id}`.
 
 The day's portions are written into the daily log automatically (what suggestions read). A manual tap in the daily log for the same day replaces them until the next meal is logged. Deleting all health data also deletes meals and own foods.
+
+## Watch and phone sync — any brand, or none — `/api/health/sync`
+
+The app reads the phone's health hub and posts the numbers; Hymn doesn't care which watch.
+- Android: **Health Connect** (Samsung Health, Google Fit, Fitbit and many other apps write into it). iPhone: **Apple Health**. No watch: the phone's step counter via the same hub, or the daily log.
+- `POST /api/health/sync` `{source_app: "Samsung Health"|"Fitbit"|"Apple Health"…, device, readings: [{metric, value, date (local YYYY-MM-DD), unit?}]}` → `{saved, skipped, last_sync}`. Metrics: steps, active_minutes, sleep_hours (or minutes with `unit: "minutes"`), resting_hr, weight_kg (or `unit: "lb"`), vo2max, bp_systolic, bp_diastolic. One value per metric per day; re-sending a day replaces it. Bad readings are skipped, never fail the batch. Send the last 30 days on first connect, then daily.
+- What the person types for a day wins over the watch for that day.
+- `GET /api/health/sync` → `{sources[{source_app, device, last_sync, readings}], metrics, hubs[], note}` (use `hubs` for the "connect" screen).
+- `POST /api/health/sync/disconnect` `{source_app, delete_data}`.
+
+## Lab reports (optional, never required) — `/api/health/labs`
+
+- `POST /api/health/labs/read` `{file_base64, media_type: application/pdf|image/jpeg|png|webp}` (under 10 MB; unlock password PDFs first) → nothing saved, file not kept → `{is_lab_report, report_date, lab, results: [{test_name, value, unit, reference_range, flag, metric|null, hymn_value, hymn_unit, status, why, check?}], note}`. Hymn tracks fasting glucose, HbA1c, LDL, HDL, triglycerides, eGFR, urine albumin (units converted: mmol/L, mmol/mol, mg/mmol); everything else is kept as printed. A line with `check` couldn't be read safely: ask the person to check it.
+- `POST /api/health/labs` `{report_date, lab, results[]}` (send back the confirmed lines) → `{id, tracked_saved, kept_as_printed}`. `GET /api/health/labs`, `DELETE /api/health/labs/{id}` (also removes its values).
+- Allowance: free 3 reports a month, Premium 20 (`HYMN_LAB_READS_FREE` / `_PREMIUM`); 429 when used, 503 when the AI is down (not counted). Typing values in (`POST /api/health/measurements` with `source: "lab"`) is always free.
+
+## Check-up calendar — `/api/health/checkups`
+
+- `GET` → `{checks: [{key, label, why, every_months, last_done, next_due, status: overdue|never|due_soon|ok, ask_doctor}], missing_profile[], rules_reviewed, note}`, overdue first. Fits age, sex, conditions, family history and tobacco (India's screening programme for 30+: BP, diabetes, oral, breast, cervical; plus lipids, kidney and eyes for diabetes/BP, dental, hearing 60+, bones for women 65+, bowel from 50 "ask your doctor", weight & waist every 3 months). DRAFT until a doctor reviews.
+- A logged value counts as done (a BP reading, an HbA1c). `POST /api/health/checkups/{key}/done` `{date}` for the rest → the updated calendar.
+
+## 90-day progress — `GET /api/health/progress?start=`
+
+First 30 days from `start` (default: the start of the last 90 days with logs) vs days 61–90 (or the latest 30 while running) → `{day, complete, baseline, compared_with, lines: [{metric, label, unit, before, after, change, verdict: better|worse|steady|changed, points}], note}`. Weight shows `changed`, never better/worse. Before day 31: `lines: []` and a "Day N of 90" note.
+
+## Doctor summary — `GET /api/health/doctor-summary?format=json|text&include_private=false`
+
+One page for a doctor: age, sex, conditions, medicines, family history, smoking/alcohol, latest readings (value · date · source), 90-day changes, symptoms logged in 90 days, habits (private ones only with `include_private=true`), check-ups due, latest lab report as printed, and the person's questions (`doctor_questions` in the profile, up to 10). `format=text` returns plain text for WhatsApp / email / print.
