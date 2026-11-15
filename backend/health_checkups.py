@@ -15,11 +15,11 @@ import calendar
 from datetime import date as date_type, datetime, timezone
 from typing import Callable, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from deps import get_current_user, get_db
-from health import RULES_REVIEWED, _date, _profile, age_on, summarise
+from health import RULES_REVIEWED, _date, _profile, age_on, person, summarise
 
 checkups_router = APIRouter(prefix="/health/checkups", tags=["health"])
 
@@ -143,8 +143,9 @@ async def _calendar(db, user: dict) -> dict:
 
 
 @checkups_router.get("")
-async def get_calendar(current_user: dict = Depends(get_current_user)):
-    return await _calendar(get_db(), current_user)
+async def get_calendar(current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    return await _calendar(get_db(), await person(get_db(), current_user, for_))
 
 
 class Done(BaseModel):
@@ -152,15 +153,18 @@ class Done(BaseModel):
 
 
 @checkups_router.post("/{key}/done")
-async def mark_done(key: str, body: Done, current_user: dict = Depends(get_current_user)):
+async def mark_done(key: str, body: Done, current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    who = await person(get_db(), current_user, for_)
+    uid = who["id"]
     if key not in {c.key for c in CHECKS}:
         raise HTTPException(status_code=404, detail="Unknown check")
     db = get_db()
-    await _profile(db, current_user["id"])
+    await _profile(db, uid)
     day = _date(body.date)
     if day > date_type.today().isoformat():
         raise HTTPException(status_code=400, detail="That date is in the future.")
-    await db.health_checkups.update_one({"user_id": current_user["id"], "key": key},
+    await db.health_checkups.update_one({"user_id": uid, "key": key},
                                         {"$set": {"date": day, "updated_at": datetime.now(timezone.utc).isoformat()}},
                                         upsert=True)
-    return await _calendar(db, current_user)
+    return await _calendar(db, who)

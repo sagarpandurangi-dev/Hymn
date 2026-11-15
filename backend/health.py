@@ -39,7 +39,7 @@ from datetime import date as date_type, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from deps import get_current_user, get_db
@@ -407,6 +407,50 @@ def suggestions(rows: List[dict], today: date_type) -> List[dict]:
                         "measure": "Days logged", "review_in_days": 28}]
 
 
+# What a plan can aim for (kind "health" requirements in life plans), with
+# the direction that counts as reaching it.
+HEALTH_TARGETS = {"steps": "at_least", "active_minutes": "at_least", "strength_session": "at_least",
+                  "sleep_hours": "at_least", "veg_fruit_portions": "at_least", "water_glasses": "at_least",
+                  "sugary_items": "at_most", "outside_meals": "at_most", "screen_hours": "at_most",
+                  "resting_hr": "at_most", "waist_cm": "at_most", "bp_systolic": "at_most"}
+RECENT_DAYS = 14
+
+
+def recent_average(rows: List[dict], metric: str, today: date_type) -> Optional[tuple]:
+    """(average, points) over the last two weeks, one value per day."""
+    since = (today - timedelta(days=RECENT_DAYS - 1)).isoformat()
+    vals = [Decimal(str(r["value"])) for r in one_per_day(rows) if r["metric"] == metric and r["taken_on"] >= since]
+    if metric == "strength_session":          # sessions a week, not a daily average
+        return (Decimal(sum(vals)) / 2, len(vals)) if vals else None
+    return (sum(vals) / len(vals), len(vals)) if vals else None
+
+
+def planner_summary(profile: dict, rows: List[dict], today: date_type) -> List[dict]:
+    """The short health picture the planner may see (only with
+    ``use_in_planner``): no raw logs, no lab values, no symptoms."""
+    facts = []
+    age = age_on(profile.get("date_of_birth"), today)
+    if age is not None:
+        facts.append(("age", "Age", str(age)))
+    if profile.get("conditions"):
+        facts.append(("health_conditions", "Health conditions", ", ".join(c.replace("_", " ")
+                                                                           for c in profile["conditions"])))
+    dash = dashboard(profile, rows, today)
+    attention = [d["label"] for d in dash["domains"] if d["colour"] in ("red", "amber")]
+    if attention:
+        facts.append(("health_needs_attention", "Health areas that need attention", ", ".join(attention)))
+    for metric, label in (("steps", "Steps a day"), ("active_minutes", "Active minutes a day"),
+                          ("sleep_hours", "Sleep a night"), ("strength_session", "Strength sessions a week")):
+        got = recent_average(rows, metric, today)
+        if got and got[1] >= 3:
+            facts.append((f"recent_{metric}", f"{label} (last 2 weeks)", format(got[0].quantize(Decimal("0.1")), "f")))
+    sc = dash["screening"]
+    if not sc["weight_loss_ok"]:
+        facts.append(("weight_loss_needs_doctor", "Weight loss: see a doctor first because",
+                      ", ".join(sc["see_doctor_first_because"])))
+    return [{"key": k, "label": l, "value": v, "source": "health (shared with the planner)"} for k, l, v in facts]
+
+
 def symptom_flags(symptoms: List[str]) -> List[dict]:
     out = []
     for s in symptoms:
@@ -436,6 +480,7 @@ class Profile(BaseModel):
     on_glucose_lowering_medicine: bool = False
     hearing_difficulty: bool = False
     doctor_questions: List[str] = Field(default_factory=list, max_length=10)   # for the doctor summary
+    use_in_planner: bool = False      # let the planner (AI) see a short health summary to plan with
 
 
 class Measurement(BaseModel):
@@ -465,6 +510,21 @@ class Daily(BaseModel):
     symptoms: List[str] = Field(default_factory=list)
 
 
+async def person(db, user: dict, for_: Optional[str]) -> dict:
+    """Whose health this request is about: the person themselves, or someone
+    they look after (a care profile they own; see ``care``)."""
+    if not for_:
+        return {"id": user["id"], "name": user.get("name", ""), "self": True}
+    cp = await db.care_profiles.find_one({"id": for_, "owner_id": user["id"]}, {"_id": 0, "id": 1, "name": 1})
+    if not cp:
+        raise HTTPException(status_code=404, detail="Person not found")
+    return {"id": cp["id"], "name": cp["name"], "self": False}
+
+
+async def subject(db, user: dict, for_: Optional[str]) -> str:
+    return (await person(db, user, for_))["id"]
+
+
 async def _profile(db, user_id: str) -> dict:
     p = await db.health_profiles.find_one({"user_id": user_id}, {"_id": 0})
     if not p or not p.get("consent"):
@@ -480,7 +540,9 @@ def _date(v: str) -> str:
 
 
 @health_router.put("/profile")
-async def put_profile(body: Profile, current_user: dict = Depends(get_current_user)):
+async def put_profile(body: Profile, current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    uid = await subject(get_db(), current_user, for_)
     if not body.consent:
         raise HTTPException(status_code=400, detail="Hymn stores health data only with your consent.")
     if body.date_of_birth:
@@ -489,15 +551,17 @@ async def put_profile(body: Profile, current_user: dict = Depends(get_current_us
         [f for f in body.family_history if f not in FAMILY_HISTORY]
     if bad:
         raise HTTPException(status_code=400, detail=f"Unknown: {', '.join(bad)}")
-    doc = {**body.model_dump(), "user_id": current_user["id"], "consented_at": _now(), "updated_at": _now()}
-    await get_db().health_profiles.replace_one({"user_id": current_user["id"]}, doc, upsert=True)
+    doc = {**body.model_dump(), "user_id": uid, "consented_at": _now(), "updated_at": _now()}
+    await get_db().health_profiles.replace_one({"user_id": uid}, doc, upsert=True)
     doc.pop("user_id")
     return doc
 
 
 @health_router.get("/profile")
-async def get_profile(current_user: dict = Depends(get_current_user)):
-    p = await get_db().health_profiles.find_one({"user_id": current_user["id"]}, {"_id": 0, "user_id": 0})
+async def get_profile(current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    uid = await subject(get_db(), current_user, for_)
+    p = await get_db().health_profiles.find_one({"user_id": uid}, {"_id": 0, "user_id": 0})
     return p or {"consent": False}
 
 
@@ -519,55 +583,65 @@ async def _store(db, user_id: str, items: List[dict]) -> List[dict]:
 
 
 @health_router.post("/measurements", status_code=201)
-async def add_measurements(body: List[Measurement], current_user: dict = Depends(get_current_user)):
+async def add_measurements(body: List[Measurement], current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    uid = await subject(get_db(), current_user, for_)
     db = get_db()
-    await _profile(db, current_user["id"])
-    rows = await _store(db, current_user["id"], [m.model_dump() for m in body])
+    await _profile(db, uid)
+    rows = await _store(db, uid, [m.model_dump() for m in body])
     return {"saved": len(rows)}
 
 
 @health_router.get("/measurements")
-async def list_measurements(metric: Optional[str] = None, current_user: dict = Depends(get_current_user)):
-    q = {"user_id": current_user["id"], **({"metric": metric} if metric else {})}
+async def list_measurements(metric: Optional[str] = None, current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    uid = await subject(get_db(), current_user, for_)
+    q = {"user_id": uid, **({"metric": metric} if metric else {})}
     return await get_db().health_measurements.find(q, {"_id": 0, "user_id": 0}).sort("taken_on", -1) \
         .to_list(length=1000)
 
 
 @health_router.post("/daily")
-async def daily(body: Daily, current_user: dict = Depends(get_current_user)):
+async def daily(body: Daily, current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
     """The 30-second daily log. Returns any red flags first."""
+    uid = await subject(get_db(), current_user, for_)
     db = get_db()
-    await _profile(db, current_user["id"])
+    await _profile(db, uid)
     day = _date(body.date)
     bad = [s for s in body.symptoms if s not in RED_FLAG_SYMPTOMS]
     if bad:
         raise HTTPException(status_code=400, detail=f"Unknown symptoms: {', '.join(bad)}")
     values = body.model_dump(exclude={"date", "symptoms"}, exclude_none=True)
     # One entry per metric per day: today's tap replaces an earlier one.
-    await db.health_measurements.delete_many({"user_id": current_user["id"], "taken_on": day, "source": "you",
+    await db.health_measurements.delete_many({"user_id": uid, "taken_on": day, "source": "you",
                                               "metric": {"$in": list(values)}})
-    await _store(db, current_user["id"], [{"metric": k, "value": v, "taken_on": day, "source": "you"}
+    await _store(db, uid, [{"metric": k, "value": v, "taken_on": day, "source": "you"}
                                           for k, v in values.items()])
     for sym in set(body.symptoms):
-        await db.health_symptoms.update_one({"user_id": current_user["id"], "date": day, "symptom": sym},
+        await db.health_symptoms.update_one({"user_id": uid, "date": day, "symptom": sym},
                                             {"$set": {"logged_at": _now()}}, upsert=True)
     return {"saved": len(values), "red_flags": symptom_flags(body.symptoms)}
 
 
 @health_router.get("/dashboard")
-async def get_dashboard(current_user: dict = Depends(get_current_user)):
+async def get_dashboard(current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    uid = await subject(get_db(), current_user, for_)
     db = get_db()
-    profile = await _profile(db, current_user["id"])
-    rows = await db.health_measurements.find({"user_id": current_user["id"]}, {"_id": 0}).to_list(length=None)
+    profile = await _profile(db, uid)
+    rows = await db.health_measurements.find({"user_id": uid}, {"_id": 0}).to_list(length=None)
     return dashboard(profile, rows, date_type.today())
 
 
 @health_router.get("/suggestions")
-async def get_suggestions(current_user: dict = Depends(get_current_user)):
+async def get_suggestions(current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
     """Up to three next steps from what you log (never from lab reports)."""
+    uid = await subject(get_db(), current_user, for_)
     db = get_db()
-    await _profile(db, current_user["id"])
-    rows = await db.health_measurements.find({"user_id": current_user["id"]}, {"_id": 0}).to_list(length=None)
+    await _profile(db, uid)
+    rows = await db.health_measurements.find({"user_id": uid}, {"_id": 0}).to_list(length=None)
     return suggestions(rows, date_type.today())
 
 
@@ -581,17 +655,19 @@ async def options():
 
 
 @health_router.delete("/all")
-async def delete_everything(current_user: dict = Depends(get_current_user)):
+async def delete_everything(current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
     """Delete every piece of health data Hymn holds for this person."""
+    uid = await subject(get_db(), current_user, for_)
     db = get_db()
-    await db.health_measurements.delete_many({"user_id": current_user["id"]})
-    await db.health_profiles.delete_one({"user_id": current_user["id"]})
-    await db.habit_logs.delete_many({"user_id": current_user["id"]})
-    await db.habits.delete_many({"user_id": current_user["id"]})
-    await db.food_meals.delete_many({"user_id": current_user["id"]})
-    await db.food_custom.delete_many({"user_id": current_user["id"]})
+    await db.health_measurements.delete_many({"user_id": uid})
+    await db.health_profiles.delete_one({"user_id": uid})
+    await db.habit_logs.delete_many({"user_id": uid})
+    await db.habits.delete_many({"user_id": uid})
+    await db.food_meals.delete_many({"user_id": uid})
+    await db.food_custom.delete_many({"user_id": uid})
     for coll in ("health_symptoms", "health_lab_reports", "health_checkups", "health_sync_sources"):
-        await db[coll].delete_many({"user_id": current_user["id"]})
+        await db[coll].delete_many({"user_id": uid})
     return {"detail": "All your health data has been deleted."}
 
 

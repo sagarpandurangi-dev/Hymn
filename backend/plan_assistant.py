@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 import claude_client
+import health
 import life_plans
 from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
@@ -59,7 +60,8 @@ How you work:
    Save corrections and answers with remember_fact.
 3. Work out WHAT MUST GO RIGHT (requirements) and WHAT MAY STOP IT (risks), across every area the goal
    touches — not just money. A child is health, family, work, time and money. Requirements are time
-   (minutes), money (an amount by a date) or conditions only the person can confirm.
+   (minutes), money (an amount by a date), health (a measure to reach, e.g. steps a day) or conditions only
+   the person can confirm.
 4. Call propose_plan. It benchmarks every requirement against what's available now and what can be
    built up by T−1, and returns a verdict. Report it plainly: what's covered now, by then, short by how
    much, and what's unknown.
@@ -72,6 +74,12 @@ know, link the plan to that dream (serves_plan_id when it's one of their plans, 
 and use it as the reason in everything you say. Never motivate with fear, guilt or scare facts. A slip is
 part of the process, never a failure. If their life looks stretched (money short, sleep poor, stress high),
 help steady those too — calmer lives make change easier — but never tell them to delay quitting.
+
+Health in plans: if get_context shows health facts, use them to plan (e.g. a trek needs fitness: a
+"health" requirement such as steps ≥ 8000 a day, benchmarked from their own log). Only use measures Hymn
+tracks. If it says health isn't shared, ask once whether they'd like to switch it on in Health; never
+pressure. If "weight_loss_needs_doctor" is present, don't build a weight-loss plan: suggest seeing a doctor
+first. If they look after someone, remember that care takes time and money too.
 
 Checklists: for buying a house, a wedding or a first child, call use_template first and start from its
 requirements and risks (fill in amounts from what the person tells you); anything you add beyond it, say is
@@ -130,7 +138,11 @@ TOOLS = [
          "serves_plan_id": {"type": "string", "description": "id of the dream plan this serves, if any"},
          "requirements": {"type": "array", "items": {"type": "object", "properties": {
              "area": {"type": "string", "enum": list(life_plans.AREAS)}, "what": {"type": "string"},
-             "kind": {"type": "string", "enum": ["time", "money", "condition"]}, "amount": {"type": "number"},
+             "kind": {"type": "string", "enum": ["time", "money", "condition", "health"]},
+             "amount": {"type": "number"},
+             "metric": {"type": "string", "enum": list(health.HEALTH_TARGETS),
+                        "description": "health only: what to reach, e.g. steps (a day), strength_session (a week)"},
+             "target": {"type": "number", "description": "health only: e.g. 8000 steps a day"},
              "currency": {"type": "string"}, "needed_by": {"type": "string"}, "earliest": {"type": "string"},
              "latest": {"type": "string"}, "min_block": {"type": "integer"},
              "weekdays": {"type": "array", "items": {"type": "string"}}},
@@ -188,6 +200,34 @@ def life_plans_schedule(principal, rate, months):
 # Context: what Hymn knows (with sources)
 # ---------------------------------------------------------------------------
 
+async def _health_facts(db, uid: str) -> List[dict]:
+    """A short health picture, only when the person has said the planner may
+    use it. Never raw logs, lab values or symptoms."""
+    import health
+
+    profile = await db.health_profiles.find_one({"user_id": uid, "consent": True}, {"_id": 0})
+    out: List[dict] = []
+    if profile and profile.get("use_in_planner"):
+        rows = await db.health_measurements.find({"user_id": uid}, {"_id": 0}).to_list(length=None)
+        out = health.planner_summary(profile, rows, date_type.today())
+        habits = await db.habits.find({"user_id": uid, "status": "active", "private": {"$ne": True}},
+                                      {"_id": 0, "label": 1, "kind": 1, "goal": 1}).to_list(length=None)
+        if habits:
+            out.append({"key": "habits_changing", "label": "Habits they're changing",
+                        "value": ", ".join(f"{h.get('label') or h['kind']} ({h['goal'].replace('_', ' ')})"
+                                           for h in habits), "source": "habits"})
+    elif profile:
+        out.append({"key": "health_data", "label": "Health data",
+                    "value": "Not shared with the planner (they can switch it on in Health)", "source": "health"})
+    people = await db.care_profiles.find({"owner_id": uid}, {"_id": 0, "name": 1, "relation": 1}) \
+        .to_list(length=None)
+    if people:
+        out.append({"key": "looks_after", "label": "Looks after",
+                    "value": ", ".join(f"{p['name']} ({p['relation'].replace('_', ' ')})" for p in people),
+                    "source": "caregiver"})
+    return out
+
+
 async def get_context(db, user: dict) -> dict:
     import planned_money
     import reports
@@ -242,6 +282,7 @@ async def get_context(db, user: dict) -> dict:
             facts.append({"key": "family", "label": "Family in Hymn",
                           "value": ", ".join(f"{p['name']} ({p.get('relation') or 'family'})" for p in people),
                           "source": "family"})
+    facts += await _health_facts(db, uid)
     told = await db.user_facts.find({"user_id": uid}, {"_id": 0}).to_list(length=None)
     by_key = {f["key"]: f for f in facts}
     for f in told:
@@ -299,8 +340,9 @@ async def run_tool(db, user: dict, chat: dict, name: str, args: dict) -> Any:
         evaluated = await life_plans._evaluated(db, uid, plan)
         chat.setdefault("plan_ids", []).append(plan["id"])
         return {"plan_id": plan["id"], "verdict": evaluated["verdict"],
-                "requirements": [{k: r.get(k) for k in ("what", "area", "kind", "amount", "status",
-                                                        "available_now", "built_up_by_then", "gap")}
+                "requirements": [{k: r.get(k) for k in ("what", "area", "kind", "amount", "metric", "target",
+                                                        "unit", "status", "available_now", "built_up_by_then",
+                                                        "gap", "note") if r.get(k) is not None}
                                  for r in evaluated["requirements"]]}
     return {"error": f"unknown tool {name}"}
 

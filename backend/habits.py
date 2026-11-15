@@ -262,7 +262,9 @@ async def urge(habit_id: str, body: Urge, current_user: dict = Depends(get_curre
     habit = await _own(db, current_user["id"], habit_id)
     day = _date(body.date)
     update: Dict[str, Any] = {"$inc": {"urges": 1}, "$set": {"user_id": current_user["id"], "updated_at": _now()},
-                              "$setOnInsert": {"id": str(uuid.uuid4()), "amount": "0"}}
+                              "$setOnInsert": {"id": str(uuid.uuid4()), "amount": "0"},
+                              # When urges come, so a check-in can arrive just before (health_nudges).
+                              "$push": {"urge_times": {"$each": [_now()], "$slice": -20}}}
     if body.trigger:
         update["$addToSet"] = {"triggers": body.trigger.strip().lower()}
     await db.habit_logs.update_one({"habit_id": habit_id, "date": day}, update, upsert=True)
