@@ -242,8 +242,33 @@ DAILY_AVERAGED = {"sleep_hours", "steps", "active_minutes", "mood", "stress", "e
                   "water_glasses"}
 
 
+_SOURCE_PRIORITY = {"you": 0, "doctor": 1, "lab": 2, "watch": 3, "ai": 4}
+
+
+def one_per_day(rows: List[dict]) -> List[dict]:
+    """Daily signals keep one value per metric per day: what the person typed
+    wins over a watch (it's their correction); otherwise the newest entry.
+    Point readings (BP, weight, labs) keep every row."""
+    best: Dict[tuple, dict] = {}
+    out = []
+    for r in rows:
+        if r["metric"] not in DAILY_AVERAGED:
+            out.append(r)
+            continue
+        key = (r["metric"], r["taken_on"][:10])
+        cur = best.get(key)
+        if cur is None:
+            best[key] = r
+            continue
+        p_new, p_cur = _SOURCE_PRIORITY.get(r.get("source"), 9), _SOURCE_PRIORITY.get(cur.get("source"), 9)
+        if p_new < p_cur or (p_new == p_cur and (r.get("created_at") or "") > (cur.get("created_at") or "")):
+            best[key] = r
+    return out + list(best.values())
+
+
 def summarise(rows: List[dict], today: date_type) -> Dict[str, dict]:
     """Latest value per metric; daily signals use their 7-day average."""
+    rows = one_per_day(rows)
     by_metric: Dict[str, List[dict]] = defaultdict(list)
     for r in rows:
         by_metric[r["metric"]].append(r)
@@ -335,6 +360,7 @@ def suggestions(rows: List[dict], today: date_type) -> List[dict]:
     """What to do next, from what the person logs (food, movement, sleep,
     mood) — never from lab values. Each says what, why, the action, how
     progress is measured and when to look again."""
+    rows = one_per_day(rows)
     since = (today - timedelta(days=13)).isoformat()
     logged_days = {r["taken_on"] for r in rows if r["taken_on"] >= since and r["source"] in ("you", "watch")}
     if len(logged_days) < 5:
@@ -409,6 +435,7 @@ class Profile(BaseModel):
     eating_disorder_history: bool = False
     on_glucose_lowering_medicine: bool = False
     hearing_difficulty: bool = False
+    doctor_questions: List[str] = Field(default_factory=list, max_length=10)   # for the doctor summary
 
 
 class Measurement(BaseModel):
@@ -521,6 +548,9 @@ async def daily(body: Daily, current_user: dict = Depends(get_current_user)):
                                               "metric": {"$in": list(values)}})
     await _store(db, current_user["id"], [{"metric": k, "value": v, "taken_on": day, "source": "you"}
                                           for k, v in values.items()])
+    for sym in set(body.symptoms):
+        await db.health_symptoms.update_one({"user_id": current_user["id"], "date": day, "symptom": sym},
+                                            {"$set": {"logged_at": _now()}}, upsert=True)
     return {"saved": len(values), "red_flags": symptom_flags(body.symptoms)}
 
 
@@ -560,9 +590,16 @@ async def delete_everything(current_user: dict = Depends(get_current_user)):
     await db.habits.delete_many({"user_id": current_user["id"]})
     await db.food_meals.delete_many({"user_id": current_user["id"]})
     await db.food_custom.delete_many({"user_id": current_user["id"]})
+    for coll in ("health_symptoms", "health_lab_reports", "health_checkups", "health_sync_sources"):
+        await db[coll].delete_many({"user_id": current_user["id"]})
     return {"detail": "All your health data has been deleted."}
 
 
 async def ensure_health_indexes(db) -> None:
     await db.health_profiles.create_index("user_id", unique=True)
     await db.health_measurements.create_index([("user_id", 1), ("metric", 1), ("taken_on", 1)])
+    await db.health_symptoms.create_index([("user_id", 1), ("date", 1), ("symptom", 1)], unique=True)
+    await db.health_lab_reports.create_index([("user_id", 1), ("report_date", -1)])
+    await db.health_checkups.create_index([("user_id", 1), ("key", 1)], unique=True)
+    await db.health_sync_sources.create_index([("user_id", 1), ("source_app", 1)], unique=True)
+    await db.lab_read_uses.create_index([("user_id", 1), ("month", 1)], unique=True)
