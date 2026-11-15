@@ -236,6 +236,9 @@ class Risk(BaseModel):
 class PlanCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     target_date: str
+    # "For what?": the life this serves (a dream plan, or in words).
+    for_what: str = Field(default="", max_length=300)
+    serves_plan_id: Optional[str] = None
     requirements: List[Requirement] = Field(min_length=1, max_length=50)
     risks: List[Risk] = Field(default_factory=list, max_length=50)
 
@@ -289,10 +292,14 @@ def _clean_requirement(r: dict, target: str) -> dict:
 
 
 async def _save(db, user_id: str, title: str, target: str, requirements: List[dict], risks: List[dict],
-                status: str = "active", chat_id: Optional[str] = None) -> dict:
+                status: str = "active", chat_id: Optional[str] = None, for_what: str = "",
+                serves_plan_id: Optional[str] = None) -> dict:
     _date(target, "target_date")
+    if serves_plan_id and not await db.life_plans.find_one({"id": serves_plan_id, "user_id": user_id}, {"_id": 1}):
+        raise HTTPException(status_code=400, detail="The plan this serves wasn't found.")
     plan = {"id": str(uuid.uuid4()), "user_id": user_id, "title": title.strip(), "target_date": target,
-            "status": status, "chat_id": chat_id,
+            "status": status, "chat_id": chat_id, "for_what": (for_what or "").strip(),
+            "serves_plan_id": serves_plan_id,
             "requirements": [_clean_requirement(r, target) for r in requirements],
             "risks": [{**k, "id": str(uuid.uuid4())} for k in risks], "created_at": _now(), "updated_at": _now()}
     await db.life_plans.insert_one(dict(plan))
@@ -314,6 +321,10 @@ async def _evaluated(db, user_id: str, plan: dict) -> dict:
     user = await db.users.find_one({"id": user_id}, {"_id": 0, "timezone": 1}) or {}
     now = local_now(user)
     out = await benchmark(db, user_id, plan, now.date(), now)
+    if plan.get("serves_plan_id"):
+        served = await db.life_plans.find_one({"id": plan["serves_plan_id"], "user_id": user_id},
+                                              {"_id": 0, "id": 1, "title": 1, "target_date": 1})
+        out["serves"] = served
     out.pop("user_id", None)
     return out
 
@@ -322,7 +333,8 @@ async def _evaluated(db, user_id: str, plan: dict) -> dict:
 async def create_plan(body: PlanCreate, current_user: dict = Depends(get_current_user)):
     db = get_db()
     plan = await _save(db, current_user["id"], body.title, body.target_date,
-                       [r.model_dump() for r in body.requirements], [k.model_dump() for k in body.risks])
+                       [r.model_dump() for r in body.requirements], [k.model_dump() for k in body.risks],
+                       for_what=body.for_what, serves_plan_id=body.serves_plan_id)
     return await _evaluated(db, current_user["id"], plan)
 
 

@@ -66,6 +66,13 @@ How you work:
 5. If it doesn't fit, offer 2–3 concrete options (change order, amount, date, scope) and check EACH
    with propose_plan before presenting it.
 
+For what: every health or habit plan (quit smoking, lose weight, sleep better, get fit) must answer "what
+life is this for?" — the dream, the people, the purpose larger than themselves. Ask it gently if you don't
+know, link the plan to that dream (serves_plan_id when it's one of their plans, or for_what in their words),
+and use it as the reason in everything you say. Never motivate with fear, guilt or scare facts. A slip is
+part of the process, never a failure. If their life looks stretched (money short, sleep poor, stress high),
+help steady those too — calmer lives make change easier — but never tell them to delay quitting.
+
 Checklists: for buying a house, a wedding or a first child, call use_template first and start from its
 requirements and risks (fill in amounts from what the person tells you); anything you add beyond it, say is
 your suggestion. If a checklist says reviewed: false, tell the person it is a draft still being checked by an
@@ -119,6 +126,8 @@ TOOLS = [
         "requirement) and verdict. Use for the main plan and for every option you offer."),
      "input_schema": {"type": "object", "properties": {
          "title": {"type": "string"}, "target_date": {"type": "string"},
+         "for_what": {"type": "string", "description": "The life / dream this plan serves, in their words"},
+         "serves_plan_id": {"type": "string", "description": "id of the dream plan this serves, if any"},
          "requirements": {"type": "array", "items": {"type": "object", "properties": {
              "area": {"type": "string", "enum": list(life_plans.AREAS)}, "what": {"type": "string"},
              "kind": {"type": "string", "enum": ["time", "money", "condition"]}, "amount": {"type": "number"},
@@ -285,7 +294,8 @@ async def run_tool(db, user: dict, chat: dict, name: str, args: dict) -> Any:
         return out or {"error": "No checklist for that yet; plan from first principles."}
     if name == "propose_plan":
         plan = await life_plans._save(db, uid, args["title"], args["target_date"], args["requirements"],
-                                      args.get("risks") or [], status="draft", chat_id=chat["id"])
+                                      args.get("risks") or [], status="draft", chat_id=chat["id"],
+                                      for_what=args.get("for_what") or "", serves_plan_id=args.get("serves_plan_id"))
         evaluated = await life_plans._evaluated(db, uid, plan)
         chat.setdefault("plan_ids", []).append(plan["id"])
         return {"plan_id": plan["id"], "verdict": evaluated["verdict"],
