@@ -4337,7 +4337,11 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
             month = _next_month(month)
         monthly_windows.append({"currency": cur, "months": window})
     forecast = await _forecast_12_months(db, user_id)
-    events = await _recent_events(db, user_id, 20)
+    # On the money book, recent activity is its latest entries (same shape).
+    import money_service
+    events = await money_service.ledger_recent(db, user_id, 20)
+    if events is None:
+        events = await _recent_events(db, user_id, 20)
     # Commitments (active + terminal, capped) — read from allocation model + drafts.
     all_commitments = await _read_all_commitments(db, user_id)
     all_commitments.sort(key=lambda d: (d.get("due_date") or "", d.get("created_at") or ""))
