@@ -26,4 +26,5 @@ jq>=1.6.0
 typer>=0.9.0
 anthropic>=2.3.0
 pypdf>=5.0.0
+casparser==1.4.1
 emergentintegrations==0.2.0
