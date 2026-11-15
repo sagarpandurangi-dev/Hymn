@@ -2907,6 +2907,7 @@ import nudges  # noqa: E402
 from ledger import ledger_router, ensure_ledger_indexes  # noqa: E402
 from reports import reports_router  # noqa: E402
 from life_plans import life_plans_router, ensure_life_plan_indexes  # noqa: E402
+from health import health_router, ensure_health_indexes  # noqa: E402
 from plan_assistant import plan_chat_router, ensure_plan_chat_indexes  # noqa: E402
 from plan_templates import plan_templates_router  # noqa: E402
 from screens import screens_router  # noqa: E402
@@ -2930,6 +2931,7 @@ api_router.include_router(nudges.nudges_router)
 api_router.include_router(ledger_router)
 api_router.include_router(reports_router)
 api_router.include_router(life_plans_router)
+api_router.include_router(health_router)
 api_router.include_router(plan_chat_router)
 api_router.include_router(plan_templates_router)
 api_router.include_router(screens_router)
@@ -2988,6 +2990,7 @@ async def startup_indexes():
     await nudges.ensure_nudge_indexes(db)
     await ensure_ledger_indexes(db)
     await ensure_life_plan_indexes(db)
+    await ensure_health_indexes(db)
     await ensure_plan_chat_indexes(db)
     await ensure_family_indexes(db)
     await ensure_life_object_indexes(db)
