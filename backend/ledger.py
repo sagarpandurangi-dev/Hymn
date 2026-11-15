@@ -71,11 +71,14 @@ NOMINAL_ACCOUNTS: Dict[str, str] = {
     **{f"expense:{c}": "expense" for c in EXPENSE_CATEGORIES},
     **{f"income:{c}": "income" for c in INCOME_CATEGORIES},
     "equity:opening": "equity",
+    # Investments' market value moving (no money changed hands): shows as an
+    # "other change" in the Statement of Net Worth, never as income.
+    "equity:revaluation": "equity",
 }
 
 KINDS = (
     "expense", "income", "gift", "transfer", "investment", "redemption",
-    "card_settlement", "loan_payment", "refund", "opening_balance", "borrowing",
+    "card_settlement", "loan_payment", "refund", "opening_balance", "borrowing", "revaluation",
 )
 # Kinds whose money only moves between the user's own accounts.
 OWN_ACCOUNT_KINDS = frozenset({"transfer", "investment", "redemption", "card_settlement"})
@@ -230,6 +233,12 @@ def build_postings(d: Draft, real_accounts: Dict[str, dict]) -> List[dict]:
         dst = real(d.to_account_id, "to_account_id")
         cat = nominal(d.category, "expense:uncategorised", "expense")
         postings = [p(dst, amt, cash_date), p(cat, -amt, tx_date)]
+    elif k == "revaluation":  # an investment's market value moved: signed change, assets only
+        amt = to_decimal(d.amount, "amount")
+        acct = real(d.account_id, "account_id", ("asset",))
+        if amt == 0:
+            raise LedgerError("amount must not be zero")
+        postings = [p(acct, amt, tx_date), p("equity:revaluation", -amt, tx_date)]
     else:  # opening_balance: the balance as the user reads it (owed for liabilities)
         amt = to_decimal(d.amount, "amount")
         acct = real(d.account_id, "account_id")

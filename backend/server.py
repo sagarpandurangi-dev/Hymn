@@ -2915,6 +2915,7 @@ from health_labs import labs_router  # noqa: E402
 from health_checkups import checkups_router  # noqa: E402
 from health_reports import reports_router as health_reports_router  # noqa: E402
 from care import care_router, ensure_care_indexes  # noqa: E402
+from cas_import import cas_router, ensure_cas_indexes  # noqa: E402
 from plan_assistant import plan_chat_router, ensure_plan_chat_indexes  # noqa: E402
 from plan_templates import plan_templates_router  # noqa: E402
 from screens import screens_router  # noqa: E402
@@ -2946,6 +2947,7 @@ api_router.include_router(labs_router)
 api_router.include_router(checkups_router)
 api_router.include_router(health_reports_router)
 api_router.include_router(care_router)
+api_router.include_router(cas_router)
 api_router.include_router(plan_chat_router)
 api_router.include_router(plan_templates_router)
 api_router.include_router(screens_router)
@@ -3008,6 +3010,7 @@ async def startup_indexes():
     await ensure_habit_indexes(db)
     await ensure_food_indexes(db)
     await ensure_care_indexes(db)
+    await ensure_cas_indexes(db)
     await ensure_plan_chat_indexes(db)
     await ensure_family_indexes(db)
     await ensure_life_object_indexes(db)
