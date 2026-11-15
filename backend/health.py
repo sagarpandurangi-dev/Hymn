@@ -80,7 +80,17 @@ METRICS: Dict[str, tuple] = {
     "contentment": ("Contentment", "1–5", 1, 5, "mind_gut_senses", 30),
     "social_hours": ("Time with people you care about", "hours/week", 0, 100, "cognitive", 30),
     "learning_hours": ("Learning something new", "hours/week", 0, 100, "cognitive", 30),
+    # Food, in portions people can count (not calories).
+    "veg_fruit_portions": ("Vegetables & fruit", "portions/day", 0, 20, "metabolic", 14),
+    "protein_servings": ("Protein (dal, eggs, paneer, meat…)", "servings/day", 0, 15, "metabolic", 14),
+    "sugary_items": ("Sweets & sugary drinks", "items/day", 0, 30, "metabolic", 14),
+    "outside_meals": ("Outside / fried meals", "meals/day", 0, 6, "metabolic", 14),
+    "water_glasses": ("Water", "glasses/day", 0, 30, None, 14),
 }
+# Lab values are optional: some people won't share reports, and nothing in
+# Hymn depends on them. Without them they show as "not measured", never as
+# a gap to fill, and no plan is suggested from them.
+LAB_METRICS = {"fasting_glucose", "hba1c", "ldl", "hdl", "triglycerides", "egfr", "uacr"}
 
 DOMAINS = [
     ("cardiovascular", "Heart & circulation", "Sama-dosha (balance)"),
@@ -214,6 +224,12 @@ def rate(metric: str, value: Decimal, profile: dict, age: Optional[int]) -> tupl
         return ("green", "Regular") if value >= Decimal("1.5") else ("amber", "Often hard or missed")
     if metric == "screen_hours":
         return ("green", "Under 3 hours") if value < 3 else ("amber", "3 hours or more")
+    if metric == "veg_fruit_portions":
+        return ("green", "5 or more a day") if value >= 5 else ("amber", "Under 5 a day")
+    if metric == "sugary_items":
+        return ("green", "1 or fewer a day") if value <= 1 else ("amber", "More than 1 a day")
+    if metric == "outside_meals":
+        return ("green", "Mostly home food") if value < 1 else ("amber", "An outside meal most days")
     if metric == "one_leg_stand_s" and age is not None and age >= 60:
         return ("green", "10 seconds or more") if value >= 10 else ("amber", "Under 10 seconds")
     if metric == "chair_stands_30s" and age is not None and age >= 60:
@@ -222,7 +238,8 @@ def rate(metric: str, value: Decimal, profile: dict, age: Optional[int]) -> tupl
 
 
 DAILY_AVERAGED = {"sleep_hours", "steps", "active_minutes", "mood", "stress", "energy", "digestion", "bowel",
-                  "screen_hours"}
+                  "screen_hours", "veg_fruit_portions", "protein_servings", "sugary_items", "outside_meals",
+                  "water_glasses"}
 
 
 def summarise(rows: List[dict], today: date_type) -> Dict[str, dict]:
@@ -257,7 +274,8 @@ def dashboard(profile: dict, rows: List[dict], today: date_type) -> dict:
                 continue
             got = latest.get(metric)
             if got is None:
-                indicators.append({"metric": metric, "label": mlabel, "status": "missing"})
+                indicators.append({"metric": metric, "label": mlabel,
+                                   "status": "not_measured" if metric in LAB_METRICS else "missing"})
                 continue
             stale = (today - date_type.fromisoformat(got["taken_on"][:10])).days > fresh_days
             status, why = rate(metric, got["value"], profile, age)
@@ -308,6 +326,61 @@ def dashboard(profile: dict, rows: List[dict], today: date_type) -> dict:
             "note": "This supports your decisions with your doctor; it doesn't diagnose anything."}
 
 
+def _avg(rows: List[dict], metric: str, since: str) -> Optional[Decimal]:
+    vals = [Decimal(str(r["value"])) for r in rows if r["metric"] == metric and r["taken_on"] >= since]
+    return sum(vals) / len(vals) if vals else None
+
+
+def suggestions(rows: List[dict], today: date_type) -> List[dict]:
+    """What to do next, from what the person logs (food, movement, sleep,
+    mood) — never from lab values. Each says what, why, the action, how
+    progress is measured and when to look again."""
+    since = (today - timedelta(days=13)).isoformat()
+    logged_days = {r["taken_on"] for r in rows if r["taken_on"] >= since and r["source"] in ("you", "watch")}
+    if len(logged_days) < 5:
+        return [{"what": "Get a picture of your days", "why": "Suggestions are only as good as what Hymn can see.",
+                 "action": "Log food and movement for a week (30 seconds a day).",
+                 "measure": "Days logged", "review_in_days": 7}]
+    out = []
+    review = 14
+
+    def add(what, why, action, measure):
+        out.append({"what": what, "why": why, "action": action, "measure": measure, "review_in_days": review})
+
+    active, steps = _avg(rows, "active_minutes", since), _avg(rows, "steps", since)
+    if (active is not None and active < Decimal("21.4")) or (active is None and steps is not None and steps < 7000):
+        add("Move a little more", "Regular moderate activity protects the heart, sugar levels and memory.",
+            "Add a 10–15 minute brisk walk after one meal a day.", "Active minutes a day (aim ~22, i.e. 150 a week)")
+    strength = [r for r in rows if r["metric"] == "strength_session" and r["taken_on"] >= since and r["value"] > 0]
+    if len(strength) < 2:
+        add("Keep your muscles", "Strength keeps you independent as you age.",
+            "Two short strength sessions a week (squats to a chair, wall push-ups, carrying bags).",
+            "Strength sessions a week (aim 2)")
+    sleep = _avg(rows, "sleep_hours", since)
+    if sleep is not None and sleep < 7:
+        add("Protect your sleep", "Short sleep raises hunger, stress and long-term risk.",
+            "Pick a fixed bedtime and put the phone away 30 minutes before.", "Average sleep (aim 7–9 hours)")
+    veg = _avg(rows, "veg_fruit_portions", since)
+    if veg is not None and veg < 5:
+        add("More plants on the plate", "Vegetables and fruit help digestion, weight and heart health.",
+            "Add one portion at lunch (a katori of sabzi or a fruit).", "Portions a day (aim 5)")
+    sugar = _avg(rows, "sugary_items", since)
+    if sugar is not None and sugar > 1:
+        add("Ease off sugar", "Frequent sweets and sweet drinks push sugar levels and weight up.",
+            "Swap one sweet drink or dessert a day for fruit, buttermilk or water.", "Sugary items a day (aim ≤1)")
+    outside = _avg(rows, "outside_meals", since)
+    if outside is not None and outside >= 1:
+        add("More home food", "Outside and fried food is usually saltier, oilier and pricier.",
+            "Plan two more home-cooked meals a week.", "Outside meals a day")
+    stress = _avg(rows, "stress", since)
+    if stress is not None and stress >= Decimal("3.5"):
+        add("Make room to breathe", "Ongoing stress affects sleep, BP and habits.",
+            "Five minutes of slow breathing or a walk outdoors each day.", "Average stress (1–5)")
+    return out[:3] or [{"what": "Keep it steady", "why": "Your logs look balanced.",
+                        "action": "Carry on, and add one new healthy habit when you're ready.",
+                        "measure": "Days logged", "review_in_days": 28}]
+
+
 def symptom_flags(symptoms: List[str]) -> List[dict]:
     out = []
     for s in symptoms:
@@ -356,6 +429,12 @@ class Daily(BaseModel):
     sleep_hours: Optional[float] = Field(default=None, ge=0, le=16)
     steps: Optional[int] = Field(default=None, ge=0, le=80000)
     active_minutes: Optional[int] = Field(default=None, ge=0, le=600)
+    strength_session: Optional[int] = Field(default=None, ge=0, le=3)
+    veg_fruit_portions: Optional[int] = Field(default=None, ge=0, le=20)
+    protein_servings: Optional[int] = Field(default=None, ge=0, le=15)
+    sugary_items: Optional[int] = Field(default=None, ge=0, le=30)
+    outside_meals: Optional[int] = Field(default=None, ge=0, le=6)
+    water_glasses: Optional[int] = Field(default=None, ge=0, le=30)
     symptoms: List[str] = Field(default_factory=list)
 
 
@@ -453,6 +532,15 @@ async def get_dashboard(current_user: dict = Depends(get_current_user)):
     return dashboard(profile, rows, date_type.today())
 
 
+@health_router.get("/suggestions")
+async def get_suggestions(current_user: dict = Depends(get_current_user)):
+    """Up to three next steps from what you log (never from lab reports)."""
+    db = get_db()
+    await _profile(db, current_user["id"])
+    rows = await db.health_measurements.find({"user_id": current_user["id"]}, {"_id": 0}).to_list(length=None)
+    return suggestions(rows, date_type.today())
+
+
 @health_router.get("/options")
 async def options():
     """Lists for the app's pickers."""
@@ -468,6 +556,10 @@ async def delete_everything(current_user: dict = Depends(get_current_user)):
     db = get_db()
     await db.health_measurements.delete_many({"user_id": current_user["id"]})
     await db.health_profiles.delete_one({"user_id": current_user["id"]})
+    await db.habit_logs.delete_many({"user_id": current_user["id"]})
+    await db.habits.delete_many({"user_id": current_user["id"]})
+    await db.food_meals.delete_many({"user_id": current_user["id"]})
+    await db.food_custom.delete_many({"user_id": current_user["id"]})
     return {"detail": "All your health data has been deleted."}
 
 
