@@ -65,6 +65,7 @@ DEFAULT_SETTINGS = {
     "daily_review": {"enabled": True, "time": "20:30", "adaptive": True},
     "weekly_patterns": {"enabled": True, "weekday": 6, "time": "18:00"},  # Sunday
     "reminders": {"enabled": True},
+    "health": {"enabled": True, "time": "09:30"},   # check-ups, 90-day report, gentle log reminder
     "quiet_hours": {"start": "22:00", "end": "07:00"},
 }
 
@@ -382,6 +383,8 @@ async def run_due_nudges(db, now: Optional[datetime] = None) -> List[dict]:
                 nudge = await job(db, user, settings, now)
                 if nudge:
                     due.append(nudge)
+            from health_nudges import health_nudges
+            due.extend(await health_nudges(db, user, settings, now))
             for nudge in due:
                 await _deliver(db, nudge)
             sent.extend(due)
@@ -423,6 +426,11 @@ class ReminderSettings(BaseModel):
     enabled: Optional[bool] = None
 
 
+class HealthSettings(BaseModel):
+    enabled: Optional[bool] = None
+    time: Optional[str] = None
+
+
 class QuietHours(BaseModel):
     start: Optional[str] = None
     end: Optional[str] = None
@@ -432,6 +440,7 @@ class SettingsUpdate(BaseModel):
     daily_review: Optional[DailyReviewSettings] = None
     weekly_patterns: Optional[WeeklySettings] = None
     reminders: Optional[ReminderSettings] = None
+    health: Optional[HealthSettings] = None
     quiet_hours: Optional[QuietHours] = None
     timezone: Optional[str] = None
 
@@ -461,7 +470,7 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
 async def update_settings(body: SettingsUpdate, current_user: dict = Depends(get_current_user)):
     db = get_db()
     updates: dict = {}
-    for section in ("daily_review", "weekly_patterns", "reminders", "quiet_hours"):
+    for section in ("daily_review", "weekly_patterns", "reminders", "health", "quiet_hours"):
         values = getattr(body, section)
         if values is None:
             continue

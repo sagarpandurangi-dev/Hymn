@@ -86,3 +86,17 @@ First 30 days from `start` (default: the start of the last 90 days with logs) vs
 ## Doctor summary — `GET /api/health/doctor-summary?format=json|text&include_private=false`
 
 One page for a doctor: age, sex, conditions, medicines, family history, smoking/alcohol, latest readings (value · date · source), 90-day changes, symptoms logged in 90 days, habits (private ones only with `include_private=true`), check-ups due, latest lab report as printed, and the person's questions (`doctor_questions` in the profile, up to 10). `format=text` returns plain text for WhatsApp / email / print.
+
+## Caregiver mode — `/api/care` and `?for=`
+
+Look after a parent's (or child's) health from your own account.
+- `POST /api/care` `{name, relation: mother|father|parent_in_law|grandparent|spouse|child|sibling|other, their_consent: true}` → `{id: "care_…", …}`. `their_consent` = "they know and agree, or I'm their guardian" (required). Up to 10 people.
+- Every Health call works for them with `?for=<id>`: `PUT/GET /api/health/profile`, `/measurements`, `/daily`, `/dashboard`, `/suggestions`, `/checkups` (and `/done`), `/labs` (read/save/list/delete), `/progress`, `/doctor-summary` (uses their name), `DELETE /api/health/all`. Not for them: food log, habits, watch sync.
+- `GET /api/care` → `[{id, name, relation, profile_done, checkups_due, last_reading}]` (a "People I look after" list; show a dot when `checkups_due` > 0).
+- `PATCH /api/care/{id}` `{name}`; `DELETE /api/care/{id}` removes them and all their health data.
+- Their check-ups and 90-day report nudge you (`data.for` = their id).
+
+## Health in plans (opt-in)
+
+- Profile switch `use_in_planner` (default off): "Use my health in plans". When on, the planner sees a short summary — age, conditions, areas needing attention, 2-week averages of steps / active minutes / sleep / strength, habits being changed (not private ones), and whether weight loss needs a doctor first. Never raw logs, lab values or symptoms. When off, the planner sees only that health isn't shared and may ask once.
+- Plans can have **health requirements**: `{area: "health", kind: "health", what, metric, target}` with `metric` one of steps, active_minutes, strength_session (a week), sleep_hours, veg_fruit_portions, water_glasses, sugary_items, outside_meals, screen_hours, resting_hr, waist_cm, bp_systolic. Benchmarked from the last 2 weeks of logs: reached → `now`; not yet and before the date → `by_then` (`building: true`, `gap`); date passed → `short`; no data / not shared → `unknown` with a `note`. Accepting adds a "Build up: …" task.

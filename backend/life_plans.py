@@ -159,9 +159,44 @@ async def money_by(db, user_id: str, currency: str, by: str, plan_id: Optional[s
     return {"now": now_amount, "by_then": amount}
 
 
+async def _health_rows(db, user_id: str) -> Optional[List[dict]]:
+    """Health logs for benchmarking, only if the person shares health with
+    the planner (``use_in_planner`` in their health profile)."""
+    profile = await db.health_profiles.find_one({"user_id": user_id, "consent": True}, {"_id": 0})
+    if not profile or not profile.get("use_in_planner"):
+        return None
+    return await db.health_measurements.find({"user_id": user_id}, {"_id": 0}).to_list(length=None)
+
+
+def _bench_health(r: dict, rows: Optional[List[dict]], plan: dict, today: date_type) -> None:
+    """Where the person is now (last 2 weeks) against the target. Not there
+    yet but before the date: "by_then" — something to build up by T−1;
+    past the date and not there: "short"."""
+    import health
+
+    target = _dec(r["target"])
+    r["unit"] = health.METRICS[r["metric"]][1]
+    if rows is None:
+        r.update(status="unknown", available_now=None, note="Health isn't shared with plans (Health settings).")
+        return
+    got = health.recent_average(rows, r["metric"], today)
+    if not got or got[1] < 3:
+        r.update(status="unknown", available_now=None, note="Log this for a week to see where you are.")
+        return
+    now_v = got[0].quantize(Decimal("0.1"))
+    reached = now_v >= target if r["direction"] == "at_least" else now_v <= target
+    by = r.get("needed_by") or plan["target_date"]
+    r["available_now"] = format(now_v, "f")
+    if reached:
+        r.update(status="now", gap="0")
+    else:
+        r.update(status="by_then" if today.isoformat() < by else "short",
+                 gap=format(abs(target - now_v), "f"), building=True)
+
+
 async def benchmark(db, user_id: str, plan: dict, today: date_type, now: datetime) -> dict:
     """Fill in available-now / built-up-by-T−1 / status for every requirement."""
-    blocks = bookings = None
+    blocks = bookings = health_rows = None
     out = []
     for r in plan.get("requirements", []):
         r = dict(r)
@@ -193,6 +228,10 @@ async def benchmark(db, user_id: str, plan: dict, today: date_type, now: datetim
             r["status"] = "now" if m["now"] >= need else "by_then" if m["by_then"] >= need else "short"
             r["gap"] = "0" if r["status"] != "short" else format((need - max(m["by_then"], m["now"])).quantize(
                 Decimal("0.01")), "f")
+        elif r["kind"] == "health":
+            if health_rows is None:
+                health_rows = await _health_rows(db, user_id)
+            _bench_health(r, health_rows, plan, today)
         else:
             answer = r.get("answer")
             r["status"] = {"yes": "now", "no": "short"}.get(answer, "unknown")
@@ -215,8 +254,10 @@ async def benchmark(db, user_id: str, plan: dict, today: date_type, now: datetim
 class Requirement(BaseModel):
     area: Literal["money", "health", "family", "learning", "work", "time"]
     what: str = Field(min_length=1, max_length=200)
-    kind: Literal["time", "money", "condition"]
+    kind: Literal["time", "money", "condition", "health"]
     amount: Any = None                      # minutes for time, an amount for money
+    metric: Optional[str] = None            # health: what to reach (health.HEALTH_TARGETS)
+    target: Any = None                      # health: e.g. 8000 (steps a day)
     currency: Optional[str] = None
     needed_by: Optional[str] = None         # defaults to the plan's date
     earliest: Optional[str] = None          # time window, e.g. "18:00"
@@ -271,6 +312,14 @@ def _date(v: str, field: str) -> date_type:
 
 
 def _clean_requirement(r: dict, target: str) -> dict:
+    if r["kind"] == "health":
+        import health
+        if r.get("metric") not in health.HEALTH_TARGETS:
+            raise HTTPException(status_code=400, detail=f"'{r['what']}' needs a health measure Hymn tracks.")
+        if _dec(r.get("target")) <= 0:
+            raise HTTPException(status_code=400, detail=f"'{r['what']}' needs a target.")
+        r["target"] = format(_dec(r["target"]), "f")
+        r["direction"] = health.HEALTH_TARGETS[r["metric"]]
     if r["kind"] in ("time", "money"):
         if _dec(r.get("amount")) <= 0:
             raise HTTPException(status_code=400, detail=f"'{r['what']}' needs an amount.")
@@ -475,6 +524,11 @@ async def lock_in(db, user_id: str, plan: dict, today: date_type) -> dict:
             tasks.append(_task(user_id, plan["id"], f"{verb}: {r['what']}", min(soon, by)))
         elif r["kind"] == "time" and r["status"] != "now":
             tasks.append(_task(user_id, plan["id"], f"Book time: {r['what']}", by))
+        elif r["kind"] == "health" and r["status"] != "now":
+            aim = f"aim {'at least' if r['direction'] == 'at_least' else 'at most'} {r['target']} {r.get('unit', '')}"
+            now_txt = f"now {r['available_now']}, " if r.get("available_now") else ""
+            tasks.append(_task(user_id, plan["id"], f"Build up: {r['what']} ({now_txt}{aim.strip()})", by,
+                               notes="Hymn tracks this from your health log."))
     for k in plan.get("risks", []):
         if k.get("mitigation"):
             tasks.append(_task(user_id, plan["id"], f"Reduce a risk: {k['mitigation']}", min(soon, plan["target_date"]),

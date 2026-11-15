@@ -23,13 +23,13 @@ from decimal import Decimal
 from typing import Dict, List, Literal, Optional
 
 import anthropic
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, ValidationError
 
 import claude_client
 from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
-from health import METRICS, _d, _date, _profile, _store, rate
+from health import METRICS, _d, _date, _profile, _store, rate, subject
 from plans import user_plan
 
 labs_router = APIRouter(prefix="/health/labs", tags=["health"])
@@ -151,11 +151,13 @@ class Upload(BaseModel):
 
 
 @labs_router.post("/read")
-async def read(body: Upload, current_user: dict = Depends(get_current_user)):
+async def read(body: Upload, current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
     """Read a report into draft results to confirm. Nothing is saved yet and
     the file is not kept. Password-protected PDFs: unlock first."""
+    uid = await subject(get_db(), current_user, for_)
     db = get_db()
-    profile = await _profile(db, current_user["id"])
+    profile = await _profile(db, uid)
     try:
         data = base64.b64decode(body.file_base64.split(",")[-1], validate=True)
     except (binascii.Error, ValueError):
@@ -209,9 +211,10 @@ class SaveReport(BaseModel):
 
 
 @labs_router.post("", status_code=201)
-async def save(body: SaveReport, current_user: dict = Depends(get_current_user)):
+async def save(body: SaveReport, current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    uid = await subject(get_db(), current_user, for_)
     db = get_db()
-    uid = current_user["id"]
     await _profile(db, uid)
     day = _date(body.report_date)
     tracked = []
@@ -234,19 +237,23 @@ async def save(body: SaveReport, current_user: dict = Depends(get_current_user))
 
 
 @labs_router.get("")
-async def list_reports(current_user: dict = Depends(get_current_user)):
-    return await get_db().health_lab_reports.find({"user_id": current_user["id"]}, {"_id": 0, "user_id": 0}) \
+async def list_reports(current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    uid = await subject(get_db(), current_user, for_)
+    return await get_db().health_lab_reports.find({"user_id": uid}, {"_id": 0, "user_id": 0}) \
         .sort("report_date", -1).to_list(length=200)
 
 
 @labs_router.delete("/{report_id}")
-async def delete_report(report_id: str, current_user: dict = Depends(get_current_user)):
+async def delete_report(report_id: str, current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    uid = await subject(get_db(), current_user, for_)
     db = get_db()
-    rep = await db.health_lab_reports.find_one({"id": report_id, "user_id": current_user["id"]})
+    rep = await db.health_lab_reports.find_one({"id": report_id, "user_id": uid})
     if not rep:
         raise HTTPException(status_code=404, detail="Report not found")
     await db.health_lab_reports.delete_one({"id": report_id})
-    await db.health_measurements.delete_many({"user_id": current_user["id"], "source": "lab",
+    await db.health_measurements.delete_many({"user_id": uid, "source": "lab",
                                               "taken_on": rep["report_date"],
                                               "note": rep.get("lab") or "lab report"})
     return {"detail": "Deleted"}

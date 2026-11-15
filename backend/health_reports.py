@@ -17,11 +17,12 @@ from datetime import date as date_type, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse
 
 from deps import get_current_user, get_db
-from health import METRICS, RED_FLAG_SYMPTOMS, RULES_REVIEWED, _date, _profile, age_on, one_per_day, summarise
+from health import (METRICS, RED_FLAG_SYMPTOMS, RULES_REVIEWED, _date, _profile, age_on, one_per_day, person,
+                    subject, summarise)
 from health_checkups import _calendar
 
 reports_router = APIRouter(prefix="/health", tags=["health"])
@@ -100,12 +101,14 @@ def progress(rows: List[dict], start: date_type, today: date_type) -> dict:
 
 
 @reports_router.get("/progress")
-async def get_progress(start: Optional[str] = None, current_user: dict = Depends(get_current_user)):
+async def get_progress(start: Optional[str] = None, current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
     """Before vs after over 90 days from ``start`` (default: the first day
     anything was logged)."""
+    uid = await subject(get_db(), current_user, for_)
     db = get_db()
-    await _profile(db, current_user["id"])
-    rows = await db.health_measurements.find({"user_id": current_user["id"]}, {"_id": 0}).to_list(length=None)
+    await _profile(db, uid)
+    rows = await db.health_measurements.find({"user_id": uid}, {"_id": 0}).to_list(length=None)
     today = date_type.today()
     if start:
         s = date_type.fromisoformat(_date(start))
@@ -203,6 +206,7 @@ def as_text(s: dict) -> str:
 
 @reports_router.get("/doctor-summary")
 async def doctor_summary(format: str = "json", include_private: bool = False,
-                         current_user: dict = Depends(get_current_user)):
-    s = await summary(get_db(), current_user, include_private)
+                         current_user: dict = Depends(get_current_user),
+        for_: Optional[str] = Query(default=None, alias="for")):
+    s = await summary(get_db(), await person(get_db(), current_user, for_), include_private)
     return PlainTextResponse(as_text(s)) if format == "text" else s
