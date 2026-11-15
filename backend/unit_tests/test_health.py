@@ -57,9 +57,10 @@ def test_dashboard_sources_cutoffs_and_no_compensation(client, user):
     assert dom["physical"]["colour"] == "green"                                       # great activity…
     assert dom["metabolic"]["colour"] == "red"                                        # …doesn't hide high glucose
     assert ind("physical", "steps")["based_on"] == "7-day average"
-    assert ind("organ_recovery", "egfr")["status"] == "missing"
+    assert ind("organ_recovery", "egfr")["status"] == "not_measured"                  # labs are optional…
     assert {"Fasting glucose", "Smoking"} <= {x["label"] for x in d["risks"]}
-    assert any(m["metric"] == "egfr" for m in d["missing"])
+    assert not any(m["metric"] == "egfr" for m in d["missing"])                       # …and never nagged for
+    assert any(m["metric"] == "resting_hr" for m in d["missing"])
 
 
 def test_red_flags_come_first(client, user):
@@ -120,3 +121,20 @@ def test_health_plans_say_what_life_they_serve(client, user):
         "title": "X", "target_date": "2027-03-01", "serves_plan_id": "nope",
         "requirements": [{"area": "health", "what": "Y", "kind": "condition"}]})
     assert bad.status_code == 400
+
+
+def test_suggestions_come_from_logs_never_labs(client, user):
+    h = user["headers"]
+    client.put("/api/health/profile", headers=h, json=PROFILE)
+    first = client.get("/api/health/suggestions", headers=h).json()
+    assert len(first) == 1 and "Log food and movement" in first[0]["action"]           # nothing logged yet
+    client.post("/api/health/measurements", headers=h, json=[_m("fasting_glucose", 180, 1, "lab")])
+    assert "Log food and movement" in client.get("/api/health/suggestions", headers=h).json()[0]["action"]
+    for d in range(7):
+        client.post("/api/health/daily", headers=h, json={
+            "date": (TODAY - timedelta(days=d)).isoformat(), "active_minutes": 10, "sleep_hours": 6,
+            "veg_fruit_portions": 2, "sugary_items": 3, "strength_session": 0})
+    s = client.get("/api/health/suggestions", headers=h).json()
+    assert len(s) == 3 and [x["what"] for x in s] == ["Move a little more", "Keep your muscles", "Protect your sleep"]
+    assert all({"what", "why", "action", "measure", "review_in_days"} <= set(x) for x in s)
+    assert not any("glucose" in (x["what"] + x["action"]).lower() for x in s)      # the lab value didn't drive it
