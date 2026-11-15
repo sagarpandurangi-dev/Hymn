@@ -42,3 +42,19 @@ a Sanskrit lens (from Sushruta's swasthya) and modern measurements.
 - `POST /api/habits/{id}/urge` `{date, trigger}` → `{your_reason, serves, try_this[], note}`: show the reason big.
 - `POST /api/habits/{id}/dream-fund` → monthly saving of what the habit used to cost, to the dream.
 - `DELETE /api/habits/{id}`. Deleting all health data also deletes habits.
+
+## Food log (search or photo) — `/api/food`
+
+Needs the health consent. Numbers always come from Hymn's food list (200 everyday Indian and foreign foods, in real servings: roti, katori, plate, glass) or the person's own foods — never from the AI. Calories are shown as a rough range; portions come first. People whose health profile has `eating_disorder_history` get portions only (no `kcal`, no grams anywhere). Values are typical, pending a nutritionist's review (`values_reviewed: false`).
+
+- `GET /api/food/search?q=` → foods `{id, name, unit, kcal, protein_g, carbs_g, fat_g, fibre_g, counts{veg_fruit_portions, protein_servings, sugary_items}, fried, group, custom}`. Hindi/regional names and partial words work (chapati, dahi, palya, biry).
+- `POST /api/food/photo` `{image_base64, media_type: image/jpeg|png|webp}` (under 5 MB; resize to ~1024 px in the app) → nothing saved, photo not kept:
+  - plate: `{kind: "plate", items: [{seen_as, amount, confidence: high|medium|low, food, alternatives[3], nutrition{kcal, kcal_low, kcal_high, protein_g…, veg_fruit_portions…}}], photos_left, note}`. Show each line with − / + (halves) and a "change" picker from `alternatives` or search; `food` can be null (let them search).
+  - label: `{kind: "label", label: {product_name, serving_size, kcal, protein_g, carbs_g, fat_g, sugar_g}}` → prefill "Save as my food".
+  - `not_food`. Errors: 429 monthly photos used (free 30, Premium 300), 503 AI down (allowance not used) — fall back to search.
+- `POST /api/food/meals` `{date, meal: breakfast|lunch|dinner|snack, outside, from_photo, items: [{food_id, amount} | {name}]}` → the meal with per-line nutrition and `totals`. Items with only a name are kept but counted in nothing (`not_counted`).
+- `GET /api/food/day?date=` → `{meals[], totals: {portions{veg_fruit_portions, protein_servings, sugary_items, outside_meals}, calories{estimate, low, high, note} | null, protein_g…}}`. Show portions first; calories as "about 1,200 (1,000–1,450)".
+- `DELETE /api/food/meals/{id}`.
+- `POST /api/food/my-foods` `{name, unit, kcal, protein_g, carbs_g, fat_g, fibre_g, veg_fruit_portions, protein_servings, sugary, fried}`, `GET`, `DELETE /api/food/my-foods/{id}`.
+
+The day's portions are written into the daily log automatically (what suggestions read). A manual tap in the daily log for the same day replaces them until the next meal is logged. Deleting all health data also deletes meals and own foods.

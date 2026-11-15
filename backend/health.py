@@ -558,6 +558,8 @@ async def delete_everything(current_user: dict = Depends(get_current_user)):
     await db.health_profiles.delete_one({"user_id": current_user["id"]})
     await db.habit_logs.delete_many({"user_id": current_user["id"]})
     await db.habits.delete_many({"user_id": current_user["id"]})
+    await db.food_meals.delete_many({"user_id": current_user["id"]})
+    await db.food_custom.delete_many({"user_id": current_user["id"]})
     return {"detail": "All your health data has been deleted."}
 
 
