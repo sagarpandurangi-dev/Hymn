@@ -25,7 +25,7 @@ DB_NAME = os.environ["DB_NAME"]
 # per-mode policy (preview/production must supply JWT_SECRET; test may
 # fall back to a deterministic secret that is never returned in any
 # other mode). See backend/runtime.py.
-from runtime import get_jwt_secret  # noqa: E402
+from runtime import get_jwt_secret, get_runtime_mode  # noqa: E402
 import auth_throttle  # noqa: E402
 from plans import user_plan  # noqa: E402
 JWT_SECRET = get_jwt_secret()
@@ -41,7 +41,9 @@ db = client[DB_NAME]
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-app = FastAPI(title="Hymn API")
+# The interactive API docs describe every endpoint; in production they are off.
+_docs = {} if get_runtime_mode() != "production" else {"docs_url": None, "redoc_url": None, "openapi_url": None}
+app = FastAPI(title="Hymn API", **_docs)
 api_router = APIRouter(prefix="/api")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -1040,7 +1042,8 @@ async def list_domains(current_user: dict = Depends(get_current_user)):
 async def create_domain(body: DomainCreate, current_user: dict = Depends(get_current_user)):
     await ensure_default_domains(current_user["id"])
     name = body.name.strip()
-    existing = await db.domains.find_one({"user_id": current_user["id"], "name": {"$regex": f"^{name}$", "$options": "i"}})
+    existing = await db.domains.find_one({"user_id": current_user["id"],
+                                          "name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}})
     if existing:
         raise HTTPException(status_code=400, detail="A domain with this name already exists")
     now = datetime.now(timezone.utc).isoformat()
@@ -1064,7 +1067,7 @@ async def update_domain(domain_id: str, body: DomainUpdate, current_user: dict =
     name = body.name.strip()
     dup = await db.domains.find_one({
         "user_id": current_user["id"],
-        "name": {"$regex": f"^{name}$", "$options": "i"},
+        "name": {"$regex": f"^{re.escape(name)}$", "$options": "i"},
         "id": {"$ne": domain_id},
     })
     if dup:
@@ -2919,6 +2922,8 @@ from cas_import import cas_router, ensure_cas_indexes  # noqa: E402
 from relationships import people_router, ensure_people_indexes  # noqa: E402
 from learning import learning_router, ensure_learning_indexes  # noqa: E402
 from work import work_router, ensure_work_indexes  # noqa: E402
+from account import account_router  # noqa: E402
+from ai_budget import ensure_ai_budget_indexes  # noqa: E402
 from plan_assistant import plan_chat_router, ensure_plan_chat_indexes  # noqa: E402
 from plan_templates import plan_templates_router  # noqa: E402
 from screens import screens_router  # noqa: E402
@@ -2954,6 +2959,7 @@ api_router.include_router(cas_router)
 api_router.include_router(people_router)
 api_router.include_router(learning_router)
 api_router.include_router(work_router)
+api_router.include_router(account_router)
 api_router.include_router(plan_chat_router)
 api_router.include_router(plan_templates_router)
 api_router.include_router(screens_router)
@@ -2968,6 +2974,29 @@ app.include_router(api_router)
 # Auth is a bearer header, never a cookie, so credentialed CORS is not
 # needed. CORS_ORIGINS (comma-separated) narrows the allowed origins.
 _cors_origins = [o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+MAX_BODY_BYTES = 30 * 1024 * 1024   # the largest upload (a 15 MB PDF as base64) fits; nothing bigger is read
+
+
+@app.middleware("http")
+async def _limits_and_headers(request, call_next):
+    """Refuse oversized bodies before reading them; add safe default headers."""
+    from starlette.responses import JSONResponse
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > MAX_BODY_BYTES:
+        return JSONResponse({"detail": "That file is too large."}, status_code=413)
+    if request.method in ("POST", "PUT", "PATCH") and not length and \
+            request.headers.get("transfer-encoding", "").lower() == "chunked":
+        return JSONResponse({"detail": "Please send a Content-Length."}, status_code=411)
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
 @app.middleware("http")
 async def _request_memo(request, call_next):
     """Reads within one GET request are computed once (see request_cache)."""
@@ -3020,6 +3049,7 @@ async def startup_indexes():
     await ensure_people_indexes(db)
     await ensure_learning_indexes(db)
     await ensure_work_indexes(db)
+    await ensure_ai_budget_indexes(db)
     await ensure_plan_chat_indexes(db)
     await ensure_family_indexes(db)
     await ensure_life_object_indexes(db)

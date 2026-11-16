@@ -37,6 +37,7 @@ from pypdf.errors import PdfReadError
 import statements_ai
 from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
+import ai_budget  # noqa: E402
 from plans import require_feature
 
 logger = logging.getLogger(__name__)
@@ -325,7 +326,7 @@ def _summary(doc: dict) -> dict:
     )}
 
 
-@statements_router.post("", status_code=202)
+@statements_router.post("", status_code=202, dependencies=[Depends(ai_budget.daily("light"))])
 async def upload_statement(
     background: BackgroundTasks,
     file: UploadFile = File(...),

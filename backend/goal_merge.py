@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 import claude_client
 from deps import get_current_user, get_db
+import ai_budget  # noqa: E402
 
 # Reuse helpers + router from the conversational engine.
 from planning_engine import (
@@ -359,7 +360,7 @@ def _fallback_plan(bundles: List[Dict[str, Any]]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@planning_router.post("/merge/preview")
+@planning_router.post("/merge/preview", dependencies=[Depends(ai_budget.daily("strong"))])
 async def merge_preview(
     body: MergePreviewRequest,
     current_user: dict = Depends(get_current_user),

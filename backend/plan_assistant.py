@@ -38,6 +38,7 @@ import health
 import life_plans
 from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
+import ai_budget  # noqa: E402
 
 logger = logging.getLogger(__name__)
 plan_chat_router = APIRouter(prefix="/plan-chat", tags=["plan-chat"])
@@ -449,7 +450,7 @@ class ChatMessage(BaseModel):
     chat_id: Optional[str] = None
 
 
-@plan_chat_router.post("")
+@plan_chat_router.post("", dependencies=[Depends(ai_budget.daily("strong"))])
 async def chat(body: ChatMessage, current_user: dict = Depends(get_current_user)):
     db = get_db()
     if body.chat_id:

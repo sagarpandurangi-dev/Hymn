@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 
 import claude_client
 from deps import get_current_user, get_db
+import ai_budget  # noqa: E402
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -2115,7 +2116,7 @@ async def get_conversation(
     return _public_conversation(conv)
 
 
-@planning_router.post("/{target_type}/{target_id}/messages")
+@planning_router.post("/{target_type}/{target_id}/messages", dependencies=[Depends(ai_budget.daily("strong"))])
 async def post_message(
     target_type: str, target_id: str, body: MessageRequest,
     current_user: dict = Depends(get_current_user),
