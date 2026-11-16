@@ -23,7 +23,7 @@ Each push carries `data`:
 
 ```json
 { "screen": "inbox/review" | "inbox/patterns" | "plans" | "health" | "health/checkups" | "health/progress"
-            | "health/daily" | "habits",
+            | "health/daily" | "habits" | "people",
   "item_id": "uuid (reminders only)", "plan_id": "…", "habit_id": "…", "check": "dental",
   "for": "care_… (health nudges about someone you look after; null = yourself)" }
 ```
@@ -39,7 +39,7 @@ the feed, or from a push whose matching feed entry you find by time), call
 ```json
 [{
   "id": "uuid",
-  "kind": "daily_review | reminder | weekly_patterns | plan_drift | health_report | health_checkup | health_log | habit_urge",
+  "kind": "daily_review | reminder | weekly_patterns | plan_drift | health_report | health_checkup | health_log | habit_urge | people_day | people_touch",
   "title": "Time for your 2-minute review",
   "body": "3 things waiting in your inbox.",
   "data": { "screen": "inbox/review" },
@@ -60,6 +60,7 @@ the feed, or from a push whose matching feed entry you find by time), call
     "weekly_patterns": { "enabled": true, "weekday": 6, "time": "18:00" },
     "reminders":       { "enabled": true },
     "health":          { "enabled": true, "time": "09:30" },
+    "people":          { "enabled": true, "time": "09:00" },
     "quiet_hours":     { "start": "22:00", "end": "07:00" }
   },
   "timezone": "Asia/Kolkata",
@@ -82,6 +83,9 @@ the feed, or from a push whose matching feed entry you find by time), call
   a gentle "30 seconds today?" after 3 days without logging (at most weekly). Habit check-ins come 15
   minutes before the time urges usually hit (3+ urges in 3 weeks), with the person's own reason. Never
   in quiet hours.
+
+- `people`: birthdays and other days the day before and on the day; at most once a week, one inner-circle
+  person it's been a while with. See `docs/PEOPLE_API.md`.
 
 `PUT /nudges/settings` takes any subset, e.g.
 `{ "daily_review": { "time": "07:45" }, "timezone": "Asia/Kolkata" }`, and

@@ -219,6 +219,20 @@ async def _health_facts(db, uid: str) -> List[dict]:
     elif profile:
         out.append({"key": "health_data", "label": "Health data",
                     "value": "Not shared with the planner (they can switch it on in Health)", "source": "health"})
+    import relationships
+
+    close = await db.people.find({"user_id": uid, "circle": "inner"}, {"_id": 0}).to_list(length=None)
+    if close:
+        out.append({"key": "inner_circle", "label": "Inner circle",
+                    "value": ", ".join(f"{p['name']} ({p['relation'].replace('_', ' ')})" for p in close),
+                    "source": "people"})
+    everyone = await db.people.find({"user_id": uid}, {"_id": 0}).to_list(length=None)
+    coming = sorted((c for p in everyone for c in relationships.days_coming(p, date_type.today(), 90)),
+                    key=lambda c: c["in_days"])
+    if coming:
+        out.append({"key": "days_coming_up", "label": "Days that matter (next 90 days)",
+                    "value": "; ".join(f"{c['name']}'s {c['label'].lower()} on {c['on']}" for c in coming[:6]),
+                    "source": "people"})
     people = await db.care_profiles.find({"owner_id": uid}, {"_id": 0, "name": 1, "relation": 1}) \
         .to_list(length=None)
     if people:

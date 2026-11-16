@@ -76,6 +76,7 @@ short. Never ask them to paste secrets into chat.
 | `statement_matching.py` | Xero-style suggestions per line (already recorded / own-account match / learned rules / patterns / built-in merchant list / similar names the user filed / spending habits by amount / one AI guess per unknown merchant per user), confirm into ledger, learning, opening balance, reconciliation |
 | `merchant_directory.py` | free built-in list of ~900 well-known (mostly Indian) merchant keywords → spending category; mixed merchants and people's names deliberately left out |
 | `cas_import.py` | Premium: investments from a CAMS/KFintech or NSDL/CDSL CAS PDF, parsed in code with `casparser` (MIT, pinned; no AI). Preview (password in memory only; PAN/contact details not stored) → apply: one account per fund folio (`mutual_fund`), per demat account for shares/bonds, per PRAN for NPS (`cas_key`); value = market value on the valuation date. Money-book users: first value is an `opening_balance` (provenance `cas`), later changes are `revaluation` entries (`equity:revaluation`: an "other change" in net worth, never income/spending/cash flow); others: snapshot update. Older statements never overwrite newer values; the same statement can't apply twice; hand-typed investment accounts can be linked or replaced to avoid double counting. API notes: `docs/INVESTMENTS_API.md` |
+| `relationships.py` | Family & Relationships: people (relation, circle inner/close/wider, birthday and yearly occasions MM-DD or YYYY-MM-DD, keep-in-touch days by circle, private notes, optional care link), moments with several people and minutes; last together / "might like to hear from you" (never "overdue", no streaks); upcoming days with ages; gift budgets → yearly planned-money items (`person_id`); week's hours with people → Health `social_hours` (only with health consent); nudges (setting `people`, 09:00): day before / day of, one keep-in-touch a week; planner context lists inner circle and days coming up. API notes: `docs/PEOPLE_API.md` |
 
 Plans and decisions: `docs/plans/finance-audit.md`. Ready-to-paste Emergent prompts for the 18 Nov credit refresh: `docs/EMERGENT_PROMPTS_NOV18.md`. API notes for Emergent:
 `docs/INBOX_API.md`, `docs/NUDGES_API.md`. Deploy guide: `docs/DEPLOY_RAILWAY.md`.
@@ -107,7 +108,7 @@ with learning.
 
 Next:
 1. Owner tests statement review/confirm; fix what they find.
-2. Money book switch-over: done for balances, availability, monthly and Today spending (converted users). Left: recent-activity list still shows old events; owner must run the conversion (Money book screen) for the switch to apply.
+2. Money book switch-over: done for balances, availability, monthly and Today spending and Finance recent activity (converted users). The owner must run the conversion (Money book screen) for the switch to apply.
 3. Categories/life objects (car, house, habits) per area; depreciation; fuel
    and mileage; loans (principal/interest, documents); cash vs accrual views.
 4. Speed: Singapore (done); one sync/load per request (done); one call per screen (Finance done: `/api/screens/finance`, app to adopt).
@@ -116,6 +117,15 @@ Next:
    corrections, feasibility on real time and money, editable plan map.
 6. Family, Work (via time commitments; company runs MS Office), Health
    (Android Health Connect; owner uses a Samsung watch), Learning.
+
+**Emergent prompts owed** (owner: "remember emergent prompts"; write when asked, each starting "Do not
+modify anything under `backend/`"): Health (profile/consent, daily log, dashboard, suggestions, food log +
+photo, habits + urge button, watch sync connect screen, lab reports, check-up calendar, 90-day report, doctor
+summary, caregiver "people I look after" with `?for=`, "use my health in plans" switch, health nudge
+setting); investments CAS upload (`docs/INVESTMENTS_API.md`, link/replace step); Finance recent activity rows
+with `detail: "ledger"` need a ledger-entry screen (`/api/reports/entries` or a new one) instead of the event
+screen; Family & Relationships (`docs/PEOPLE_API.md`); plan chat health requirements. The 18 Nov pack
+(`docs/EMERGENT_PROMPTS_NOV18.md`, prompts 1–7) comes first.
 
 Later (owner's strategy, decided but not to build yet): intent marketplace —
 classify fulfillable brain-dump items (category, locality, time window),

@@ -667,3 +667,74 @@ __all__ = [
     "load_availability",
     "monthly_actual_spending",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Recent activity from the ledger (Finance tab), in the old events' shape
+# ---------------------------------------------------------------------------
+
+_SOURCE_BY_PROVENANCE = {"statement": "statement", "cas": "investment statement", "user": "manual",
+                         "conversion": "money book", "event": "money book"}
+_HIDDEN_KINDS = {"opening_balance"}       # setup, not activity
+_LIABILITY_ACCOUNT_TYPES = frozenset({"credit_card", "personal_loan", "home_loan", "vehicle_loan",
+                                      "other_liability", "money_borrowed"})
+
+
+def ledger_activity_row(tx: dict, real_accounts: dict, events: dict) -> Optional[dict]:
+    """One money-book entry as a recent-activity row: what it did to the
+    person's own money. Transfers between their own accounts show as
+    ``transfer`` (neither in nor out)."""
+    k = tx["kind"]
+    if k in _HIDDEN_KINDS:
+        return None
+    own = [p for p in tx["postings"] if p["account_id"] in real_accounts]
+    if k in ("transfer", "investment", "redemption", "card_settlement"):
+        direction, amount = "transfer", max((p["amount"] for p in own), default=Decimal(0))
+    elif k == "revaluation":
+        delta = sum((p["amount"] for p in own), Decimal(0))
+        direction, amount = ("inflow" if delta > 0 else "outflow"), abs(delta)
+    else:
+        # Money held moved (bank, cash…); if none did — a card purchase or
+        # refund — the card's balance moved instead. An EMI shows in full.
+        held = [p for p in own if real_accounts[p["account_id"]].get("account_type") not in _LIABILITY_ACCOUNT_TYPES]
+        net = sum((p["amount"] for p in (held or own)), Decimal(0))
+        direction, amount = ("inflow" if net > 0 else "outflow"), abs(net)
+    linked = [i for i in tx.get("evidence_ids") or [] if i in events]
+    ev = events.get(linked[0]) if len(linked) == 1 else None
+    first = own[0]["account_id"] if own else None
+    return {
+        # A row that came from one old event keeps that event's id, so the
+        # app's event screen still opens it; other rows are ledger entries.
+        "id": ev["id"] if ev else tx["id"], "ledger_id": tx["id"], "detail": "event" if ev else "ledger",
+        "kind": k, "description": tx.get("description") or (ev or {}).get("description") or k.replace("_", " "),
+        "event_date": tx["date"], "currency": tx["currency"], "direction": direction,
+        "amount": format(amount.quantize(Decimal("0.01")), "f"),
+        "source": (ev or {}).get("source") or _SOURCE_BY_PROVENANCE.get(tx.get("provenance"), "money book"),
+        "account_id": first, "confirmation_status": "confirmed", "lifecycle_status": "reconciled",
+        "created_at": tx.get("created_at", ""),
+    }
+
+
+async def ledger_recent(db, user_id: str, limit: int = 20) -> Optional[list]:
+    """The latest money-book entries as recent activity, or None when the
+    user hasn't switched to the money book."""
+    import ledger
+    import ledger_sync
+
+    if not (await ledger_sync.sync(db, user_id))["converted"]:
+        return None
+    real = await ledger.real_accounts_for(db, user_id)
+    txs = sorted(await ledger.load_transactions(db, user_id),
+                 key=lambda t: (t["date"], t.get("created_at", "")), reverse=True)
+    rows, ids = [], set()
+    for tx in txs:
+        if tx["kind"] in _HIDDEN_KINDS:
+            continue
+        rows.append(tx)
+        ids.update(tx.get("evidence_ids") or [])
+        if len(rows) >= limit:
+            break
+    events = {e["id"]: e for e in await db.financial_events.find(
+        {"user_id": user_id, "id": {"$in": list(ids)}}, {"_id": 0, "id": 1, "source": 1, "description": 1})
+        .to_list(length=None)}
+    return [r for r in (ledger_activity_row(tx, real, events) for tx in rows) if r]

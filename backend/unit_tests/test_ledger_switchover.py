@@ -99,3 +99,40 @@ def test_available_money_follows_the_ledger(client, server, user, book):
     r = client.get("/api/finance/dashboard", headers=user["headers"])
     assert r.status_code == 200, r.text
     assert Decimal(r.json()["available_liquidity"][0]["liquid_effective"]) == Decimal("99550.00")
+
+
+def _recent(client, user):
+    r = client.get("/api/finance/dashboard", headers=user["headers"])
+    assert r.status_code == 200, r.text
+    return r.json()["recent_events"]
+
+
+def test_recent_activity_reads_the_ledger_after_conversion(client, server, user, book):
+    db, uid = book
+    _account(db, uid, "home_loan", account_type="home_loan", value="500000")
+    before = _recent(client, user)
+    assert {e["description"] for e in before} == {"lunch", "Shoes"} and "ledger_id" not in before[0]
+    _convert(client, user)
+    # A statement line recorded only in the money book now shows up too.
+    asyncio.run(ledger.record(db, uid, ledger.Draft(kind="expense", date="2026-11-06", currency="INR", amount="999",
+                                                    from_account_id="bank", description="Zomato"),
+                              provenance="statement"))
+    asyncio.run(ledger.record(db, uid, ledger.Draft(kind="card_settlement", date="2026-11-07", currency="INR",
+                                                    amount="3000", from_account_id="bank", to_account_id="card",
+                                                    description="Card bill"), provenance="statement"))
+    asyncio.run(ledger.record(db, uid, ledger.Draft(kind="loan_payment", date="2026-11-05", currency="INR",
+                                                    from_account_id="bank", to_account_id="home_loan",
+                                                    principal="8000", interest="2000", description="Home loan EMI"),
+                              provenance="statement"))
+    rows = _recent(client, user)
+    by = {r["description"]: r for r in rows}
+    assert (by["Home loan EMI"]["direction"], by["Home loan EMI"]["amount"]) == ("outflow", "10000.00")
+    assert "Opening balance" not in str([r["kind"] for r in rows]) and "opening_balance" not in [r["kind"] for r in rows]
+    assert [r["description"] for r in rows][:2] == ["Card bill", "Zomato"]           # newest first
+    assert (by["Zomato"]["direction"], by["Zomato"]["amount"], by["Zomato"]["source"]) == ("outflow", "999.00",
+                                                                                         "statement")
+    assert by["Card bill"]["direction"] == "transfer"                            # not spending
+    shoes = by["Shoes"]
+    assert shoes["direction"] == "outflow" and shoes["amount"] == "700.00" and shoes["detail"] == "event"
+    events = {e["id"] for e in client.get("/api/finance/events", headers=user["headers"]).json()}
+    assert shoes["id"] in events and by["Zomato"]["detail"] == "ledger"         # old screen still opens it
