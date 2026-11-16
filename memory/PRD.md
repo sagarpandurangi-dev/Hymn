@@ -1,30 +1,15 @@
-# Hymn - Personal Operating System
+# Hymn — product summary (current as of 16 Nov 2026)
 
-## Product Overview
-Hymn is an Android/mobile app foundation that helps a person remember what they said mattered, record what actually happened, and follow through until things are completed, changed or abandoned.
+Hymn helps a person follow through on their life. It is growing into a copilot for daily and life decisions across five areas:
 
-## Scope (Foundation)
-- Real JWT-based email/password authentication (no mocks). Persistent sessions until explicit logout.
-- Forgot password via security question (no email delivery).
-- 5-tab bottom navigation: Today, Timeline, [+ centered floating], Finance, Me.
-- The + button opens Add Event from every tab.
-- Today dashboard: 4 navigable cards (Required Check-ins, Upcoming Tasks, Today's Events, Today's Spending).
-- Full Event module (Timeline, Add Event, Event Detail, Edit Event) with Type/Title/Date/Time/Notes.
-- Per-user data isolation enforced by user_id filter on every event query.
+| Area | What Hymn does |
+|---|---|
+| Money | A true double-entry money book: bank/card statements read and matched, investments from CAS statements, loans and assets, planned money and a forecast, the three statements (net worth, income & expenditure, cash flow) |
+| Health | Healthspan, not just lifespan: a 30-second daily log, six domains (no overall score), food log with photos, habits to change, check-up calendar, optional lab reports, any-watch sync, doctor summary, caregiver mode |
+| Family & Relationships | The people who matter, their days, time together; family net worth |
+| Learning | Learning journeys for any goal (an exam, driving, a language) with spaced revision |
+| Work | Roles, work time and overtime, leave, wins and appraisals, payslips |
 
-## Design
-- Calm minimal Editorial LIGHT — Paper White (#FBFBF9) with Sage Green (#808B76) brand.
-- Serif display type + system sans body. No shadows, generous whitespace.
+Across all of them: a brain dump that sorts itself, a planner that checks any plan against real time and money ("what must go right / what may stop it"), weekly time statements, and gentle reminders (never guilt, no streaks).
 
-## Backend
-- FastAPI + Motor MongoDB. All routes under `/api`.
-- Auth: /api/auth/signup, /login, /me, /logout, /security-question, /forgot-password.
-- Events: GET/POST /api/events, GET/PUT /api/events/{id}.
-- bcrypt for passwords + security answers; JWT (HS256) 30-day tokens; token stored via expo-secure-store.
-
-## Verified
-- 22/22 backend pytest suite passing (auth + events + isolation).
-- 17/17 frontend flow tests passing on mobile viewport.
-
-## Deferred
-- Event delete, Finance/Me detail modules, Check-ins/Tasks/Spending detail modules, email-based password reset, refresh tokens.
+Principles: the AI never makes up numbers about a person; code checks everything; health and food rules stay marked draft until experts review them; the person's data is theirs to export or delete.

@@ -1,0 +1,11 @@
+# Old branches to delete (approved 16 Nov 2026). Name and last commit, so any can be recreated.
+conflict_300826_1348 c1d7d53
+foundation-release 1718fc5
+fix/checkin-finance-reconciliation bce683b
+fix/local-preview-lifecycle 1335659
+fix/local-preview-lifecycle-gitless 5c16a31
+fix/profile-display-name cc13020
+fix/purchase-labeled-amounts 74f3af1
+feature/planning-context-review-v1 65261c9
+feature/universal-dream-map-v1 f37eae1
+feature/universal-intent-purchase-v1 2b2595a

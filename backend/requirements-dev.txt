@@ -1,3 +1,4 @@
 # Test-only dependencies for the offline suites (safety_tests, unit_tests).
+pytest>=8.0.0
 httpx==0.28.1
 mongomock-motor==0.0.36

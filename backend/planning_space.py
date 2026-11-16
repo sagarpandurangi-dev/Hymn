@@ -105,12 +105,6 @@ def _valid_task_due_date(task: dict) -> Optional[date]:
         return None
 
 
-def _task_is_open(task: dict) -> bool:
-    """A Task is "open" iff its status is not one of the two terminal
-    states. ``deferred`` and similar states are NOT terminal.
-    """
-    return task.get("status") not in {"done", "cancelled"}
-
 
 # ---------------------------------------------------------------------------
 # Endpoint

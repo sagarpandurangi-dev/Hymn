@@ -1,6 +1,8 @@
 # Audit: stale paths and duplicate paths (16 Nov 2026)
 
-**For review only. Nothing here has been removed.** Each item has a recommendation and what removing it would take. Tick the ones you agree with and they become a cleanup job.
+**Step 1 done (16 Nov 2026):** C2, C3, C7, C8, C10, B11, B12, C11 removed or updated; C9 (old branches) is for the owner to delete on GitHub (this session can't), listed in `old-branches-2026-11-16.txt`. Steps 2–3 still for review.
+
+**Original note:** for review only. Each item has a recommendation and what removing it would take. Tick the ones you agree with and they become a cleanup job.
 
 How this was checked: every server route (287) was listed from the running app and compared with every call the app makes; dead code was scanned with a tool and then checked by hand; branches, tests, files and dependencies were listed from the repository.
 
@@ -46,7 +48,7 @@ Legend — **Remove**: safe now. **Remove after**: safe once the named screen sh
 | C7 | `memory/PRD.md`, `design_guidelines.json`, `README.md` (one line) | Emergent's early notes; the PRD describes July's app. | **Keep** the design guidelines (Emergent reads them); **replace** the PRD and README with a short current description. |
 | C8 | `docs/plans/finance-audit.md`; the "Next" list in `CLAUDE.md` | Statuses are out of date (Family, Work, Health, Learning are built). | **Update** (not remove). |
 | C9 | 10 old branches on GitHub: `conflict_300826_1348`, `foundation-release`, `fix/…` (5), `feature/…` (3) | From July–October; 150+ changes behind `main`; the two "dream" branches are the shelved drafts (PRs #5, #9) already rebuilt. | **Remove** all ten after you confirm (deleting a branch is permanent). |
-| C10 | Unused libraries in `requirements.txt`: `boto3`, `requests-oauthlib`, `pandas`, `numpy`, `jq`, `typer`, `pyjwt`, plus developer tools shipped to production (`pytest`, `black`, `isort`, `flake8`, `mypy`), and `emergentintegrations` (already skipped in builds) | Nothing imports them. They slow every deploy and widen the attack surface. | **Remove** (move developer tools to `requirements-dev.txt`). `requests` goes too once B12 is done. Keep `cryptography`: opening password-protected PDFs needs it. |
+| C10 | Unused libraries in `requirements.txt`: `boto3`, `requests-oauthlib`, `pandas`, `numpy`, `jq`, `typer`, `pyjwt`, plus developer tools shipped to production (`pytest`, `black`, `isort`, `flake8`, `mypy`), and `emergentintegrations` (already skipped in builds) | Nothing imports them. They slow every deploy and widen the attack surface. | **Remove** (move developer tools to `requirements-dev.txt`). `requests` stays: push notifications use it. Keep `cryptography`: opening password-protected PDFs needs it. |
 | C11 | `backend/test_environment.py`, `backend/conftest.py` | Guards for the old live tests. | **Remove with** B12. |
 | C12 | `calibration.py`, overrides and decision-assessment routes (`/api/finance/calibration`, `/overrides…`, `/decision-assessment`, `/rebalance-candidates`) | An early "should I spend this?" feature; still called by an app screen, but the new planner covers the question. | **Decide:** keep as is, or fold into the planner. |
 
