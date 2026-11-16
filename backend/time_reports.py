@@ -166,11 +166,14 @@ async def _areas_for_goals(db, user_id: str) -> Dict[str, Tuple[str, str]]:
 async def time_statements(week_start: Optional[str] = Query(None, description="Monday, YYYY-MM-DD"),
                           current_user: dict = Depends(get_current_user)):
     """All three time statements for one week, in one call."""
-    db, uid = get_db(), current_user["id"]
     try:
         monday = date_type.fromisoformat(week_start) if week_start else date_type.today()
     except ValueError:
         raise HTTPException(status_code=400, detail="week_start must be YYYY-MM-DD")
+    return await week_statements(get_db(), current_user["id"], monday)
+
+
+async def week_statements(db, uid: str, monday: date_type) -> dict:
     monday -= timedelta(days=monday.weekday())
     week = [monday + timedelta(days=i) for i in range(7)]
     first, last = week[0].isoformat(), week[-1].isoformat()
@@ -194,6 +197,11 @@ async def time_statements(week_start: Optional[str] = Query(None, description="M
                       async for s in db.learning_sessions.find(
                           {"user_id": uid, "date": {"$gte": first, "$lte": last}}, {"_id": 0})]
     done = actual(plan, week_checkins)
+    # Work days that ran over (or ended early) change the Work hours actually spent.
+    import work
+    extra = await work.overtime_minutes(db, uid, first, last)
+    if extra:
+        done["work"]["Overtime" if extra > 0 else "Shorter days"] += extra
     stmts = build(plan, done)
 
     fixed_total = sum(plan["fixed"].values())
