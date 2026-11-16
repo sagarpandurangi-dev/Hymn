@@ -50,6 +50,7 @@ from pydantic import BaseModel, Field
 import learning_ai
 from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
+import ai_budget  # noqa: E402
 
 learning_router = APIRouter(prefix="/learning", tags=["learning"])
 
@@ -432,7 +433,7 @@ async def _view(db, j: dict) -> dict:
     return out
 
 
-@learning_router.post("", status_code=201)
+@learning_router.post("", status_code=201, dependencies=[Depends(ai_budget.daily("light"))])
 async def start(body: Start, current_user: dict = Depends(get_current_user)):
     db = get_db()
     try:
@@ -462,7 +463,7 @@ def _num(v, default):
         return default
 
 
-@learning_router.post("/{jid}/answers")
+@learning_router.post("/{jid}/answers", dependencies=[Depends(ai_budget.daily("strong"))])
 async def answer(jid: str, body: Answers, current_user: dict = Depends(get_current_user)):
     """Save the starting point and build the structure (AI with web search,
     then checked and computed in code)."""

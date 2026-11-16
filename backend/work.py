@@ -40,6 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from deps import get_current_user, get_db
+import ai_budget  # noqa: E402
 from plans import require_feature
 
 work_router = APIRouter(prefix="/work", tags=["work"])
@@ -525,7 +526,7 @@ class PayslipUpload(BaseModel):
     password: str = Field(default="", max_length=64)          # used in memory only
 
 
-@work_router.post("/payslips/read")
+@work_router.post("/payslips/read", dependencies=[Depends(ai_budget.daily("light"))])
 async def read_payslip(body: PayslipUpload, current_user: dict = Depends(get_current_user)):
     """Read a payslip into numbers to confirm. Nothing is saved; the file
     and password are not kept."""

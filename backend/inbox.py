@@ -33,6 +33,7 @@ from pymongo.errors import DuplicateKeyError
 
 import inbox_ai
 from deps import get_current_user, get_db
+import ai_budget  # noqa: E402
 
 inbox_router = APIRouter(prefix="/inbox", tags=["inbox"])
 
@@ -217,7 +218,7 @@ async def _dump_response(db, dump: dict) -> dict:
     return {"dump": dump, "items": items, "ack": _ack(dump, items)}
 
 
-@inbox_router.post("/dumps", status_code=201)
+@inbox_router.post("/dumps", status_code=201, dependencies=[Depends(ai_budget.daily("light"))])
 async def create_dump(body: DumpCreate, current_user: dict = Depends(get_current_user)):
     db = get_db()
     user_id = current_user["id"]
