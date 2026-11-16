@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import date as date_type, datetime, timedelta, timezone
+from datetime import date as date_type, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, List, Optional, Tuple
 
@@ -91,47 +91,13 @@ MONEY_COMMITMENT_TYPES = ("income", "expense", "saving", "investment", "debt_pay
 
 RESOURCE_TYPES = ("time", "money")
 
-# Batch 2B3 — the exact HTTP 400 message the generic Portfolio
-# resource-allocation API must return whenever the caller asks for
-# ``resource_type="money"``. Money reservations are owned by Finance
-# commitments and MUST NOT be created, listed, updated or deleted via
-# this generic route.
-_PORTFOLIO_MONEY_ALLOCATION_ERROR = (
-    "Money reservations are managed by Finance commitments; "
-    "use the Finance commitment endpoints"
-)
 
-
-def _portfolio_time_allocation_scope(user_id: str) -> dict:
-    """Return the mandatory MongoDB base filter for the generic
-    Portfolio resource-allocation endpoints.
-
-    Portfolio only manages TIME allocations that were not created by
-    Finance. Finance-owned rows carry ``financial_commitment_id`` and
-    live in the same collection; they are excluded here so the
-    generic list/update/delete surface can never mutate them.
-    """
-    return {
-        "user_id": user_id,
-        "resource_type": "time",
-        "$or": [
-            {"financial_commitment_id": {"$exists": False}},
-            {"financial_commitment_id": None},
-        ],
-    }
 ALLOCATION_MODES = ("one_time", "recurring")
 ALLOCATION_UNITS = ("minutes", "currency")
 ALLOCATION_STATUSES = ("proposed", "reserved", "consumed", "released", "cancelled")
 
 OWNER_TYPES = ("task", "project", "knowledge_journey", "standalone")
 
-# Maps every non-standalone owner_type to the Mongo collection that must
-# contain a row with matching (id, user_id). Standalone bypasses this check.
-_OWNER_COLLECTIONS = {
-    "task": "tasks",
-    "project": "projects",
-    "knowledge_journey": "knowledge_journeys",
-}
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
@@ -165,10 +131,6 @@ def _hhmm_to_minutes(hhmm: str) -> int:
 def _parse_date(s: str) -> date_type:
     y, m, d = s.split("-")
     return date_type(int(y), int(m), int(d))
-
-
-def _weekday_name(d: date_type) -> str:
-    return DAY_OF_WEEK[d.weekday()]
 
 
 def _require(condition: bool, msg: str) -> None:
@@ -482,62 +444,6 @@ class MonthlyMoneyCommitmentResponse(BaseModel):
 
 
 # -- Resource allocations ----------------------------------------------------
-class ResourceAllocationCreate(BaseModel):
-    resource_type: str
-    owner_type: str
-    owner_id: Optional[str] = None
-    allocation_mode: str
-    date: Optional[str] = None
-    day_of_week: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    quantity: Any
-    unit: str
-    currency: Optional[str] = None
-    status: str = "proposed"
-    fixed_or_flexible: str = "flexible"
-
-
-class ResourceAllocationUpdate(BaseModel):
-    resource_type: Optional[str] = None
-    owner_type: Optional[str] = None
-    owner_id: Optional[str] = None
-    allocation_mode: Optional[str] = None
-    date: Optional[str] = None
-    day_of_week: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    quantity: Optional[Any] = None
-    unit: Optional[str] = None
-    currency: Optional[str] = None
-    status: Optional[str] = None
-    fixed_or_flexible: Optional[str] = None
-
-
-class ResourceAllocationResponse(BaseModel):
-    id: str
-    user_id: str
-    resource_type: str
-    owner_type: str
-    owner_id: Optional[str] = None
-    allocation_mode: str
-    date: Optional[str] = None
-    day_of_week: Optional[str] = None
-    start_time: Optional[str] = None
-    end_time: Optional[str] = None
-    # For resource_type=time this is the integer number of minutes serialised
-    # as a string ("60"). For resource_type=money it is a decimal string
-    # preserving the exact precision supplied by the caller.
-    quantity: str
-    unit: str
-    currency: Optional[str] = None
-    status: str
-    fixed_or_flexible: str
-    created_at: str
-    updated_at: str
-
-
-# -- Derived calculation responses -------------------------------------------
 class DailyCommitmentSummary(BaseModel):
     id: str
     title: str
@@ -607,36 +513,6 @@ class MonthlyMoneyPositionResponse(BaseModel):
 # ============================================================================
 # Ownership integrity — the referenced object must exist AND belong to the user.
 # ============================================================================
-
-async def _validate_owner_reference(user_id: str, owner_type: str, owner_id: Optional[str]) -> None:
-    """Ensure the (owner_type, owner_id) pair resolves to a live row owned by user_id.
-
-    * `standalone` -> owner_id must be null. Caller has already normalised it.
-    * `task | project | knowledge_journey` -> the row must exist in the
-      corresponding collection with matching `user_id`. A missing row and a
-      foreign-user row are both rejected with HTTP 400 and an explicit message.
-    """
-    if owner_type == "standalone":
-        # Standalone rows carry no owner_id — nothing to look up.
-        return
-    coll_name = _OWNER_COLLECTIONS.get(owner_type)
-    if coll_name is None:  # Defensive: should never happen post-enum validation.
-        raise HTTPException(status_code=400, detail=f"owner_type={owner_type} is not supported")
-    if not owner_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"owner_type={owner_type} requires owner_id",
-        )
-    row = await db[coll_name].find_one({"id": owner_id, "user_id": user_id}, {"_id": 0, "id": 1})
-    if not row:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"owner_type={owner_type} references owner_id={owner_id!r}, but no "
-                f"matching row exists for this user in '{coll_name}'"
-            ),
-        )
-
 
 # ============================================================================
 # Validators — enforce the strict rules from the spec.
@@ -745,69 +621,6 @@ def _validate_money_commitment(body, *, is_create: bool, existing: dict | None =
     return merged
 
 
-def _validate_allocation(body, *, is_create: bool, existing: dict | None = None) -> dict:
-    merged = dict(existing or {})
-    incoming = body.dict(exclude_unset=True)
-    for k, v in incoming.items():
-        merged[k] = v
-
-    if is_create:
-        for req in ("resource_type", "owner_type", "allocation_mode",
-                    "quantity", "unit", "status", "fixed_or_flexible"):
-            _require(merged.get(req) is not None and merged.get(req) != "", f"{req} is required")
-
-    _require_in(merged["resource_type"], RESOURCE_TYPES, "resource_type")
-    # Batch 2B3 — Portfolio manages only TIME allocations. Money
-    # reservations are Finance's exclusive domain and MUST NOT reach
-    # this validator.
-    if merged["resource_type"] != "time":
-        raise HTTPException(status_code=400, detail=_PORTFOLIO_MONEY_ALLOCATION_ERROR)
-    _require_in(merged["owner_type"], OWNER_TYPES, "owner_type")
-    _require_in(merged["allocation_mode"], ALLOCATION_MODES, "allocation_mode")
-    _require_in(merged["unit"], ALLOCATION_UNITS, "unit")
-    _require_in(merged["status"], ALLOCATION_STATUSES, "status")
-    _require_in(merged["fixed_or_flexible"], FLEXIBILITY, "fixed_or_flexible")
-
-    # Standalone: owner_id must be explicitly null. Non-standalone: presence
-    # is required here; existence + ownership is checked async in the endpoint.
-    if merged["owner_type"] == "standalone":
-        _require(merged.get("owner_id") in (None, ""), "owner_type=standalone requires owner_id=null")
-        merged["owner_id"] = None
-    else:
-        _require(merged.get("owner_id"), f"owner_type={merged['owner_type']} requires owner_id")
-
-    # Time-allocation-only rules (Batch 2B3 removed the money branch).
-    _require(merged["unit"] == "minutes", "resource_type=time requires unit=minutes")
-    _require(merged.get("currency") in (None, ""), "resource_type=time requires currency=null")
-    merged["currency"] = None
-    _require_time_str(merged.get("start_time"), "start_time")
-    _require_time_str(merged.get("end_time"), "end_time")
-    s = _hhmm_to_minutes(merged["start_time"])
-    e = _hhmm_to_minutes(merged["end_time"])
-    _require(e > s, "end_time must be later than start_time")
-    expected_qty = e - s
-    try:
-        qty_int = int(merged["quantity"])
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="quantity must be numeric")
-    _require(
-        qty_int == expected_qty,
-        f"quantity must equal duration in minutes (expected {expected_qty})",
-    )
-    merged["quantity"] = qty_int  # stored as int minutes
-    if merged["allocation_mode"] == "one_time":
-        _require_date_str(merged.get("date"), "date")
-        _require(merged.get("day_of_week") in (None, ""), "one_time time allocation requires day_of_week=null")
-        merged["day_of_week"] = None
-    else:  # recurring
-        _require(merged.get("date") in (None, ""), "recurring time allocation requires date=null")
-        merged["date"] = None
-        _require(merged.get("day_of_week"), "recurring time allocation requires day_of_week")
-        _require_in(merged["day_of_week"], DAY_OF_WEEK, "day_of_week")
-
-    return merged
-
-
 # ============================================================================
 # Response projection helpers — convert stored Decimal128 to strings.
 # ============================================================================
@@ -826,25 +639,6 @@ def _project_account(doc: dict) -> dict:
 def _project_money_commitment(doc: dict) -> dict:
     doc = dict(doc)
     doc["amount"] = _money_from_stored(doc.get("amount"))
-    return doc
-
-
-def _project_allocation(doc: dict) -> dict:
-    doc = dict(doc)
-    q = doc.get("quantity")
-    if doc.get("resource_type") == "money":
-        doc["quantity"] = _money_from_stored(q)
-    else:
-        # Time allocations: integer minutes stored as int; return as string
-        # so the response schema stays uniform.
-        if isinstance(q, Decimal128):
-            doc["quantity"] = _dec_to_str(q.to_decimal())
-        elif isinstance(q, Decimal):
-            doc["quantity"] = _dec_to_str(q)
-        elif q is None:
-            doc["quantity"] = "0"
-        else:
-            doc["quantity"] = str(int(q))
     return doc
 
 
@@ -1443,133 +1237,6 @@ async def update_portfolio_setup_status(
 
     refreshed = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
     return await _setup_status_dict(refreshed or current_user)
-
-
-# ---------------- Resource allocations ----------------
-@portfolio_router.post("/resource-allocations", response_model=ResourceAllocationResponse, status_code=201)
-async def create_resource_allocation(body: ResourceAllocationCreate, current_user: dict = Depends(get_current_user)):
-    payload = _validate_allocation(body, is_create=True)
-    # Ownership integrity: the referenced object must exist AND be owned by
-    # the authenticated user. Skipped for standalone allocations.
-    await _validate_owner_reference(current_user["id"], payload["owner_type"], payload.get("owner_id"))
-    now = _now()
-    doc = {
-        "id": str(uuid.uuid4()),
-        "user_id": current_user["id"],
-        "resource_type": payload["resource_type"],
-        "owner_type": payload["owner_type"],
-        "owner_id": payload.get("owner_id"),
-        "allocation_mode": payload["allocation_mode"],
-        "date": payload.get("date"),
-        "day_of_week": payload.get("day_of_week"),
-        "start_time": payload.get("start_time"),
-        "end_time": payload.get("end_time"),
-        "quantity": payload["quantity"],  # int (time) or Decimal128 (money)
-        "unit": payload["unit"],
-        "currency": payload.get("currency"),
-        "status": payload["status"],
-        "fixed_or_flexible": payload["fixed_or_flexible"],
-        "created_at": now,
-        "updated_at": now,
-    }
-    await db.resource_allocations.insert_one(doc)
-    doc.pop("_id", None)
-    return _project_allocation(doc)
-
-
-@portfolio_router.get("/resource-allocations", response_model=List[ResourceAllocationResponse])
-async def list_resource_allocations(
-    current_user: dict = Depends(get_current_user),
-    resource_type: Optional[str] = None,
-    owner_type: Optional[str] = None,
-    owner_id: Optional[str] = None,
-    allocation_mode: Optional[str] = None,
-    date: Optional[str] = None,
-    day_of_week: Optional[str] = None,
-    currency: Optional[str] = None,
-    status: Optional[str] = None,
-    fixed_or_flexible: Optional[str] = None,
-    unit: Optional[str] = None,
-):
-    # Batch 2B3 — Portfolio API is time-allocation-only. Finance-owned
-    # rows (identified by a set financial_commitment_id) are excluded.
-    q: dict = _portfolio_time_allocation_scope(current_user["id"])
-    if resource_type:
-        _require_in(resource_type, RESOURCE_TYPES, "resource_type")
-        if resource_type != "time":
-            raise HTTPException(status_code=400, detail=_PORTFOLIO_MONEY_ALLOCATION_ERROR)
-        # ``time`` is already pinned by the base scope; no override.
-    if owner_type:
-        _require_in(owner_type, OWNER_TYPES, "owner_type")
-        q["owner_type"] = owner_type
-    if owner_id:
-        q["owner_id"] = owner_id
-    if allocation_mode:
-        _require_in(allocation_mode, ALLOCATION_MODES, "allocation_mode")
-        q["allocation_mode"] = allocation_mode
-    if date:
-        _require_date_str(date, "date", required=False)
-        q["date"] = date
-    if day_of_week:
-        _require_in(day_of_week, DAY_OF_WEEK, "day_of_week")
-        q["day_of_week"] = day_of_week
-    if currency:
-        _require_currency(currency, "currency", required=False)
-        q["currency"] = currency
-    if status:
-        _require_in(status, ALLOCATION_STATUSES, "status")
-        q["status"] = status
-    if fixed_or_flexible:
-        _require_in(fixed_or_flexible, FLEXIBILITY, "fixed_or_flexible")
-        q["fixed_or_flexible"] = fixed_or_flexible
-    if unit:
-        _require_in(unit, ALLOCATION_UNITS, "unit")
-        q["unit"] = unit
-    docs = await db.resource_allocations.find(q, {"_id": 0}).to_list(length=5000)
-    docs.sort(key=lambda d: d.get("created_at", ""), reverse=True)
-    return [_project_allocation(d) for d in docs]
-
-
-@portfolio_router.put("/resource-allocations/{allocation_id}", response_model=ResourceAllocationResponse)
-async def update_resource_allocation(allocation_id: str, body: ResourceAllocationUpdate, current_user: dict = Depends(get_current_user)):
-    # Batch 2B3 — restrict the update surface to Portfolio-owned time
-    # rows. Finance-owned rows (financial_commitment_id set) are
-    # invisible here and return 404 exactly like any other unknown id.
-    scope = {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id}
-    existing = await db.resource_allocations.find_one(scope, {"_id": 0})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Resource allocation not found")
-    incoming = body.dict(exclude_unset=True)
-    # _validate_allocation now refuses resource_type != "time" with the
-    # exact money-allocation error, so a payload trying to flip a time
-    # row into a money row cannot succeed.
-    merged = _validate_allocation(body, is_create=False, existing=existing)
-    # If ownership has changed (either owner_type or owner_id in the payload),
-    # revalidate that the new reference exists & is owned by the user.
-    if "owner_type" in incoming or "owner_id" in incoming:
-        await _validate_owner_reference(current_user["id"], merged["owner_type"], merged.get("owner_id"))
-    merged["updated_at"] = _now()
-    await db.resource_allocations.update_one(
-        {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id},
-        {"$set": merged},
-    )
-    updated = await db.resource_allocations.find_one(
-        {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id},
-        {"_id": 0},
-    )
-    return _project_allocation(updated)
-
-
-@portfolio_router.delete("/resource-allocations/{allocation_id}", status_code=200)
-async def delete_resource_allocation(allocation_id: str, current_user: dict = Depends(get_current_user)):
-    # Batch 2B3 — Finance-owned rows are excluded from the ownership
-    # scope, so they can never be deleted via this generic route.
-    r = await db.resource_allocations.delete_one(
-        {**_portfolio_time_allocation_scope(current_user["id"]), "id": allocation_id},
-    )
-    if r.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Resource allocation not found")
-    return {"detail": "Resource allocation deleted"}
 
 
 # ============================================================================

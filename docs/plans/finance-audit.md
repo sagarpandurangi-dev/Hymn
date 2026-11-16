@@ -1,5 +1,7 @@
 # Finance audit and Financial Discovery plan
 
+> **Status (16 Nov 2026):** most of this plan is built — ledger, statements and matching, planned money, the three statements, life objects, loans and fuel, family net worth. The current picture lives in `CLAUDE.md`; this file is kept for the reasoning behind the decisions.
+
 Status: **audit complete; ledger architecture approved; patches await approval one by one.** No code was changed for this
 audit. Repository revision audited: `main` at `5c8448f` (after PR #14).
 

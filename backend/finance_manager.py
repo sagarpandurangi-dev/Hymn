@@ -1816,29 +1816,6 @@ async def _repair_pending_direct_payments(
         await _finalize_direct_payment_event(db, user_id, ev)
 
 
-async def _maybe_create_task(db, user_id: str, commitment: dict, task_title: Optional[str], task_due_date: Optional[str]) -> Optional[str]:
-    if not task_title:
-        return None
-    task_id = _uuid()
-    now = _now()
-    await db.tasks.insert_one({
-        "id": task_id,
-        "user_id": user_id,
-        "title": task_title,
-        "notes": f"Auto-linked to Financial Commitment: {commitment.get('title', '')}",
-        "priority": commitment.get("priority", "medium"),
-        "status": "todo",
-        "due_date": task_due_date or commitment["due_date"],
-        "goal_id": commitment.get("goal_id"),
-        "project_id": commitment.get("project_id"),
-        "expected_outcome_id": None,
-        "domain_id": commitment.get("domain_id"),
-        "financial_commitment_id": commitment["id"],
-        "created_at": now,
-        "updated_at": now,
-    })
-    return task_id
-
 
 @finance_router.post("/commitments", response_model=FinancialCommitmentResponse, status_code=201)
 async def create_commitment(

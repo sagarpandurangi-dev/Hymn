@@ -96,6 +96,9 @@ Plans and decisions: `docs/plans/finance-audit.md`. Audits (16 Nov 2026): `docs/
 - Matching must learn from the user's choices and suggest next time.
 - One free Emergent publish: the published build must be the tester beta.
   Before beta: push notifications need a native build with Firebase.
+- Health is shown to beta testers marked **draft** (owner, 16 Nov 2026): the app must show a clear
+  "draft — not yet reviewed by a doctor" note wherever `rules_reviewed` / `values_reviewed` is false.
+- MongoDB Atlas daily backup is enabled (owner, 16 Nov 2026); a test restore is still to be done.
 - The MongoDB password and Anthropic key appeared in chat; the owner checked
   where they're exposed (only this chat, behind their Claude login; repo
   history clean; phone screenshot deleted) and chose **not** to rotate them
@@ -104,22 +107,19 @@ Plans and decisions: `docs/plans/finance-audit.md`. Audits (16 Nov 2026): `docs/
 
 ## Roadmap
 
-Done: auth hardening, CI, Railway, brain dump + review + nuggets, nudges
-backend, planning on Anthropic SDK, one spending truth, ledger core,
-conversion preview/apply, statement upload + verification, statement matching
-with learning.
+Done: auth hardening, CI, Railway (Singapore), brain dump + review + nuggets, nudges, planning on the
+Anthropic SDK, ledger + conversion + sync, statements + matching, planned money + forecast, Pamphlet ID,
+the three money statements, life objects (loans, fuel), family net worth, time statements, life plans +
+plan chat + templates, Health (stages 1–2, caregiver, nudges), Family & Relationships, Learning journeys,
+Work, investments (CAS), beta readiness (AI caps, export/delete, setup checklist), step 1 of the
+stale-path cleanup.
 
 Next:
-1. Owner tests statement review/confirm; fix what they find.
-2. Money book switch-over: done for balances, availability, monthly and Today spending and Finance recent activity (converted users). The owner must run the conversion (Money book screen) for the switch to apply.
-3. Categories/life objects (car, house, habits) per area; depreciation; fuel
-   and mileage; loans (principal/interest, documents); cash vs accrual views.
-4. Speed: Singapore (done); one sync/load per request (done); one call per screen (Finance done: `/api/screens/finance`, app to adopt).
-5. Dream journey (blueprint: shelved draft PRs #5 and #9 on the old July code
-   — never merge them; rebuild on today's code): context review with
-   corrections, feasibility on real time and money, editable plan map.
-6. Family, Work (via time commitments; company runs MS Office), Health
-   (Android Health Connect; owner uses a Samsung watch), Learning.
+1. Emergent screens (see below), then the published tester beta (`docs/BETA_TEST_PLAN.md`).
+2. Native build with Firebase (push notifications, Health Connect / Apple Health sync).
+3. Cleanup steps 2–3 of `docs/audits/2026-11-16-stale-and-duplicate-paths.md` as screens ship.
+4. Before public launch: email/OTP verification for sign-up and reset, health data encryption, privacy
+   policy and DPDP review, a penetration test, doctor and nutritionist sign-offs.
 
 **Emergent prompts owed** (owner: "remember emergent prompts"; write when asked, each starting "Do not
 modify anything under `backend/`"): Health (profile/consent, daily log, dashboard, suggestions, food log +
@@ -127,7 +127,7 @@ photo, habits + urge button, watch sync connect screen, lab reports, check-up ca
 summary, caregiver "people I look after" with `?for=`, "use my health in plans" switch, health nudge
 setting); investments CAS upload (`docs/INVESTMENTS_API.md`, link/replace step); Finance recent activity rows
 with `detail: "ledger"` need a ledger-entry screen (`/api/reports/entries` or a new one) instead of the event
-screen; Family & Relationships (`docs/PEOPLE_API.md`); Learning journeys (`docs/LEARNING_API.md`; the old Knowledge tab lists goals in the "Knowledge" domain); Work (`docs/WORK_API.md`); first-time setup checklist (`GET /api/account/setup`), "Download my data" and "Delete my account" on the Me screen; a friendly message for 429 (daily AI limit) and 413 (file too large); plan chat health requirements. The 18 Nov pack
+screen; a "Draft" note on every Health screen while rules aren't reviewed; Family & Relationships (`docs/PEOPLE_API.md`); Learning journeys (`docs/LEARNING_API.md`; the old Knowledge tab lists goals in the "Knowledge" domain); Work (`docs/WORK_API.md`); first-time setup checklist (`GET /api/account/setup`), "Download my data" and "Delete my account" on the Me screen; a friendly message for 429 (daily AI limit) and 413 (file too large); plan chat health requirements. The 18 Nov pack
 (`docs/EMERGENT_PROMPTS_NOV18.md`, prompts 1–7) comes first.
 
 Later (owner's strategy, decided but not to build yet): intent marketplace —
