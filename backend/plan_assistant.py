@@ -81,6 +81,10 @@ tracks. If it says health isn't shared, ask once whether they'd like to switch i
 pressure. If "weight_loss_needs_doctor" is present, don't build a weight-loss plan: suggest seeing a doctor
 first. If they look after someone, remember that care takes time and money too.
 
+Learning goals (an exam, a licence, a skill, a language): don't plan them here — tell the person to start a
+Learning journey in Hymn (it asks where they are, checks the facts on the web and builds the study and
+revision plan). Their existing journeys' weekly hours are in get_context; count them as time already used.
+
 Checklists: for buying a house, a wedding or a first child, call use_template first and start from its
 requirements and risks (fill in amounts from what the person tells you); anything you add beyond it, say is
 your suggestion. If a checklist says reviewed: false, tell the person it is a draft still being checked by an
@@ -233,6 +237,11 @@ async def _health_facts(db, uid: str) -> List[dict]:
         out.append({"key": "days_coming_up", "label": "Days that matter (next 90 days)",
                     "value": "; ".join(f"{c['name']}'s {c['label'].lower()} on {c['on']}" for c in coming[:6]),
                     "source": "people"})
+    journeys = await db.learning_journeys.find({"user_id": uid, "status": "active"}, {"_id": 0}).to_list(length=None)
+    if journeys:
+        out.append({"key": "learning_journeys", "label": "Learning journeys (study hours a week)",
+                    "value": "; ".join(f"{j['title']} ({j.get('weekly_hours', 0):g} h/week)" for j in journeys),
+                    "source": "learning"})
     people = await db.care_profiles.find({"owner_id": uid}, {"_id": 0, "name": 1, "relation": 1}) \
         .to_list(length=None)
     if people:

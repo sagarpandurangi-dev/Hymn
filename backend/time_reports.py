@@ -189,6 +189,10 @@ async def time_statements(week_start: Optional[str] = Query(None, description="M
     week_checkins = [tag(c) for c in await db.checkins.find(
         {"user_id": uid, "date": {"$gte": first, "$lte": last}},
         {"_id": 0, "goal_id": 1, "title": 1, "duration_minutes": 1}).to_list(length=None)]
+    # Study sessions from learning journeys count as Learning time.
+    week_checkins += [{"_area": "learning", "_label": s.get("title") or "Study", "duration_minutes": s["minutes"]}
+                      async for s in db.learning_sessions.find(
+                          {"user_id": uid, "date": {"$gte": first, "$lte": last}}, {"_id": 0})]
     done = actual(plan, week_checkins)
     stmts = build(plan, done)
 
@@ -197,6 +201,9 @@ async def time_statements(week_start: Optional[str] = Query(None, description="M
     year_checkins = [tag(c) for c in await db.checkins.find(
         {"user_id": uid, "date": {"$gte": f"{monday.year}-01-01", "$lte": last}, "duration_minutes": {"$gt": 0}},
         {"_id": 0, "goal_id": 1, "title": 1, "duration_minutes": 1}).to_list(length=None)]
+    year_checkins += [{"_area": "learning", "duration_minutes": s["minutes"]}
+                      async for s in db.learning_sessions.find(
+                          {"user_id": uid, "date": {"$gte": f"{monday.year}-01-01", "$lte": last}}, {"_id": 0})]
     assets: Dict[str, int] = defaultdict(int)
     for c in year_checkins:
         assets[c["_area"]] += int(c["duration_minutes"])
