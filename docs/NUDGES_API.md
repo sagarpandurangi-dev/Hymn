@@ -23,7 +23,7 @@ Each push carries `data`:
 
 ```json
 { "screen": "inbox/review" | "inbox/patterns" | "plans" | "health" | "health/checkups" | "health/progress"
-            | "health/daily" | "habits" | "people" | "learning",
+            | "health/daily" | "habits" | "people" | "learning" | "work",
   "item_id": "uuid (reminders only)", "plan_id": "…", "habit_id": "…", "check": "dental",
   "for": "care_… (health nudges about someone you look after; null = yourself)" }
 ```
@@ -39,7 +39,7 @@ the feed, or from a push whose matching feed entry you find by time), call
 ```json
 [{
   "id": "uuid",
-  "kind": "daily_review | reminder | weekly_patterns | plan_drift | health_report | health_checkup | health_log | habit_urge | people_day | people_touch | learning_today | learning_deadline",
+  "kind": "daily_review | reminder | weekly_patterns | plan_drift | health_report | health_checkup | health_log | habit_urge | people_day | people_touch | learning_today | learning_deadline | work_appraisal | work_leave | work_week",
   "title": "Time for your 2-minute review",
   "body": "3 things waiting in your inbox.",
   "data": { "screen": "inbox/review" },
@@ -62,6 +62,7 @@ the feed, or from a push whose matching feed entry you find by time), call
     "health":          { "enabled": true, "time": "09:30" },
     "people":          { "enabled": true, "time": "09:00" },
     "learning":        { "enabled": true, "time": "07:00" },
+    "work":            { "enabled": true, "time": "18:30" },
     "quiet_hours":     { "start": "22:00", "end": "07:00" }
   },
   "timezone": "Asia/Kolkata",
@@ -90,6 +91,8 @@ the feed, or from a push whose matching feed entry you find by time), call
 
 - `learning`: the day's study sessions for each active journey, and requirement deadlines 14 and 3 days
   before. See `docs/LEARNING_API.md`.
+
+- `work`: appraisal in 3 weeks, leave expiring in 30 days, Friday overtime. See `docs/WORK_API.md`.
 
 `PUT /nudges/settings` takes any subset, e.g.
 `{ "daily_review": { "time": "07:45" }, "timezone": "Asia/Kolkata" }`, and

@@ -81,6 +81,8 @@ tracks. If it says health isn't shared, ask once whether they'd like to switch i
 pressure. If "weight_loss_needs_doctor" is present, don't build a weight-loss plan: suggest seeing a doctor
 first. If they look after someone, remember that care takes time and money too.
 
+Time off: a plan that needs days away from work (a trip, a wedding, study leave) — call check_leave.
+
 Learning goals (an exam, a licence, a skill, a language): don't plan them here — tell the person to start a
 Learning journey in Hymn (it asks where they are, checks the facts on the web and builds the study and
 revision plan). Their existing journeys' weekly hours are in get_context; count them as time already used.
@@ -126,6 +128,8 @@ TOOLS = [
          "principal": {"type": "number"}, "annual_rate_percent": {"type": "number"},
          "tenure_months": {"type": "integer"}, "monthly_income": {"type": "number"}},
          "required": ["principal", "annual_rate_percent", "tenure_months", "monthly_income"]}},
+    {"name": "check_leave", "description": "Leave days left per type (this leave year), and whether `days` fit.",
+     "input_schema": {"type": "object", "properties": {"days": {"type": "number"}}, "required": ["days"]}},
     {"name": "use_template", "description": (
         "Checklist (requirements and risks with sources) for a big life event: house, wedding, first_child."),
      "input_schema": {"type": "object", "properties": {
@@ -237,6 +241,20 @@ async def _health_facts(db, uid: str) -> List[dict]:
         out.append({"key": "days_coming_up", "label": "Days that matter (next 90 days)",
                     "value": "; ".join(f"{c['name']}'s {c['label'].lower()} on {c['on']}" for c in coming[:6]),
                     "source": "people"})
+    import work
+    roles = await db.work_roles.find({"user_id": uid, "status": "active"}, {"_id": 0}).to_list(length=None)
+    if roles:
+        out.append({"key": "work", "label": "Work", "value": "; ".join(
+            f"{(r.get('title') or r['type'].replace('_', ' '))}{' at ' + r['organisation'] if r.get('organisation') else ''}"
+            f" ({r['type'].replace('_', ' ')})" for r in roles), "source": "work"})
+        left = await work.leave_left(db, uid)
+        if left:
+            out.append({"key": "leave_left", "label": "Leave left this leave year",
+                        "value": ", ".join(f"{b['left']:g} {b['label'].lower()}" for b in left), "source": "work"})
+        pay = await work.take_home(db, uid)
+        if pay is not None:
+            out.append({"key": "monthly_take_home", "label": "Monthly take-home (payslips)", "value": _money(pay),
+                        "source": "your last payslips"})
     journeys = await db.learning_journeys.find({"user_id": uid, "status": "active"}, {"_id": 0}).to_list(length=None)
     if journeys:
         out.append({"key": "learning_journeys", "label": "Learning journeys (study hours a week)",
@@ -352,6 +370,14 @@ async def run_tool(db, user: dict, chat: dict, name: str, args: dict) -> Any:
     if name == "loan_affordability":
         return loan_affordability(args["principal"], args["annual_rate_percent"], args["tenure_months"],
                                   args["monthly_income"])
+    if name == "check_leave":
+        import work
+        left = await work.leave_left(db, uid)
+        need = float(args.get("days") or 0)
+        total = sum(b["left"] for b in left)
+        return {"leave": [{k: b[k] for k in ("role", "label", "left", "year_ends")} for b in left],
+                "days_needed": need, "fits": bool(left) and total >= need,
+                "note": "No leave set up in Work yet." if not left else ""}
     if name == "use_template":
         import plan_templates
         out = plan_templates.fill(user, args["key"], args.get("params") or {})

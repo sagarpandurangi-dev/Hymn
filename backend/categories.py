@@ -40,7 +40,8 @@ EXPENSE_TREE: List[Tuple[str, str, List[Tuple[str, str]]]] = [
 ]
 
 INCOME_TREE: List[Tuple[str, str, List[Tuple[str, str]]]] = [
-    ("salary", "Salary", [("salary", "Salary (take-home)"), ("bonus", "Bonus")]),
+    ("salary", "Salary", [("salary", "Salary (take-home)"), ("bonus", "Bonus"),
+                          ("salary_withheld", "Kept back from salary (PF, tax)")]),
     ("investment_income", "Interest & dividends", [("interest", "Interest"), ("dividends", "Dividends")]),
     ("other_income", "Other income", [("rent_received", "Rent received"), ("refund", "Refunds & cashback"),
                                       ("gift", "Gifts received"), ("other", "Other")]),
