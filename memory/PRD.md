@@ -28,3 +28,11 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 
 ## Deferred
 - Event delete, Finance/Me detail modules, Check-ins/Tasks/Spending detail modules, email-based password reset, refresh tokens.
+
+## Regression pass (Jun 2026) — Planned money / Finance tab / Forecast / Overnight blocks / Pamphlet ID
+- Finance tab 12-month forecast now reads dashboard.forecast (same server calc as full forecast screen); twin call removed.
+- Finance tab refreshes on focus; negative free cash shows red; forecast basis note shows.
+- Full forecast: maybe note no longer clipped. Planned screen: "Going out" keeps decimals, no spinner flash on return.
+- Planned form: errors clear when a field is edited.
+- Portfolio: overnight blocks show a "continues until HH:MM (from X night)" line on the next day.
+- Deferred (backend): planned items marked "Set money aside" not counted in Set aside / Available to spend.

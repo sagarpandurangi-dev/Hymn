@@ -19,7 +19,6 @@ import {
   DayOfWeek,
   FLEXIBILITY_OPTIONS,
   TIME_CATEGORIES,
-  hhmmToMinutes,
   hasOverlapOnDay,
   isCrossMidnight,
   nextDay,
@@ -120,12 +119,22 @@ export default function TimeBlockEditor({ visible, day, initial, existingByDay, 
     // Pre-flight overlap check per selected day. An overnight block is
     // checked as its evening part on day D and its morning part on D+1, but
     // it is SAVED as a single record (the backend counts an end earlier
-    // than the start into the next morning). `initial.id` is treated as the
-    // block being replaced so we don't self-collide during an edit.
+    // than the start into the next morning). Saved overnight blocks are
+    // expanded the same way, so their next-morning part is checked too.
+    // `initial.id` is treated as the block being replaced so we don't
+    // self-collide during an edit.
+    const occupied: Partial<Record<DayOfWeek, { id?: string; start_time: string; end_time: string }[]>> = {};
+    for (const [d, list] of Object.entries(existingByDay) as [DayOfWeek, TimeBlockDraft[]][]) {
+      for (const b of list || []) {
+        for (const p of splitCrossMidnight(d, b.start_time, b.end_time)) {
+          (occupied[p.day] ||= []).push({ id: b.id, start_time: p.start_time, end_time: p.end_time });
+        }
+      }
+    }
     for (const d of selectedDays) {
       const pieces = splitCrossMidnight(d, startTime, endTime);
       for (const p of pieces) {
-        const same = existingByDay[p.day] || [];
+        const same = occupied[p.day] || [];
         if (hasOverlapOnDay(same, { id: initial?.id, start_time: p.start_time, end_time: p.end_time })) {
           setError(`Overlaps another block on ${DAY_LABELS[p.day]}.`);
           return;
@@ -268,10 +277,6 @@ export default function TimeBlockEditor({ visible, day, initial, existingByDay, 
     </Modal>
   );
 }
-
-// Suppress unused import — `hhmmToMinutes` was previously used and may be
-// helpful again as validation grows.
-void hhmmToMinutes;
 
 const styles = StyleSheet.create({
   wrap: { flex: 1, backgroundColor: colors.surface },

@@ -5,7 +5,7 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import { api } from "@/src/lib/api";
 import FinanceHeader from "@/src/components/finance/FinanceHeader";
 import { FoldAmount, FoldCard, FoldRow, foldPageStyle } from "@/src/components/finance/foldUi";
-import { financeColors, financeSpace } from "@/src/lib/finance/theme";
+import { financeColors, financeSpace, financeType } from "@/src/lib/finance/theme";
 import { formatMoney, monthLabel } from "@/src/lib/finance/format";
 
 export default function ForecastFull() {
@@ -37,7 +37,8 @@ export default function ForecastFull() {
                   key={m.month}
                   first={idx === 0}
                   label={monthLabel(m.month)}
-                  meta={`Income ${formatMoney(m.recurring_income)} · outflow ${formatMoney(m.recurring_outflows)}${m.usual_spending != null ? ` · everyday spending ${formatMoney(String(m.usual_spending))}` : ""} · reserved ${formatMoney(m.reserved_commitments_amount)}`}
+                  // Not clamped: the maybe note sits at the end and was cut off at 2 lines.
+                  meta={<Text style={financeType.rowMeta} testID={`forecast-row-meta-${m.month}`}>{`Income ${formatMoney(m.recurring_income)} · outflow ${formatMoney(m.recurring_outflows)}${m.usual_spending != null ? ` · everyday spending ${formatMoney(String(m.usual_spending))}` : ""} · reserved ${formatMoney(m.reserved_commitments_amount)}${Number(m.maybe_income || 0) !== 0 || Number(m.maybe_spending || 0) !== 0 ? ` · maybe +${formatMoney(String(m.maybe_income || 0))} / −${formatMoney(String(m.maybe_spending || 0))}` : ""}`}</Text>}
                   right={<FoldAmount currency={currency} value={formatMoney(m.projected_liquid_end_of_month)} tone={m.shortfall ? "negative" : "ink"} />}
                   onPress={() => router.push(`/finance/forecast-month?currency=${currency}&month=${m.month}`)}
                   chevron

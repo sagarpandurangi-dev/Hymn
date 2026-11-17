@@ -6,11 +6,11 @@
  * returned — no math on the client. This is a pure UI refresh; data
  * primitives and routes are unchanged.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import Ionicons from "@react-native-vector-icons/ionicons";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { api, PlannedItem } from "@/src/lib/api";
 import PlannedItemForm from "@/src/components/finance/PlannedItemForm";
 import PlannedRow from "@/src/components/finance/PlannedRow";
@@ -19,6 +19,7 @@ import {
   FoldAmount,
   FoldBanner,
   FoldCard,
+  FoldPill,
   FoldRow,
   FoldSectionHeader,
   foldPageStyle,
@@ -44,13 +45,12 @@ export default function FinanceScreen() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [d, twin, recon, plannedList] = await Promise.all([
+      const [d, recon, plannedList] = await Promise.all([
         api.getFinanceDashboard(),
-        api.getTwinForecasts().catch(() => null),
         api.reconciliationSuggestions().catch(() => []),
         api.listPlannedMoney().catch(() => [] as PlannedItem[]),
       ]);
-      setDash({ ...d, _twin: twin, _recon_count: (recon || []).length });
+      setDash({ ...d, _recon_count: (recon || []).length });
       setPlanned(Array.isArray(plannedList) ? plannedList : []);
     } catch (e: any) {
       setError(e?.message || "Could not load Finance");
@@ -58,6 +58,13 @@ export default function FinanceScreen() {
   }, []);
 
   useEffect(() => { (async () => { setLoading(true); await load(); setLoading(false); })(); }, [load]);
+
+  // Refresh quietly when coming back from Planned money, Statements, etc.
+  const firstFocus = useRef(true);
+  useFocusEffect(useCallback(() => {
+    if (firstFocus.current) { firstFocus.current = false; return; }
+    load();
+  }, [load]));
 
   const retryInitialLoad = useCallback(async () => {
     setLoading(true);
@@ -120,6 +127,8 @@ export default function FinanceScreen() {
     .sort((a, b) => nextDate(a).localeCompare(nextDate(b)))
     .slice(0, 6);
   const plannedCurrency = planned[0]?.currency || position[0]?.currency || "INR";
+  const reserved: any[] = dash?.reserved?.by_currency || dash?.reserved || [];
+  const liquidity: any[] = dash?.available_liquidity?.by_currency || dash?.available_liquidity || [];
   const dueForReview: any[] = dash?.commitments_due_for_review || [];
   const recentEvents: any[] = dash?.recent_events || [];
   const multiCurrency = dash?.position?.multi_currency;
@@ -243,7 +252,7 @@ export default function FinanceScreen() {
                 <FoldRow label="Investments" right={<FoldAmount currency={w.currency} value={formatMoney(cm.investments)} />} onPress={() => router.push(`/finance/monthly-drill?currency=${w.currency}&month=${cm.month}&bucket=investment`)} chevron />
                 <View style={styles.freeCashBar}>
                   <Text style={styles.freeCashLabel}>Free cash</Text>
-                  <FoldAmount currency={w.currency} value={formatMoney(cm.monthly_free_cash)} size="lg" tone="positive" />
+                  <FoldAmount currency={w.currency} value={formatMoney(cm.monthly_free_cash)} size="lg" tone={Number(cm.monthly_free_cash) < 0 ? "negative" : "positive"} />
                 </View>
               </FoldCard>
             </View>
@@ -256,8 +265,43 @@ export default function FinanceScreen() {
         <View style={styles.blockGap} testID="finance-planned">
           <FoldSectionHeader
             label="Planned money"
-            action={{ label: "+ New", onPress: () => { setPlannedEditing(null); setPlannedFormOpen(true); } }}
+            action={{ label: "+ New", testID: "finance-planned-new", onPress: () => { setPlannedEditing(null); setPlannedFormOpen(true); } }}
           />
+          {liquidity.length > 0 ? (
+            <FoldCard testID="finance-available-money">
+              {liquidity.map((l: any, idx: number) => {
+                const setAside = l.reserved ?? l.reserved_total ?? reserved.find((r: any) => r.currency === l.currency)?.reserved_total;
+                return (
+                  <View key={`liq-${l.currency}`}>
+                    <FoldRow
+                      first={idx === 0}
+                      label={`Available to spend (${l.currency})`}
+                      meta="Liquid minus money set aside"
+                      right={<FoldAmount currency={l.currency} value={formatMoney(l.available_unreserved)} size="md" tone="positive" />}
+                      testID={`available-${l.currency}`}
+                    />
+                    {setAside != null ? (
+                      <FoldRow
+                        label={`Set aside (${l.currency})`}
+                        right={<FoldAmount currency={l.currency} value={formatMoney(String(setAside))} />}
+                        testID={`set-aside-${l.currency}`}
+                      />
+                    ) : null}
+                    {l.pending_account_events && l.pending_account_events.length > 0 ? (
+                      <FoldRow
+                        label={`Pending account (${l.currency})`}
+                        meta={`${l.pending_account_events.length} spend${l.pending_account_events.length === 1 ? "" : "s"} waiting for an account`}
+                        right={<FoldPill label="Assign" tone="warn" size="xs" />}
+                        onPress={() => router.push(`/finance/events`)}
+                        chevron
+                        testID={`pending-account-${l.currency}`}
+                      />
+                    ) : null}
+                  </View>
+                );
+              })}
+            </FoldCard>
+          ) : null}
           <FoldCard>
             {upcomingPlanned.length === 0 ? (
               <View style={styles.emptyRow}>
@@ -276,45 +320,47 @@ export default function FinanceScreen() {
         </View>
 
         {/* ============================================================
-           4. Twelve-month forecast — liquidity + net worth twin
+           4. Twelve-month forecast — from the dashboard's forecast block
+              (same server calculation as the full forecast screen)
         ============================================================ */}
-        {(dash?._twin?.liquidity_forecast?.by_currency || []).map((f: any) => {
-          const nw = dash._twin.net_worth_forecast.by_currency.find((x: any) => x.currency === f.currency);
+        {(dash?.forecast?.by_currency || []).map((f: any) => {
+          const months: any[] = (f.months || []).slice(0, 4);
+          if (months.length === 0) return null;
           return (
             <View key={`fc-${f.currency}`} style={styles.blockGap} testID={`finance-forecast-${f.currency}`}>
               <FoldSectionHeader
                 label="Twelve-month forecast"
-                hint={`${f.currency} · liquidity ${f.confidence}${nw?.confidence ? ` · net worth ${nw.confidence}` : ""}`}
+                hint={`${f.currency} · confidence ${f.confidence}`}
                 action={{ label: "Full forecast", onPress: () => router.push(`/finance/forecast?currency=${f.currency}`) }}
               />
               <FoldCard>
                 <View style={styles.subHead}>
                   <Text style={styles.subHeadText}>Liquidity — can obligations be met?</Text>
                 </View>
-                {f.months.slice(0, 4).map((m: any, idx: number) => (
+                {months.map((m: any, idx: number) => (
                   <FoldRow
                     key={`liq-${m.month}`}
                     first={idx === 0}
                     label={monthLabel(m.month)}
-                    meta={`Opening ${formatMoney(m.opening_liquid_money)} · closing ${formatMoney(m.closing_liquid_money)} · ${m.confidence}`}
-                    right={<FoldAmount currency={f.currency} value={formatMoney(m.available_unreserved_liquid_money)} tone={m.shortfall ? "negative" : "ink"} />}
+                    meta={`Income ${formatMoney(m.recurring_income)} · outflow ${formatMoney(m.recurring_outflows)} · reserved ${formatMoney(m.reserved_commitments_amount)}`}
+                    right={<FoldAmount currency={f.currency} value={formatMoney(m.projected_liquid_end_of_month)} tone={m.shortfall ? "negative" : "ink"} />}
                     onPress={() => router.push(`/finance/forecast-month?currency=${f.currency}&month=${m.month}`)}
                     chevron
+                    testID={`finance-forecast-liq-${f.currency}-${m.month}`}
                   />
                 ))}
               </FoldCard>
-              {nw?.months?.length > 0 ? (
+              {months.some((m: any) => m.projected_net_worth_end_of_month != null) ? (
                 <FoldCard style={{ marginTop: financeSpace.md }}>
                   <View style={styles.subHead}>
                     <Text style={styles.subHeadText}>Net worth — how does wealth change?</Text>
                   </View>
-                  {nw.months.slice(0, 4).map((m: any, idx: number) => (
+                  {months.map((m: any, idx: number) => (
                     <FoldRow
                       key={`nw-${m.month}`}
                       first={idx === 0}
                       label={monthLabel(m.month)}
-                      meta={`Assets Δ ${formatMoney(m.asset_changes)} · liab Δ ${formatMoney(m.liability_changes)}`}
-                      right={<FoldAmount currency={f.currency} value={formatMoney(m.net_worth)} />}
+                      right={<FoldAmount currency={f.currency} value={formatMoney(m.projected_net_worth_end_of_month)} />}
                     />
                   ))}
                 </FoldCard>

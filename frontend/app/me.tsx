@@ -4,6 +4,7 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 import { useEffect, useState } from "react";
 import { useRouter } from "expo-router";
 import { useAuth } from "@/src/lib/AuthContext";
+import PamphletIdCard from "@/src/components/PamphletIdCard";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
 export default function MeScreen() {
@@ -71,6 +72,8 @@ export default function MeScreen() {
           )}
           <Text style={styles.email} testID="me-email">{user?.email || ""}</Text>
         </View>
+
+        <PamphletIdCard hymnId={user?.hymn_id} hymnAlias={user?.hymn_alias} />
 
         <View style={styles.section}>
           <Text style={styles.editorLabel}>Name</Text>

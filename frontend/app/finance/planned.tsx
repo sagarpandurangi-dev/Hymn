@@ -39,11 +39,11 @@ export default function PlannedMoneyScreen() {
     }
   }, []);
 
+  // Full-screen spinner only on the first load; later focuses refresh quietly.
   useFocusEffect(
     useCallback(() => {
       let alive = true;
       (async () => {
-        setLoading(true);
         await load();
         if (alive) setLoading(false);
       })();
@@ -105,7 +105,7 @@ export default function PlannedMoneyScreen() {
                 <FoldRow
                   label="Going out"
                   meta={num(month.maybe_out) ? `Maybe −${formatMoney(String(month.maybe_out))}` : undefined}
-                  right={<FoldAmount currency={cardCurrency} value={formatMoney(String(num(month.spend) + num(month.set_aside)))} />}
+                  right={<FoldAmount currency={cardCurrency} value={formatMoney((num(month.spend) + num(month.set_aside)).toFixed(2))} />}
                 />
                 <FoldRow
                   label="To savings"

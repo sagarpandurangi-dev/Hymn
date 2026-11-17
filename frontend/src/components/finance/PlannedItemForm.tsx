@@ -10,6 +10,7 @@ import { ActivityIndicator, KeyboardAvoidingView, Modal, Platform, Pressable, Sc
 import { useRouter } from "expo-router";
 import { api, ApiError, PlannedItem, PlannedItemInput, PlannedPurpose, PlannedRepeat } from "@/src/lib/api";
 import DateTimeField from "@/src/components/DateTimeField";
+import MonthPickerField from "@/src/components/finance/MonthPickerField";
 import { financeColors, financeRadius, financeSpace } from "@/src/lib/finance/theme";
 import { dateLabel, formatMoney } from "@/src/lib/finance/format";
 import { confirmAction } from "@/src/lib/confirm";
@@ -91,6 +92,9 @@ export default function PlannedItemForm({ visible, item, defaultCurrency, onClos
     setSetAside(!!item?.set_aside);
   }, [visible, item]);
 
+  // Clear a stale error as soon as the user changes any field.
+  useEffect(() => { setError(""); }, [title, direction, purpose, amount, repeat, date, startMonth, endMonth]);
+
   const isOneOffSpend = direction === "out" && purpose === "spend" && repeat === "once";
 
   const save = async () => {
@@ -101,8 +105,9 @@ export default function PlannedItemForm({ visible, item, defaultCurrency, onClos
     if (!amt || !/^\d+(\.\d{1,2})?$/.test(amt) || Number(amt) <= 0) { setError("Enter an amount greater than 0."); return; }
     if (repeat === "once" && !DATE_RE.test(date)) { setError("Choose a date."); return; }
     if (repeat !== "once") {
-      if (!MONTH_RE.test(startMonth.trim())) { setError("Enter a start month as YYYY-MM."); return; }
-      if (endMonth.trim() && !MONTH_RE.test(endMonth.trim())) { setError("Enter the end month as YYYY-MM, or leave it empty."); return; }
+      if (!MONTH_RE.test(startMonth.trim())) { setError("Choose a start month."); return; }
+      if (endMonth.trim() && !MONTH_RE.test(endMonth.trim())) { setError("Choose an end month, or leave it empty."); return; }
+      if (endMonth.trim() && endMonth.trim() < startMonth.trim()) { setError("End month can't be before the start month."); return; }
     }
     const payload: PlannedItemInput = {
       title: name,
@@ -219,14 +224,14 @@ export default function PlannedItemForm({ visible, item, defaultCurrency, onClos
                     <DateTimeField mode="date" value={date} onChange={setDate} testID="planned-date" />
                   </>
                 ) : (
-                  <View style={{ flexDirection: "row", gap: financeSpace.md }}>
-                    <View style={{ flex: 1 }}>
+                  <View style={{ gap: financeSpace.sm }}>
+                    <View>
                       <Text style={styles.label}>Start month</Text>
-                      <TextInput style={styles.input} value={startMonth} onChangeText={setStartMonth} placeholder="YYYY-MM" placeholderTextColor={financeColors.inkFaint} autoCapitalize="none" testID="planned-start-month" />
+                      <MonthPickerField value={startMonth} onChange={setStartMonth} testID="planned-start-month" />
                     </View>
-                    <View style={{ flex: 1 }}>
+                    <View>
                       <Text style={styles.label}>End month (optional)</Text>
-                      <TextInput style={styles.input} value={endMonth} onChangeText={setEndMonth} placeholder="YYYY-MM" placeholderTextColor={financeColors.inkFaint} autoCapitalize="none" testID="planned-end-month" />
+                      <MonthPickerField value={endMonth} onChange={setEndMonth} placeholder="No end month" clearable testID="planned-end-month" />
                     </View>
                   </View>
                 )}

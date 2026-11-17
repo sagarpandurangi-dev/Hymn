@@ -39,6 +39,8 @@ export type User = {
   portfolio_setup_completed_at?: string | null;
   portfolio_reporting_currency?: string | null;
   post_creation_decomposition_preference?: PostCreationDecompositionPreference;
+  hymn_id?: string | null;
+  hymn_alias?: string | null;
 };
 
 type AuthState = {

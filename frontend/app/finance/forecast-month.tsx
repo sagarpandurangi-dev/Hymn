@@ -47,6 +47,20 @@ export default function ForecastMonth() {
                 right={<FoldAmount currency={currency} value={formatMoney(String(val || "0"))} />}
               />
             ))}
+            {[
+              ["Maybe income", m?.maybe_income],
+              ["Maybe spending", m?.maybe_spending],
+            ]
+              .filter(([, val]) => Number(val || 0) !== 0)
+              .map(([label, val]) => (
+                <FoldRow
+                  key={String(label)}
+                  label={<Text style={styles.maybe}>{String(label)}</Text>}
+                  meta="Maybe"
+                  right={<Text style={styles.maybe}>{currency} {formatMoney(String(val))}</Text>}
+                  testID={`forecast-month-${String(label).toLowerCase().replace(" ", "-")}`}
+                />
+              ))}
           </FoldCard>
 
           <FoldSectionHeader label="Contributing commitments" />
@@ -79,4 +93,5 @@ const styles = StyleSheet.create({
   linkText: { fontSize: 13, color: financeColors.accent, fontWeight: "600" },
   empty: { fontSize: 13, color: financeColors.inkMuted, padding: financeSpace.lg, fontStyle: "italic", textAlign: "center" },
   basis: { fontSize: 12, color: financeColors.inkMuted, lineHeight: 17 },
+  maybe: { fontSize: 14, color: financeColors.inkMuted },
 });
