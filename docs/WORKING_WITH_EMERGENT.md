@@ -14,8 +14,7 @@ changes back, so the two must never edit the same files.
 
 ## Flow
 
-1. Emergent works and saves to its own branch (it names them
-   `conflict_*` when it can't save on top of `main`).
+1. Emergent works and saves to the `emergent-frontend` branch.
 2. Claude Code merges only `frontend/` from that branch into `main`.
 3. Nothing flows back to Emergent; its copy of `backend/` goes stale on
    purpose. Once the backend is hosted outside Emergent, point Emergent's
@@ -41,5 +40,4 @@ python -m pytest safety_tests
 python -m pytest unit_tests
 ```
 
-`backend/tests/` and `tests/` are live integration suites that need a
-running server; they are not part of CI.
+The ready-to-paste prompts, in build order, are in `docs/EMERGENT_PROMPTS.md`.

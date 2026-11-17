@@ -81,7 +81,7 @@ short. Never ask them to paste secrets into chat.
 | `work.py`, `payslip_ai.py` | Work: roles (type salaried/self_employed/business_owner/freelancer/articleship/looking_for_work/homemaker; one schema, parts switch on by type: leave + appraisals for employed, payslips for salaried) whose hours and commute become fixed time blocks (`source_type` system, `source_id` role); work days that ran over/ended early → "Overtime" in time statements; week view "in its box" (≤2h over) with family time, sleep, stress; leave balances per leave year with expiry beyond carry-forward, planner tool `check_leave`; wins log and appraisal pack; payslips (Premium): AI copies, code checks sums and sorts deductions; on the money book PF → EPF (`income:salary_withheld`), tax/PT/insurance/other → `salary_deduction` entries, so income shows gross without double counting take-home; nudges (setting `work`, 18:30): appraisal −21 days, leave expiring −30 days, Friday overtime. API notes: `docs/WORK_API.md` |
 | `ai_budget.py`, `account.py` | beta safety: daily AI caps per person (`ai_budget.daily("strong"|"light")` route dependency; strong 15/60 Premium, light 100/300; attempts counted) on plan chat, learning setup, old planner, goal merge, brain dump, payslips, statements; `GET /api/account/setup` (first-time checklist across areas), `GET /api/account/export` (all data, no secrets), `DELETE /api/account` (password + "DELETE"; also care profiles and their data, family membership; Pamphlet ID retired, never reissued). `server.py`: API docs off in production, 30 MB body cap, safe headers |
 
-Plans and decisions: `docs/plans/finance-audit.md`. Audits (16 Nov 2026): `docs/audits/2026-11-16-stale-and-duplicate-paths.md` (removal review — nothing removed until the owner ticks items; note `main`'s `frontend/` is older than the `emergent-frontend` branch, whose `backend/` must never be merged), `docs/audits/2026-11-16-beta-readiness.md` (security, backups, setup), tester plan `docs/BETA_TEST_PLAN.md`. Ready-to-paste Emergent prompts for the 18 Nov credit refresh: `docs/EMERGENT_PROMPTS_NOV18.md`. API notes for Emergent:
+Plans and decisions: `docs/plans/finance-audit.md`. Audits (16 Nov 2026): `docs/audits/2026-11-16-stale-and-duplicate-paths.md` (removal review — nothing removed until the owner ticks items; note `main`'s `frontend/` is older than the `emergent-frontend` branch, whose `backend/` must never be merged), `docs/audits/2026-11-16-beta-readiness.md` (security, backups, setup), tester plan `docs/BETA_TEST_PLAN.md`. Ready-to-paste Emergent prompts, A–U in build order: `docs/EMERGENT_PROMPTS.md` (also a copy-button page for the owner). API notes for Emergent:
 `docs/INBOX_API.md`, `docs/NUDGES_API.md`. Deploy guide: `docs/DEPLOY_RAILWAY.md`.
 
 ## Owner decisions to respect
@@ -121,14 +121,12 @@ Next:
 4. Before public launch: email/OTP verification for sign-up and reset, health data encryption, privacy
    policy and DPDP review, a penetration test, doctor and nutritionist sign-offs.
 
-**Emergent prompts owed** (owner: "remember emergent prompts"; write when asked, each starting "Do not
-modify anything under `backend/`"): Health (profile/consent, daily log, dashboard, suggestions, food log +
-photo, habits + urge button, watch sync connect screen, lab reports, check-up calendar, 90-day report, doctor
-summary, caregiver "people I look after" with `?for=`, "use my health in plans" switch, health nudge
-setting); investments CAS upload (`docs/INVESTMENTS_API.md`, link/replace step); Finance recent activity rows
-with `detail: "ledger"` need a ledger-entry screen (`/api/reports/entries` or a new one) instead of the event
-screen; a "Draft" note on every Health screen while rules aren't reviewed; Family & Relationships (`docs/PEOPLE_API.md`); Learning journeys (`docs/LEARNING_API.md`; the old Knowledge tab lists goals in the "Knowledge" domain); Work (`docs/WORK_API.md`); first-time setup checklist (`GET /api/account/setup`), "Download my data" and "Delete my account" on the Me screen; a friendly message for 429 (daily AI limit) and 413 (file too large); plan chat health requirements. The 18 Nov pack
-(`docs/EMERGENT_PROMPTS_NOV18.md`, prompts 1–7) comes first.
+**Emergent prompts:** all owed screens are written up as prompts A–U in `docs/EMERGENT_PROMPTS.md`
+(17 Nov 2026; Emergent credits back). The owner pastes them in order and saves to `emergent-frontend`
+after each; check each save against the backend (field names, routes) before the next, and add any
+missing response fields on the backend rather than spending Emergent credits. After the last: copy
+`frontend/` from `emergent-frontend` into `main` (never its `backend/`) and switch on
+`HYMN_REQUIRE_CHECKIN_DURATION=1`.
 
 Later (owner's strategy, decided but not to build yet): intent marketplace —
 classify fulfillable brain-dump items (category, locality, time window),
