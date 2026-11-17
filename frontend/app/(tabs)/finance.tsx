@@ -2,7 +2,7 @@
  * Finance tab — Fold-inspired dashboard.
  *
  * Every KPI, total and chart is drillable. The screen only fetches a
- * single ``GET /api/finance/dashboard`` and renders what the backend
+ * single ``GET /api/screens/finance`` (plus reconciliation suggestions) and renders what the backend
  * returned — no math on the client. This is a pure UI refresh; data
  * primitives and routes are unchanged.
  */
@@ -45,13 +45,12 @@ export default function FinanceScreen() {
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [d, recon, plannedList] = await Promise.all([
-        api.getFinanceDashboard(),
+      const [screen, recon] = await Promise.all([
+        api.getFinanceScreen(),
         api.reconciliationSuggestions().catch(() => []),
-        api.listPlannedMoney().catch(() => [] as PlannedItem[]),
       ]);
-      setDash({ ...d, _recon_count: (recon || []).length });
-      setPlanned(Array.isArray(plannedList) ? plannedList : []);
+      setDash({ ...screen.dashboard, _recon_count: (recon || []).length });
+      setPlanned(Array.isArray(screen.planned_upcoming) ? screen.planned_upcoming : []);
     } catch (e: any) {
       setError(e?.message || "Could not load Finance");
     }
@@ -120,12 +119,8 @@ export default function FinanceScreen() {
 
   const position = dash?.position?.currencies || [];
   const monthlyWindows: any[] = dash?.monthly_windows || [];
-  // Up to 6 upcoming planned items (not done), soonest first.
-  const nextDate = (it: PlannedItem) => it.date || (it.start_month ? `${it.start_month}-01` : "") || "9999";
-  const upcomingPlanned = planned
-    .filter((it) => it.status !== "done")
-    .sort((a, b) => nextDate(a).localeCompare(nextDate(b)))
-    .slice(0, 6);
+  // The server already returns the next 6 planned items, soonest first.
+  const upcomingPlanned = planned;
   const plannedCurrency = planned[0]?.currency || position[0]?.currency || "INR";
   const reserved: any[] = dash?.reserved?.by_currency || dash?.reserved || [];
   const liquidity: any[] = dash?.available_liquidity?.by_currency || dash?.available_liquidity || [];

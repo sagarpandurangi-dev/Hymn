@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
+import { durationSuffix } from "@/src/components/DurationPicker";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
 
@@ -284,7 +285,7 @@ export default function TodayScreen() {
                 {events.slice(0, 3).map((e) => (
                   <View key={e.id} style={styles.eventRow}>
                     <Text style={styles.eventTime}>{e.time}</Text>
-                    <Text style={styles.eventTitle} numberOfLines={1}>{e.title}</Text>
+                    <Text style={styles.eventTitle} numberOfLines={1}>{e.title}{durationSuffix((e as any).duration_minutes)}</Text>
                   </View>
                 ))}
                 {events.length > 3 && <Text style={styles.eventMore}>+{events.length - 3} more</Text>}

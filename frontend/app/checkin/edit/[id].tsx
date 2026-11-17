@@ -6,6 +6,7 @@ import { api } from "@/src/lib/api";
 import { colors, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
+import DurationPicker, { DURATION_REQUIRED } from "@/src/components/DurationPicker";
 
 export default function EditCheckinScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -15,6 +16,7 @@ export default function EditCheckinScreen() {
   const [time, setTime] = useState("");
   const [notes, setNotes] = useState("");
   const [attachment, setAttachment] = useState("");
+  const [duration, setDuration] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -25,6 +27,7 @@ export default function EditCheckinScreen() {
       try {
         const c = await api.getCheckin(id);
         setTitle(c.title); setDate(c.date); setTime(c.time); setNotes(c.notes || ""); setAttachment(c.attachment || "");
+        setDuration(typeof c.duration_minutes === "number" ? c.duration_minutes : null);
       } catch (e: any) { setError(e?.message || "Could not load"); }
       finally { setLoading(false); }
     })();
@@ -34,9 +37,10 @@ export default function EditCheckinScreen() {
     if (!id) return;
     setError(null);
     if (!title.trim()) { setError("Title is required."); return; }
+    if (!duration) { setError(DURATION_REQUIRED); return; }
     setBusy(true);
     try {
-      await api.updateCheckin(id, { title: title.trim(), date, time, notes: notes.trim(), attachment: attachment.trim() });
+      await api.updateCheckin(id, { title: title.trim(), date, time, notes: notes.trim(), attachment: attachment.trim(), duration_minutes: duration });
       router.back();
     } catch (e: any) { setError(e?.message || "Could not save"); }
     finally { setBusy(false); }
@@ -65,6 +69,7 @@ export default function EditCheckinScreen() {
               <DateTimeField mode="time" value={time} onChange={setTime} testID="edit-checkin-time-input" />
             </View>
           </View>
+          <DurationPicker value={duration} onChange={(m) => { setDuration(m); setError(null); }} testID="edit-checkin-duration" />
           <Text style={s.label}>Notes</Text>
           <TextInput style={s.notes} value={notes} onChangeText={setNotes} multiline textAlignVertical="top" testID="edit-checkin-notes-input" />
           <Text style={s.label}>Attachment</Text>

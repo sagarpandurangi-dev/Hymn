@@ -36,3 +36,7 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 - Planned form: errors clear when a field is edited.
 - Portfolio: overnight blocks show a "continues until HH:MM (from X night)" line on the next day.
 - Deferred (backend): planned items marked "Set money aside" not counted in Set aside / Available to spend.
+
+## Check-in duration + Finance screen endpoint (Jun 2026)
+- Required duration row (15m/30m/45m/60m/2h/3h → duration_minutes) on Life/Goal/Project/Edit check-in forms; blocked with "How long did it take?"; "· 45m" on Timeline, Today, Goal/Project lists, check-in detail. Component: src/components/DurationPicker.tsx.
+- Finance tab loads from GET /api/screens/finance (dashboard + planned_upcoming); reconciliation suggestions still separate.

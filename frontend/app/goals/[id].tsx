@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
+import { durationSuffix } from "@/src/components/DurationPicker";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import ConfirmModal from "@/src/components/ConfirmModal";
 import { TaskListWithGrouping } from "@/src/components/TaskListWithGrouping";
@@ -292,7 +293,7 @@ export default function GoalDetailScreen() {
                   <View style={styles.checkinDot} />
                   <View style={{ flex: 1 }}>
                     <Text style={styles.eoTitle} numberOfLines={1}>{c.title || "(untitled)"}</Text>
-                    <Text style={styles.eoMeta}>{formatDateShort(c.date)}{c.time ? ` · ${c.time}` : ""}</Text>
+                    <Text style={styles.eoMeta}>{formatDateShort(c.date)}{c.time ? ` · ${c.time}` : ""}{durationSuffix((c as any).duration_minutes)}</Text>
                   </View>
                   <Ionicons name="chevron-forward" size={16} color={colors.onSurfaceTertiary} />
                 </Pressable>

@@ -9,6 +9,7 @@ import { useAuth } from "@/src/lib/AuthContext";
 import { colors, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
+import DurationPicker, { DURATION_REQUIRED } from "@/src/components/DurationPicker";
 import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
 import AccountPickerModal from "@/src/components/AccountPickerModal";
 import { toLocalTimezoneIso } from "@/src/lib/finance/occurredAt";
@@ -41,6 +42,7 @@ export default function LifeCheckinScreen() {
   const [accountId, setAccountId] = useState<string | null>(null);
   const [accountLabel, setAccountLabel] = useState<string>("Choose account");
   const [accountPickerOpen, setAccountPickerOpen] = useState(false);
+  const [duration, setDuration] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -58,6 +60,7 @@ export default function LifeCheckinScreen() {
   const onSave = async () => {
     setError(null);
     if (!title.trim()) { setError("Title is required."); return; }
+    if (!duration) { setError(DURATION_REQUIRED); return; }
     const trimmedMoney = (moneySpent || "").trim();
     if (trimmedMoney && !/^\d+(\.\d+)?$/.test(trimmedMoney)) {
       setError("Money spent must be a positive number.");
@@ -69,7 +72,7 @@ export default function LifeCheckinScreen() {
     }
     setBusy(true);
     try {
-      const payload: any = { type: "life", title: title.trim(), date, time, notes: notes.trim(), attachment, source: "manual" };
+      const payload: any = { type: "life", title: title.trim(), date, time, notes: notes.trim(), attachment, source: "manual", duration_minutes: duration };
       if (taskId) {
         payload.task_id = taskId;
         // Task completion is opt-in — a Life check-in is normally an update
@@ -115,6 +118,8 @@ export default function LifeCheckinScreen() {
               <DateTimeField mode="time" value={time} onChange={setTime} testID="life-checkin-time-input" />
             </View>
           </View>
+
+          <DurationPicker value={duration} onChange={(m) => { setDuration(m); setError(null); }} testID="life-checkin-duration" />
 
           {tasks.length > 0 && (
             <>
@@ -208,10 +213,10 @@ export default function LifeCheckinScreen() {
             <TextInput style={[s.input, { marginTop: spacing.sm }]} value={followUpTitle} onChangeText={setFollowUpTitle} placeholder="Follow-up task title" placeholderTextColor={colors.onSurfaceTertiary} testID="life-checkin-followup-title-input" />
           )}
 
-          {error ? <Text style={s.errorText} testID="life-checkin-error">{error}</Text> : null}
         </ScrollView>
 
         <View style={s.footer}>
+          {error ? <Text style={[s.errorText, { marginTop: 0, marginBottom: spacing.sm }]} testID="life-checkin-error">{error}</Text> : null}
           <Pressable style={[s.cta, busy && s.ctaDisabled]} onPress={onSave} disabled={busy} testID="life-checkin-save-button">
             {busy ? <ActivityIndicator color={colors.onSurfaceInverse} /> : <Text style={s.ctaText}>Save check-in</Text>}
           </Pressable>

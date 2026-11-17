@@ -6,6 +6,7 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import ConfirmModal from "@/src/components/ConfirmModal";
+import { durationSuffix } from "@/src/components/DurationPicker";
 
 export default function CheckinDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -62,7 +63,7 @@ export default function CheckinDetailScreen() {
         <ScrollView contentContainerStyle={styles.scroll}>
           <Text style={styles.type}>{(c.type || "").toUpperCase()} CHECK-IN</Text>
           <Text style={styles.title} testID="checkin-detail-title">{c.title}</Text>
-          <Text style={styles.meta}>{c.date} · {c.time}</Text>
+          <Text style={styles.meta} testID="checkin-detail-meta">{c.date} · {c.time}{durationSuffix(c.duration_minutes)}</Text>
           {c.notes ? <Text style={styles.notes} testID="checkin-detail-notes">{c.notes}</Text> : null}
           {c.attachment ? (
             <View style={styles.block}>
