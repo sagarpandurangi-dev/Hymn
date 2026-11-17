@@ -28,3 +28,14 @@ commitments, one-off commitments and expected income on screens.
 
 The forecast (`GET /api/finance/forecast`) reads this list; each month also
 has `maybe_income` and `maybe_spending`.
+
+## Set aside
+An active one-off spend with `set_aside: true` holds what's left of it (amount − `done_amount`) out of
+"Available to spend": the Finance dashboard's `available_liquidity[].reserved` includes it and
+`available_unreserved` goes down by it. `reserved[]` lists it under `planned_set_aside[]`
+(`id`, `title`, `date`, `amount`) next to `commitments[]`. Marking it done (or cancelling it) releases it.
+
+## Events waiting for an account
+`GET /api/finance/events?lifecycle_status=pending_account_assignment` lists only spends that still need
+an account (the "Pending account → Assign" shortcut).
+

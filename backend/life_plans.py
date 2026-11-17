@@ -133,10 +133,14 @@ async def money_by(db, user_id: str, currency: str, by: str, plan_id: Optional[s
     and usual everyday spending, month by month (the forecast's rules)."""
     import finance_manager
     import planned_money
-    from money_service import load_availability, monthly_actual_spending
+    from money_service import load_availability, monthly_actual_spending, planned_set_asides
 
     avail = (await load_availability(db, user_id))["by_currency"].get(currency, {})
     now_amount = Decimal(avail.get("available_unreserved", 0))
+    # Money set aside for this very plan is held for it: count it as there.
+    if plan_id:
+        now_amount += sum((i["remaining"] for i in await planned_set_asides(db, user_id)
+                           if i.get("life_plan_id") == plan_id and i["currency"] == currency), ZERO)
     # A plan's own savings are money kept for it, not money gone.
     items = [i for i in await planned_money.load_items(db, user_id)
              if not (plan_id and i.get("life_plan_id") == plan_id)]
@@ -154,7 +158,8 @@ async def money_by(db, user_id: str, currency: str, by: str, plan_id: Optional[s
         everyday = max(usual - t["spend"], ZERO)
         if month == this_month:
             everyday *= finance_manager._rest_of_month_share()
-        amount += t["income"] - t["spend"] - t["set_aside"] - t["moves"] - everyday
+        # Set-aside spends are already held out of "available now", so they aren't taken off again.
+        amount += t["income"] - t["spend"] - t["moves"] - everyday
         month = _month_add(month, 1)
     return {"now": now_amount, "by_then": amount}
 
