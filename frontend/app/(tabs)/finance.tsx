@@ -381,13 +381,23 @@ export default function FinanceScreen() {
           </FoldCard>
         </View>
 
+        {/* Statements — net worth, income & expenditure, cash flow */}
+        <View style={styles.blockGap} testID="finance-reports">
+          <FoldSectionHeader label="Statements" />
+          <FoldCard>
+            <FoldRow first label="Statement of Net Worth" meta="What you own and owe, side by side" onPress={() => router.push("/finance/reports/net-worth" as any)} chevron testID="finance-report-net-worth" />
+            <FoldRow label="Income & Expenditure" meta="This month, last month and year to date" onPress={() => router.push("/finance/reports/income-expenditure" as any)} chevron testID="finance-report-ie" />
+            <FoldRow label="Cash Flow" meta="Opening cash to closing cash" onPress={() => router.push("/finance/reports/cash-flow" as any)} chevron testID="finance-report-cash-flow" />
+          </FoldCard>
+        </View>
+
         {/* Documents — statements and money book */}
         <View style={styles.blockGap}>
           <FoldSectionHeader label="Documents" />
           <FoldCard>
             <FoldRow
               first
-              label="Statements"
+              label="Bank statements"
               meta="Upload bank statements and check they add up."
               onPress={() => router.push(`/finance/statements`)}
               chevron

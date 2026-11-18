@@ -62,3 +62,8 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 - /finance/planned: GET /planned-money?include_done=true; rows show ₹ (formatINR), "Once on 12 Dec"/"Monthly from Jan 2027"/"Yearly in March", Maybe/Set aside/Done/Cancelled tags, "₹X left", lock + "Edit on the old screen" for editable:false. Groups: Every month/year, Coming up, Maybe, Done or cancelled.
 - Swipe-left actions (SwipeablePlannedRow): Done / Cancel / Delete; form also has Mark done / Cancel item / Delete.
 - "Next 12 months" section from /planned-money/months. Finance tab has a "Planned money" row under the forecast.
+
+## Statements (reports) (Jun 2026)
+- Finance tab "Statements" section → /finance/reports/net-worth (side-by-side ≥720px, stacked on phones), /finance/reports/income-expenditure (month picker, 3 columns, expand groups → categories → /finance/reports/entries), /finance/reports/cash-flow (sections, net change, closing, ✓ Adds up).
+- Helpers in src/components/finance/ReportBits.tsx read group fields defensively (label/name, amount/total, lines/categories). Actual group shapes not yet seen with real data.
+- Report lines: multi-column lines put the label on its own row (phone-readable); negatives shown in brackets; Documents row renamed "Bank statements".

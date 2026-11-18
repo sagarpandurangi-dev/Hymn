@@ -801,6 +801,14 @@ export const api = {
     request<any>("/people", { method: "POST", body: payload, auth: true }),
   getTimeReport: () => request<any>("/reports/time", { auth: true }),
   getAccountSetup: () => request<AccountSetup>("/account/setup", { auth: true }),
+  // -- Statements (reports) --
+  getNetWorthReport: () => request<any>("/reports/net-worth", { auth: true }),
+  getIncomeExpenditureReport: (month: string) =>
+    request<any>(`/reports/income-expenditure?month=${encodeURIComponent(month)}`, { auth: true }),
+  getCashFlowReport: (month: string) =>
+    request<any>(`/reports/cash-flow?month=${encodeURIComponent(month)}`, { auth: true }),
+  getReportEntries: (category: string, start: string, end: string) =>
+    request<any>(`/reports/entries?category=${encodeURIComponent(category)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`, { auth: true }),
   downloadAccountExport: () => downloadAccountExport(),
   deleteAccount: (password: string) =>
     request<any>("/account", { method: "DELETE", body: { password, confirm: "DELETE" }, auth: true }),
