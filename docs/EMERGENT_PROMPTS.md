@@ -62,7 +62,7 @@ Do not modify anything under backend/. Do not change the backend URL in frontend
 
 Build a welcome wizard for new people (app/welcome/…). Calm, one question per screen, a progress line at the top, a Back button, and "Skip" on every step except the first. The whole thing should take about 3 minutes.
 
-When it shows: right after sign-up, and for a signed-in person whose user has no portfolio_setup_completed_at (this replaces the current redirect to /portfolio/setup in app/_layout.tsx). At the end, call PUT /api/portfolio/setup-status with {"completed": true} and go to Today. If the person closes the app halfway, start again at the step they reached (remember it in AsyncStorage "hymn.welcome.step").
+When it shows: right after sign-up, and for a signed-in person whose user has no portfolio_setup_completed_at (this replaces the current redirect to /portfolio/setup in app/_layout.tsx). At the end, call PUT /api/portfolio/setup-status with {"completed": true, "reporting_currency": "<the bank account's currency from step 7, else INR>"} and go to Today. This works even if every step was skipped (the server needs nothing else). If the person closes the app halfway, start again at the step they reached (remember it in AsyncStorage "hymn.welcome.step").
 
 Steps:
 1. Promise: "Hymn helps you follow through on your life." Under it, one line each: Money, Health, Family & Relationships, Learning, Work. Button "Let's start".

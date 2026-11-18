@@ -134,3 +134,23 @@ def test_first_time_setup_checklist(client, server, user, monkeypatch):
     client.post("/api/people", headers=h, json={"name": "Priya", "relation": "friend"})
     s = client.get("/api/account/setup", headers=h).json()
     assert s["done"] == 3 and s["next"]["key"] == "accounts" and s["of"] == 6
+
+
+def test_welcome_wizard_can_finish_with_every_step_skipped(client):
+    # Someone who skips everything still finishes; with no account, ₹ is the main currency.
+    _, h = _signup(client, "skip-all@example.com")
+    r = client.put("/api/portfolio/setup-status", headers=h, json={"completed": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["completed"] is True and r.json()["reporting_currency"] == "INR"
+    assert client.get("/api/auth/me", headers=h).json()["portfolio_setup_completed_at"]
+    # Someone who added a bank account gets that account's currency.
+    _, h2 = _signup(client, "has-account@example.com")
+    assert client.post("/api/portfolio/financial-accounts", headers=h2, json={
+        "account_type": "bank", "name": "Main", "currency": "USD", "current_value": "500",
+        "liquidity_type": "liquid", "fixed_or_flexible": "flexible"}).status_code == 201
+    r2 = client.put("/api/portfolio/setup-status", headers=h2, json={"completed": True})
+    assert r2.status_code == 200 and r2.json()["reporting_currency"] == "USD"
+    # A currency the person chose is kept.
+    _, h3 = _signup(client, "chose@example.com")
+    r3 = client.put("/api/portfolio/setup-status", headers=h3, json={"completed": True, "reporting_currency": "EUR"})
+    assert r3.json()["reporting_currency"] == "EUR"
