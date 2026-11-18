@@ -28,22 +28,20 @@ function AuthGate() {
     // must not redirect the user away from the very screen they need to use.
     // Expo Router currently types `segments` as a one-element tuple, so we
     // join the full path instead of reading a non-existent index.
-    const onPortfolioSetup =
-      segments.join("/") === "portfolio/setup";
+    const onWelcome = seg0 === "welcome";
 
     if (!user && !inAuthGroup) {
       router.replace("/(auth)/sign-in");
       return;
     }
     if (user && inAuthGroup) {
-      router.replace("/(tabs)/today");
+      router.replace(user.portfolio_setup_completed_at ? "/(tabs)/today" : "/welcome");
       return;
     }
-    if (user && !user.portfolio_setup_completed_at && !onPortfolioSetup) {
-      // Portfolio Setup is the mandatory gate for any authenticated user
-      // whose profile is still incomplete. Once completed_at is populated
-      // (see /api/portfolio/setup-status PUT) this block stops firing.
-      router.replace("/portfolio/setup");
+    if (user && !user.portfolio_setup_completed_at && !onWelcome) {
+      // The welcome wizard is the gate for anyone whose setup is incomplete.
+      // Once completed_at is set (PUT /api/portfolio/setup-status) this stops.
+      router.replace("/welcome");
     }
   }, [user, loading, startupError, segments, router]);
 
@@ -90,6 +88,7 @@ function AuthenticatedAppShell() {
     Boolean(seg0) &&
     seg0 !== "(auth)" &&
     seg0 !== "(tabs)" &&
+    seg0 !== "welcome" &&
     !onPortfolioSetup;
 
   const selectRootTab = (name: MainTabName) => {

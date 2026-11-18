@@ -46,3 +46,9 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 - api.ts request(): 413 "That file is too large.", 429/503 server detail as toast (src/lib/toast.ts + ToastHost), 401 on auth calls → sign out.
 - src/utils/upload.ts: pickImage() (≤1024px, JPEG 0.7) / pickPdf() → {base64, mediaType}.
 - src/components/DraftNote.tsx; formatINR in src/lib/finance/format.ts.
+
+## Welcome wizard (Jun 2026)
+- /welcome (app/welcome/index.tsx + src/components/welcome/*): 10 screens — promise, focus areas (hymn.focusAreas), time zone (PUT /nudges/settings), work (POST /work/roles), sleep (7 overnight time-commitments), brain dump, people (POST /people), optional bank account (AccountEditor), notifications, payoff (reports/time free_hours + inbox/review top 3).
+- Gate in app/_layout.tsx sends users without portfolio_setup_completed_at to /welcome (replaced /portfolio/setup redirect). Progress in AsyncStorage hymn.welcome.step / .saved / .user (per user). Steps skip saves already on server.
+- Finish: PUT /portfolio/setup-status {completed:true, reporting_currency from bank account else INR if missing}.
+- Today: SetupProgressCard from GET /account/setup; "Not now" snoozes 7 days (hymn.setupCard.snoozedUntil).

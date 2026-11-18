@@ -792,6 +792,16 @@ export const api = {
   refreshInboxPatterns: () =>
     request<InboxPatternsResponse>("/inbox/patterns", { method: "POST", auth: true }),
 
+  // -- Welcome wizard / setup --
+  createWorkRole: (payload: { type: string; work_days?: string[]; start_time?: string; end_time?: string; commute_minutes?: number }) =>
+    request<any>("/work/roles", { method: "POST", body: payload, auth: true }),
+  listWorkRoles: () => request<any[]>("/work/roles", { auth: true }),
+  listPeople: () => request<any[]>("/people", { auth: true }),
+  createPerson: (payload: { name: string; relation: string; circle: string; birthday?: string | null }) =>
+    request<any>("/people", { method: "POST", body: payload, auth: true }),
+  getTimeReport: () => request<any>("/reports/time", { auth: true }),
+  getAccountSetup: () => request<AccountSetup>("/account/setup", { auth: true }),
+
   // -- Nudges --
   registerNudgeDevice: (payload: { token: string; platform: "android" | "ios" }) =>
     request<any>("/nudges/devices", { method: "POST", body: payload, auth: true }),
@@ -1002,6 +1012,9 @@ export type NudgeSettings = {
   quiet_hours?: { start?: string | null; end?: string | null };
   timezone?: string | null;
 };
+export type AccountSetupStep = { key: string; title: string; why?: string; screen: string; done: boolean; optional?: boolean };
+export type AccountSetup = { steps: AccountSetupStep[]; done: number; of: number; complete: boolean; next: AccountSetupStep | null };
+
 export type NudgeSettingsUpdate = {
   daily_review?: Partial<NonNullable<NudgeSettings["daily_review"]>>;
   weekly_patterns?: Partial<NonNullable<NudgeSettings["weekly_patterns"]>>;

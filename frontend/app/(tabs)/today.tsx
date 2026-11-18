@@ -4,6 +4,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
+import SetupProgressCard from "@/src/components/SetupProgressCard";
 import { durationSuffix } from "@/src/components/DurationPicker";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
@@ -185,6 +186,7 @@ export default function TodayScreen() {
         </View>
 
         <View style={styles.stack}>
+          <SetupProgressCard />
           <Card
             testID="card-daily-review"
             title={`Daily review (${reviewOpen ?? 0} open)`}
