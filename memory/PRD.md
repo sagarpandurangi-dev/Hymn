@@ -52,3 +52,8 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 - Gate in app/_layout.tsx sends users without portfolio_setup_completed_at to /welcome (replaced /portfolio/setup redirect). Progress in AsyncStorage hymn.welcome.step / .saved / .user (per user). Steps skip saves already on server.
 - Finish: PUT /portfolio/setup-status {completed:true, reporting_currency from bank account else INR if missing}.
 - Today: SetupProgressCard from GET /account/setup; "Not now" snoozes 7 days (hymn.setupCard.snoozedUntil).
+
+## Notifications, export, account delete (Jun 2026)
+- /nudges titled "Notifications": reads GET /nudges/settings `settings{}`; sections Evening review, Your week in Hymn, Reminders, Health, Birthdays and keeping in touch, Today's study, Work, Quiet hours. PUT sends only changed fields.
+- openNudgeScreen(router, data) in src/lib/push.ts routes data.screen (+ids, data.for → /life/health?for=) for feed and push taps; unknown → Today.
+- Me: AccountDataSection (Download my data → hymn-data-YYYY-MM-DD.json via share sheet / web download; Delete my account → /account/delete). Delete allowed before setup is complete (gate exception).

@@ -801,13 +801,16 @@ export const api = {
     request<any>("/people", { method: "POST", body: payload, auth: true }),
   getTimeReport: () => request<any>("/reports/time", { auth: true }),
   getAccountSetup: () => request<AccountSetup>("/account/setup", { auth: true }),
+  downloadAccountExport: () => downloadAccountExport(),
+  deleteAccount: (password: string) =>
+    request<any>("/account", { method: "DELETE", body: { password, confirm: "DELETE" }, auth: true }),
 
   // -- Nudges --
   registerNudgeDevice: (payload: { token: string; platform: "android" | "ios" }) =>
     request<any>("/nudges/devices", { method: "POST", body: payload, auth: true }),
   unregisterNudgeDevice: (token: string) =>
     request<any>(`/nudges/devices?token=${encodeURIComponent(token)}`, { method: "DELETE", auth: true }),
-  getNudgeSettings: () => request<NudgeSettings>("/nudges/settings", { auth: true }),
+  getNudgeSettings: () => request<NudgeSettingsResponse>("/nudges/settings", { auth: true }),
   updateNudgeSettings: (payload: NudgeSettingsUpdate) =>
     request<NudgeSettings>("/nudges/settings", { method: "PUT", body: payload, auth: true }),
   listNudges: (limit = 20) => request<Nudge[]>(`/nudges?limit=${limit}`, { auth: true }),
@@ -975,6 +978,29 @@ async function downloadStatementFile(id: string, filename: string): Promise<void
   }
 }
 
+/** GET /account/export → hymn-data-YYYY-MM-DD.json, then the share sheet (web: browser download). */
+async function downloadAccountExport(): Promise<void> {
+  const data = await request<any>("/account/export", { auth: true });
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const name = `hymn-data-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.json`;
+  const json = JSON.stringify(data, null, 2);
+  if (Platform.OS === "web") {
+    const blobUrl = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    return;
+  }
+  const target = `${FileSystem.cacheDirectory}${name}`;
+  await FileSystem.writeAsStringAsync(target, json, { encoding: FileSystem.EncodingType.UTF8 });
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(target, { mimeType: "application/json", UTI: "public.json", dialogTitle: "Your Hymn data" });
+  }
+}
+
 export type StatementStatus = "reading" | "ready" | "needs_review" | "failed" | string;
 export type Statement = {
   id: string;
@@ -1004,14 +1030,25 @@ export type LedgerConversionPreview = {
   fingerprint?: string;
 };
 
+export type NudgeTimedSection = { enabled?: boolean | null; time?: string | null };
 export type NudgeSettings = {
   daily_review?: { enabled?: boolean | null; time?: string | null; adaptive?: boolean | null };
   daily_review_plan?: { explanation?: string | null } | null;
   weekly_patterns?: { enabled?: boolean | null; weekday?: number | null; time?: string | null };
   reminders?: { enabled?: boolean | null };
+  health?: NudgeTimedSection;
+  people?: NudgeTimedSection;
+  learning?: NudgeTimedSection;
+  work?: NudgeTimedSection;
   quiet_hours?: { start?: string | null; end?: string | null };
   timezone?: string | null;
 };
+/** GET /nudges/settings returns the sections under `settings`. */
+export type NudgeSettingsResponse = {
+  settings?: NudgeSettings;
+  timezone?: string | null;
+  daily_review_plan?: { explanation?: string | null } | null;
+} & NudgeSettings;
 export type AccountSetupStep = { key: string; title: string; why?: string; screen: string; done: boolean; optional?: boolean };
 export type AccountSetup = { steps: AccountSetupStep[]; done: number; of: number; complete: boolean; next: AccountSetupStep | null };
 
@@ -1019,8 +1056,12 @@ export type NudgeSettingsUpdate = {
   daily_review?: Partial<NonNullable<NudgeSettings["daily_review"]>>;
   weekly_patterns?: Partial<NonNullable<NudgeSettings["weekly_patterns"]>>;
   reminders?: Partial<NonNullable<NudgeSettings["reminders"]>>;
+  health?: Partial<NudgeTimedSection>;
+  people?: Partial<NudgeTimedSection>;
+  learning?: Partial<NudgeTimedSection>;
+  work?: Partial<NudgeTimedSection>;
   quiet_hours?: Partial<NonNullable<NudgeSettings["quiet_hours"]>>;
-  timezone: string;
+  timezone?: string;
 };
 export type Nudge = {
   id: string;
@@ -1028,7 +1069,7 @@ export type Nudge = {
   body: string;
   created_at?: string;
   sent_at?: string;
-  data?: { screen?: string } | null;
+  data?: { screen?: string; for?: string; [key: string]: unknown } | null;
 };
 export type InboxPatternsResponse = {
   stats?: {

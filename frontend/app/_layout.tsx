@@ -38,7 +38,9 @@ function AuthGate() {
       router.replace(user.portfolio_setup_completed_at ? "/(tabs)/today" : "/welcome");
       return;
     }
-    if (user && !user.portfolio_setup_completed_at && !onWelcome) {
+    // Deleting the account must stay possible before setup is finished.
+    const onAccountDelete = segments.join("/") === "account/delete";
+    if (user && !user.portfolio_setup_completed_at && !onWelcome && !onAccountDelete) {
       // The welcome wizard is the gate for anyone whose setup is incomplete.
       // Once completed_at is set (PUT /api/portfolio/setup-status) this stops.
       router.replace("/welcome");
@@ -89,6 +91,7 @@ function AuthenticatedAppShell() {
     seg0 !== "(auth)" &&
     seg0 !== "(tabs)" &&
     seg0 !== "welcome" &&
+    !(seg0 === "account" && !user?.portfolio_setup_completed_at) &&
     !onPortfolioSetup;
 
   const selectRootTab = (name: MainTabName) => {

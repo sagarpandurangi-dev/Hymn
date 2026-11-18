@@ -4,6 +4,7 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 import { useEffect, useState } from "react";
 import { useRouter } from "expo-router";
 import { useAuth } from "@/src/lib/AuthContext";
+import AccountDataSection from "@/src/components/AccountDataSection";
 import PamphletIdCard from "@/src/components/PamphletIdCard";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
@@ -151,7 +152,7 @@ export default function MeScreen() {
           <Pressable style={styles.row} onPress={() => router.push("/nudges" as any)} testID="me-open-nudges">
             <View style={styles.rowLeft}>
               <Ionicons name="notifications-outline" size={20} color={colors.onSurface} />
-              <Text style={styles.rowText}>Nudges</Text>
+              <Text style={styles.rowText}>Notifications</Text>
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
           </Pressable>
@@ -164,6 +165,8 @@ export default function MeScreen() {
             <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
           </Pressable>
         </View>
+
+        <AccountDataSection />
 
         <View style={styles.section}>
           <Pressable style={styles.logoutButton} onPress={onLogout} disabled={busy} testID="logout-button">

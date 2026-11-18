@@ -2,39 +2,63 @@ import { useCallback, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
-import { api, ApiError, Nudge, NudgeSettings, NudgeSettingsUpdate } from "@/src/lib/api";
+import { api, ApiError, Nudge, NudgeSettingsResponse, NudgeSettingsUpdate } from "@/src/lib/api";
 import { colors, radius, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
 import { openNudgeScreen } from "@/src/lib/push";
 
+type Timed = { enabled: boolean; time: string };
 type Draft = {
   daily_review: { enabled: boolean; time: string; adaptive: boolean };
   weekly_patterns: { enabled: boolean; weekday: number; time: string };
   reminders: { enabled: boolean };
+  health: Timed;
+  people: Timed;
+  learning: Timed;
+  work: Timed;
   quiet_hours: { start: string; end: string };
 };
 
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const SECTIONS = ["daily_review", "weekly_patterns", "reminders", "quiet_hours"] as const;
+const SECTIONS = ["daily_review", "weekly_patterns", "reminders", "health", "people", "learning", "work", "quiet_hours"] as const;
 
-const toDraft = (x: NudgeSettings): Draft => ({
-  daily_review: {
-    enabled: !!x.daily_review?.enabled,
-    time: x.daily_review?.time || "",
-    adaptive: !!x.daily_review?.adaptive,
-  },
-  weekly_patterns: {
-    enabled: !!x.weekly_patterns?.enabled,
-    weekday: x.weekly_patterns?.weekday ?? 6,
-    time: x.weekly_patterns?.time || "",
-  },
-  reminders: { enabled: !!x.reminders?.enabled },
-  quiet_hours: { start: x.quiet_hours?.start || "", end: x.quiet_hours?.end || "" },
-});
+// Area reminders: one switch + one time each.
+const TIMED: { key: "health" | "people" | "learning" | "work"; label: string; fallback: string }[] = [
+  { key: "health", label: "Health", fallback: "09:30" },
+  { key: "people", label: "Birthdays and keeping in touch", fallback: "09:00" },
+  { key: "learning", label: "Today's study", fallback: "07:00" },
+  { key: "work", label: "Work", fallback: "18:30" },
+];
+
+const toDraft = (res: NudgeSettingsResponse): Draft => {
+  const x = res.settings ?? res;
+  const timed = (k: (typeof TIMED)[number]["key"], fallback: string): Timed => ({
+    enabled: x[k]?.enabled ?? true,
+    time: x[k]?.time || fallback,
+  });
+  return {
+    daily_review: {
+      enabled: !!x.daily_review?.enabled,
+      time: x.daily_review?.time || "",
+      adaptive: !!x.daily_review?.adaptive,
+    },
+    weekly_patterns: {
+      enabled: !!x.weekly_patterns?.enabled,
+      weekday: x.weekly_patterns?.weekday ?? 6,
+      time: x.weekly_patterns?.time || "",
+    },
+    reminders: { enabled: !!x.reminders?.enabled },
+    health: timed("health", "09:30"),
+    people: timed("people", "09:00"),
+    learning: timed("learning", "07:00"),
+    work: timed("work", "18:30"),
+    quiet_hours: { start: x.quiet_hours?.start || "", end: x.quiet_hours?.end || "" },
+  };
+};
 
 /** Only the fields that differ from what was loaded. */
-function changedFields(original: Draft, draft: Draft): Omit<NudgeSettingsUpdate, "timezone"> {
+function changedFields(original: Draft, draft: Draft): NudgeSettingsUpdate {
   const out: Record<string, Record<string, unknown>> = {};
   for (const section of SECTIONS) {
     const before = original[section] as Record<string, unknown>;
@@ -81,7 +105,7 @@ export default function NudgesScreen() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  const applySettings = (res: NudgeSettings) => {
+  const applySettings = (res: NudgeSettingsResponse) => {
     const d = toDraft(res);
     setOriginal(d);
     setDraft(d);
@@ -92,10 +116,7 @@ export default function NudgesScreen() {
     setError("");
     try {
       const [settings, list] = await Promise.all([api.getNudgeSettings(), api.listNudges(20)]);
-      const d = toDraft(settings);
-      setOriginal(d);
-      setDraft(d);
-      setExplanation(settings.daily_review_plan?.explanation || "");
+      applySettings(settings);
       setNudges(Array.isArray(list) ? list : ((list as any)?.nudges ?? (list as any)?.items ?? []));
     } catch (e) {
       setError((e as ApiError).message);
@@ -127,12 +148,9 @@ export default function NudgesScreen() {
     setSaving(true);
     setError("");
     try {
-      const res = await api.updateNudgeSettings({
-        ...changes,
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      });
-      if (res && typeof res === "object" && "daily_review" in res) {
-        applySettings(res);
+      const res = await api.updateNudgeSettings(changes);
+      if (res && typeof res === "object" && ("settings" in res || "daily_review" in res)) {
+        applySettings(res as NudgeSettingsResponse);
       } else {
         setOriginal(draft);
       }
@@ -145,20 +163,16 @@ export default function NudgesScreen() {
   };
 
   const openNudge = async (n: Nudge) => {
-    try {
-      await api.markNudgeOpened(n.id);
-    } catch (e) {
-      setError((e as ApiError).message);
-      return;
-    }
-    openNudgeScreen(router, n.data?.screen);
+    // Marking it opened is bookkeeping; never block the tap on it.
+    api.markNudgeOpened(n.id).catch(() => undefined);
+    openNudgeScreen(router, n.data);
   };
 
   return (
     <SafeAreaView style={s.safe} edges={["top"]}>
       <View style={s.headerRow}>
         <Pressable onPress={() => router.back()} hitSlop={12} testID="nudges-back"><Text style={s.cancel}>Back</Text></Pressable>
-        <Text style={s.headerTitle}>Nudges</Text>
+        <Text style={s.headerTitle}>Notifications</Text>
         <View style={{ width: 56 }} />
       </View>
       {loading ? (
@@ -171,18 +185,18 @@ export default function NudgesScreen() {
         >
           {draft ? (
             <>
-              <Text style={s.label}>DAILY REVIEW</Text>
+              <Text style={s.label}>EVENING REVIEW</Text>
               <View style={styles.card}>
-                <ToggleRow label="Daily review" value={draft.daily_review.enabled} onChange={(v) => update("daily_review", { enabled: v })} testID="nudges-daily-enabled" />
+                <ToggleRow label="Evening review" value={draft.daily_review.enabled} onChange={(v) => update("daily_review", { enabled: v })} testID="nudges-daily-enabled" />
                 <Text style={styles.fieldLabel}>Time</Text>
                 <DateTimeField mode="time" value={draft.daily_review.time} onChange={(v) => update("daily_review", { time: v })} testID="nudges-daily-time" />
-                <ToggleRow label="Learn my best time" value={draft.daily_review.adaptive} onChange={(v) => update("daily_review", { adaptive: v })} testID="nudges-daily-adaptive" />
+                <ToggleRow label="Adapt to my routine" value={draft.daily_review.adaptive} onChange={(v) => update("daily_review", { adaptive: v })} testID="nudges-daily-adaptive" />
                 {explanation ? <Text style={styles.small} testID="nudges-daily-explanation">{explanation}</Text> : null}
               </View>
 
-              <Text style={s.label}>WEEKLY SUMMARY</Text>
+              <Text style={s.label}>YOUR WEEK IN HYMN</Text>
               <View style={styles.card}>
-                <ToggleRow label="Weekly summary" value={draft.weekly_patterns.enabled} onChange={(v) => update("weekly_patterns", { enabled: v })} testID="nudges-weekly-enabled" />
+                <ToggleRow label="Your week in Hymn" value={draft.weekly_patterns.enabled} onChange={(v) => update("weekly_patterns", { enabled: v })} testID="nudges-weekly-enabled" />
                 <Text style={styles.fieldLabel}>Day</Text>
                 <View style={styles.weekdayRow}>
                   {WEEKDAYS.map((label, i) => {
@@ -207,6 +221,17 @@ export default function NudgesScreen() {
               <View style={styles.card}>
                 <ToggleRow label="Reminders" value={draft.reminders.enabled} onChange={(v) => update("reminders", { enabled: v })} testID="nudges-reminders-enabled" />
               </View>
+
+              {TIMED.map(({ key, label }) => (
+                <View key={key}>
+                  <Text style={s.label}>{label.toUpperCase()}</Text>
+                  <View style={styles.card}>
+                    <ToggleRow label={label} value={draft[key].enabled} onChange={(v) => update(key, { enabled: v })} testID={`nudges-${key}-enabled`} />
+                    <Text style={styles.fieldLabel}>Time</Text>
+                    <DateTimeField mode="time" value={draft[key].time} onChange={(v) => update(key, { time: v })} testID={`nudges-${key}-time`} />
+                  </View>
+                </View>
+              ))}
 
               <Text style={s.label}>QUIET HOURS</Text>
               <View style={[styles.card, { flexDirection: "row", gap: spacing.md }]}>

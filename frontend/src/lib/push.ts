@@ -6,9 +6,6 @@ import * as Notifications from "expo-notifications";
 import Constants from "expo-constants";
 import { api } from "./api";
 
-/** Screens a nudge may open, as sent in `data.screen`. */
-const NUDGE_SCREENS = ["inbox/review", "inbox/patterns"] as const;
-
 let registeredToken: string | null = null;
 
 if (Platform.OS !== "web") {
@@ -64,25 +61,52 @@ export async function unregisterPushDevice(): Promise<void> {
   }
 }
 
-/** Opens a nudge's `data.screen` when it is one of the known targets. */
-export function openNudgeScreen(router: ReturnType<typeof useRouter>, screen: unknown): boolean {
-  if (typeof screen !== "string" || !(NUDGE_SCREENS as readonly string[]).includes(screen)) return false;
-  router.push(`/${screen}` as any);
-  return true;
+/**
+ * Opens the screen a nudge points at (`data.screen` + ids). `data.for` means the
+ * nudge is about someone the user looks after: open Health for that person.
+ * Unknown screens open Today.
+ */
+export function openNudgeScreen(router: ReturnType<typeof useRouter>, data: unknown): void {
+  const d = (data && typeof data === "object" ? data : {}) as Record<string, unknown>;
+  const screen = typeof d.screen === "string" ? d.screen : "";
+  const id = (k: string) => (typeof d[k] === "string" && d[k] ? String(d[k]) : "");
+  const q = (params: Record<string, string>) => {
+    const s = Object.entries(params).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+    return s ? `?${s}` : "";
+  };
+
+  const forPerson = id("for");
+  if (forPerson) {
+    const section = screen.startsWith("health/") ? screen.slice(7) : "";
+    router.push(`/life/health${q({ for: forPerson, section })}` as any);
+    return;
+  }
+
+  let path: string;
+  if (screen === "inbox/review" || screen === "inbox/patterns") path = `/${screen}`;
+  else if (screen === "plans") path = `/(tabs)/planning-space${q({ plan_id: id("plan_id") })}`;
+  else if (screen === "health") path = "/life/health";
+  else if (screen.startsWith("health/")) path = `/life/health${q({ section: screen.slice(7) })}`;
+  else if (screen === "habits") path = `/life/health${q({ section: "habits", habit_id: id("habit_id") })}`;
+  else if (screen === "people") path = `/life/family${q({ person_id: id("person_id") })}`;
+  else if (screen === "learning") path = `/(tabs)/knowledge${q({ journey_id: id("journey_id") })}`;
+  else if (screen === "work") path = `/life/work${q({ role_id: id("role_id") })}`;
+  else path = "/(tabs)/today";
+  router.push(path as any);
 }
 
 /**
- * Opens `data.screen` when a notification is tapped, including the tap that
+ * Opens a nudge's target when a notification is tapped, including the tap that
  * launched the app. Navigation waits until `ready` (signed in and set up).
  */
 export function useNotificationTapNavigation(ready: boolean) {
   const router = useRouter();
-  const [pendingScreen, setPendingScreen] = useState<unknown>(null);
+  const [pending, setPending] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
     if (Platform.OS === "web") return;
     const take = (r: Notifications.NotificationResponse | null) => {
-      if (r) setPendingScreen(r.notification.request.content.data?.screen ?? null);
+      if (r) setPending((r.notification.request.content.data as Record<string, unknown>) ?? {});
     };
     Notifications.getLastNotificationResponseAsync().then((r) => {
       take(r);
@@ -93,8 +117,8 @@ export function useNotificationTapNavigation(ready: boolean) {
   }, []);
 
   useEffect(() => {
-    if (!ready || !pendingScreen) return;
-    openNudgeScreen(router, pendingScreen);
-    setPendingScreen(null);
-  }, [ready, pendingScreen, router]);
+    if (!ready || !pending) return;
+    openNudgeScreen(router, pending);
+    setPending(null);
+  }, [ready, pending, router]);
 }
