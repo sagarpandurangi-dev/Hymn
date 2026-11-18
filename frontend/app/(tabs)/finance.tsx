@@ -367,6 +367,20 @@ export default function FinanceScreen() {
           );
         })}
 
+        {/* Planned money — full list and next 12 months */}
+        <View style={styles.blockGap} testID="finance-planned-link">
+          <FoldCard>
+            <FoldRow
+              first
+              label="Planned money"
+              meta="Everything expected to come in or go out"
+              onPress={() => router.push("/finance/planned")}
+              chevron
+              testID="finance-open-planned"
+            />
+          </FoldCard>
+        </View>
+
         {/* Documents — statements and money book */}
         <View style={styles.blockGap}>
           <FoldSectionHeader label="Documents" />

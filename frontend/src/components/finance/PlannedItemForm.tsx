@@ -12,7 +12,7 @@ import { api, ApiError, PlannedItem, PlannedItemInput, PlannedPurpose, PlannedRe
 import DateTimeField from "@/src/components/DateTimeField";
 import MonthPickerField from "@/src/components/finance/MonthPickerField";
 import { financeColors, financeRadius, financeSpace } from "@/src/lib/finance/theme";
-import { dateLabel, formatMoney } from "@/src/lib/finance/format";
+import { formatINR, formatMoney, monthLabel } from "@/src/lib/finance/format";
 import { confirmAction } from "@/src/lib/confirm";
 
 const OUT_TYPES: { value: PlannedPurpose; label: string }[] = [
@@ -30,10 +30,34 @@ const REPEATS: { value: PlannedRepeat; label: string }[] = [
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-export const plannedWhen = (it: PlannedItem) =>
-  it.repeat === "monthly" ? "Monthly" : it.repeat === "yearly" ? "Yearly" : it.date ? dateLabel(it.date) : "";
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const MONTHS_FULL = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/** "Once on 12 Dec", "Monthly from Jan 2027", "Yearly in March". */
+export const plannedWhen = (it: PlannedItem): string => {
+  if (it.repeat === "monthly") {
+    const from = it.start_month ? ` from ${monthLabel(it.start_month)}` : "";
+    const to = it.end_month ? ` to ${monthLabel(it.end_month)}` : "";
+    return `Monthly${from}${to}`;
+  }
+  if (it.repeat === "yearly") {
+    const m = it.start_month ? MONTHS_FULL[parseInt(it.start_month.slice(5, 7), 10) - 1] : "";
+    return m ? `Yearly in ${m}` : "Yearly";
+  }
+  if (it.date && DATE_RE.test(it.date)) {
+    const [y, m, d] = it.date.split("-");
+    const year = Number(y) !== new Date().getFullYear() ? ` ${y}` : "";
+    return `Once on ${parseInt(d, 10)} ${MONTHS_SHORT[parseInt(m, 10) - 1]}${year}`;
+  }
+  return "Once";
+};
+
+/** Amount for display: ₹ with Indian grouping for INR, plain grouping otherwise. */
+export const plannedMoney = (currency: string, value: string | number | null | undefined): string =>
+  currency === "INR" ? formatINR(value ?? 0) : formatMoney(String(value ?? 0));
+
 export const plannedSigned = (it: PlannedItem) =>
-  `${it.direction === "in" ? "+" : "−"}${formatMoney(String(it.amount))}`;
+  `${it.direction === "in" ? "+" : "−"}${plannedMoney(it.currency, it.amount)}`;
 
 /** Where a read-only (older) item lives. */
 function olderScreen(it: PlannedItem): string | null {
@@ -73,7 +97,7 @@ export default function PlannedItemForm({ visible, item, defaultCurrency, onClos
   const [endMonth, setEndMonth] = useState("");
   const [maybe, setMaybe] = useState(false);
   const [setAside, setSetAside] = useState(false);
-  const [busy, setBusy] = useState<"save" | "done" | "delete" | null>(null);
+  const [busy, setBusy] = useState<"save" | "done" | "cancel" | "delete" | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -134,6 +158,19 @@ export default function PlannedItemForm({ visible, item, defaultCurrency, onClos
     }
   };
 
+  const cancelItem = async () => {
+    if (!item || busy) return;
+    setBusy("cancel");
+    setError("");
+    try {
+      await api.updatePlannedMoney(item.id, { status: "cancelled" });
+      onSaved();
+    } catch (e) {
+      setError((e as ApiError).message);
+      setBusy(null);
+    }
+  };
+
   const markDone = async () => {
     if (!item || busy) return;
     setBusy("done");
@@ -174,7 +211,7 @@ export default function PlannedItemForm({ visible, item, defaultCurrency, onClos
             {readOnly && item ? (
               <>
                 <Text style={styles.note} testID="planned-older-note">From an older screen</Text>
-                <View style={styles.roRow}><Text style={styles.roLabel}>Amount</Text><Text style={styles.roValue}>{item.currency} {plannedSigned(item)}</Text></View>
+                <View style={styles.roRow}><Text style={styles.roLabel}>Amount</Text><Text style={styles.roValue}>{item.currency === "INR" ? "" : `${item.currency} `}{plannedSigned(item)}</Text></View>
                 <View style={styles.roRow}><Text style={styles.roLabel}>When</Text><Text style={styles.roValue}>{plannedWhen(item) || "—"}</Text></View>
                 {item.status ? <View style={styles.roRow}><Text style={styles.roLabel}>Status</Text><Text style={styles.roValue}>{item.status}</Text></View> : null}
                 {older ? (
@@ -251,7 +288,7 @@ export default function PlannedItemForm({ visible, item, defaultCurrency, onClos
 
                 <View style={styles.actions}>
                   <Pressable style={styles.secondary} onPress={onClose} disabled={!!busy} testID="planned-cancel">
-                    <Text style={styles.secondaryText}>Cancel</Text>
+                    <Text style={styles.secondaryText}>Close</Text>
                   </Pressable>
                   <Pressable style={[styles.primary, styles.flex1, !!busy && styles.disabled]} onPress={save} disabled={!!busy} testID="planned-save">
                     {busy === "save" ? <ActivityIndicator color="#FBFBF6" /> : <Text style={styles.primaryText}>Save</Text>}
@@ -262,6 +299,9 @@ export default function PlannedItemForm({ visible, item, defaultCurrency, onClos
                   <View style={styles.actions}>
                     <Pressable style={[styles.secondary, styles.flex1, !!busy && styles.disabled]} onPress={markDone} disabled={!!busy || item.status === "done"} testID="planned-mark-done">
                       {busy === "done" ? <ActivityIndicator color={financeColors.ink} /> : <Text style={styles.secondaryText}>{item.status === "done" ? "Done" : "Mark done"}</Text>}
+                    </Pressable>
+                    <Pressable style={[styles.secondary, styles.flex1, !!busy && styles.disabled]} onPress={cancelItem} disabled={!!busy || item.status === "cancelled"} testID="planned-cancel-item">
+                      {busy === "cancel" ? <ActivityIndicator color={financeColors.ink} /> : <Text style={styles.secondaryText}>{item.status === "cancelled" ? "Cancelled" : "Cancel item"}</Text>}
                     </Pressable>
                     <Pressable style={[styles.danger, styles.flex1, !!busy && styles.disabled]} onPress={remove} disabled={!!busy} testID="planned-delete">
                       {busy === "delete" ? <ActivityIndicator color={financeColors.negative} /> : <Text style={styles.dangerText}>Delete</Text>}

@@ -842,7 +842,8 @@ export const api = {
     request<StatementConfirmResult>(`/statements/${id}/confirm`, { method: "POST", body: { decisions }, auth: true }),
 
   // -- Planned money --
-  listPlannedMoney: () => request<PlannedItem[]>("/planned-money", { auth: true }),
+  listPlannedMoney: (includeDone = false) =>
+    request<PlannedItem[]>(`/planned-money${includeDone ? "?include_done=true" : ""}`, { auth: true }),
   createPlannedMoney: (payload: PlannedItemInput) =>
     request<PlannedItem>("/planned-money", { method: "POST", body: payload, auth: true }),
   updatePlannedMoney: (id: string, payload: Partial<PlannedItemInput> & { status?: string }) =>
