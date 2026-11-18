@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { api } from "./api";
+import { api, setUnauthorizedHandler } from "./api";
 import { clearToken, getToken, saveToken } from "./tokenStorage";
 import { registerForPushNotifications, unregisterPushDevice } from "./push";
 
@@ -104,6 +104,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     void hydrateAuth();
   }, [hydrateAuth]);
+
+  // Any 401 on an authenticated call: drop the session; AuthGate sends the user to sign-in.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      void clearToken();
+      setUser(null);
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
 
   // Register for nudges on app start (restored session) and after login.
   useEffect(() => {

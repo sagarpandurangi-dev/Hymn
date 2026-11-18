@@ -7,6 +7,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider, useAuth } from "@/src/lib/AuthContext";
 import { useNotificationTapNavigation } from "@/src/lib/push";
+import ToastHost from "@/src/components/ToastHost";
 import AppBottomNavigation, {
   type MainTabName,
 } from "@/src/components/AppBottomNavigation";
@@ -142,10 +143,11 @@ function AuthenticatedAppShell() {
         <Stack.Screen name="portfolio/index" />
         <Stack.Screen name="goals/merge" options={{ presentation: "modal", gestureEnabled: false }} />
       </Stack>
+      <ToastHost />
 
       {showRootBottomNavigation ? (
         <AppBottomNavigation
-          activeRouteName={null}
+          activeRouteName={seg0 === "life" ? "life" : null}
           onSelectTab={selectRootTab}
         />
       ) : null}

@@ -34,7 +34,7 @@ export type MainTabName =
   | "today"
   | "timeline"
   | "finance"
-  | "knowledge";
+  | "life";
 
 type AppBottomNavigationProps = {
   activeRouteName?: string | null;
@@ -72,11 +72,11 @@ const TAB_DEFINITIONS: TabDefinition[] = [
     testID: "tab-finance",
   },
   {
-    name: "knowledge",
-    path: "/(tabs)/knowledge",
-    icon: "school-outline",
-    label: "Knowledge",
-    testID: "tab-knowledge",
+    name: "life",
+    path: "/(tabs)/life",
+    icon: "leaf-outline",
+    label: "Life",
+    testID: "tab-life",
   },
 ];
 
@@ -199,7 +199,7 @@ export default function AppBottomNavigation(props: AppBottomNavigationProps) {
         <View style={styles.tabItem} />
         {/* Finance */}
         {renderTabButton(TAB_DEFINITIONS[2], activeRouteName, selectTab)}
-        {/* Knowledge */}
+        {/* Life */}
         {renderTabButton(TAB_DEFINITIONS[3], activeRouteName, selectTab)}
       </View>
 
@@ -227,7 +227,10 @@ function renderTabButton(
   activeRouteName: string | null | undefined,
   selectTab: (tab: TabDefinition) => void,
 ) {
-  const focused = activeRouteName === tab.name;
+  // Learning (old Knowledge) and Plans (planning space) live under Life.
+  const focused =
+    activeRouteName === tab.name ||
+    (tab.name === "life" && (activeRouteName === "knowledge" || activeRouteName === "planning-space"));
   return (
     <Pressable
       key={tab.name}

@@ -40,3 +40,9 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 ## Check-in duration + Finance screen endpoint (Jun 2026)
 - Required duration row (15m/30m/45m/60m/2h/3h → duration_minutes) on Life/Goal/Project/Edit check-in forms; blocked with "How long did it take?"; "· 45m" on Timeline, Today, Goal/Project lists, check-in detail. Component: src/components/DurationPicker.tsx.
 - Finance tab loads from GET /api/screens/finance (dashboard + planned_upcoming); reconciliation suggestions still separate.
+
+## Life tab + shared helpers (Jun 2026)
+- Tabs: Today · Timeline · Finance · Life. Life (app/(tabs)/life.tsx) cards: Health, Family & Relationships, Learning (→ old knowledge tab, hidden), Work, Plans (→ planning-space). AsyncStorage "hymn.focusAreas" puts saved areas first. Placeholders at app/life/[area].tsx.
+- api.ts request(): 413 "That file is too large.", 429/503 server detail as toast (src/lib/toast.ts + ToastHost), 401 on auth calls → sign out.
+- src/utils/upload.ts: pickImage() (≤1024px, JPEG 0.7) / pickPdf() → {base64, mediaType}.
+- src/components/DraftNote.tsx; formatINR in src/lib/finance/format.ts.

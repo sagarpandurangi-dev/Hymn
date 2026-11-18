@@ -2,6 +2,7 @@ import { Platform } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import { getToken } from "./tokenStorage";
+import { showToast } from "./toast";
 
 const BASE_URL = "https://hymn-production-4828.up.railway.app";
 
@@ -91,6 +92,12 @@ function _stringifyDetail(d: any): string {
   return String(d);
 }
 
+// Called when an authenticated request returns 401 (AuthContext signs out).
+let unauthorizedHandler: (() => void) | null = null;
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
 async function request<T>(
   path: string,
   options: { method?: string; body?: any; auth?: boolean } = {},
@@ -117,7 +124,13 @@ async function request<T>(
   }
   if (!res.ok) {
     const detail = data && typeof data === "object" ? data.detail ?? data.message : data;
-    const message = _stringifyDetail(detail);
+    const serverText = typeof detail === "string" && detail.trim() && !detail.trim().startsWith("<") ? detail.trim() : "";
+    let message = _stringifyDetail(detail);
+    if (res.status === 413) message = "That file is too large.";
+    else if (res.status === 429) message = serverText || "You've reached the limit for this. Please try again later.";
+    else if (res.status === 503) message = serverText || "This is temporarily unavailable. Please try again shortly.";
+    if (res.status === 413 || res.status === 429 || res.status === 503) showToast(message);
+    if (res.status === 401 && auth && unauthorizedHandler) unauthorizedHandler();
     throw { status: res.status, message } as ApiError;
   }
   return data as T;
