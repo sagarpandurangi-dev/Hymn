@@ -460,6 +460,23 @@ async def _load_applied_and_all_events(db, user_id: str):
     return applied_events, all_events
 
 
+async def planned_set_asides(db, user_id: str) -> list:
+    """Planned-money one-off spends marked "set money aside" that are still
+    active: each holds what's left of it (amount − done so far) out of
+    "Available to spend". Items from older screens are counted through
+    their own reservations, so only items made in planned money are read."""
+    rows = await db.planned_money.find(
+        {"user_id": user_id, "status": "active", "set_aside": True, "repeat": "once", "direction": "out"},
+        {"_id": 0}).to_list(length=1000)
+    out = []
+    for r in rows:
+        left = _to_decimal(r.get("amount")) - _to_decimal(r.get("done_amount"))
+        if left > 0:
+            out.append({"id": r["id"], "title": r.get("title", ""), "currency": r.get("currency") or "",
+                        "date": r.get("date"), "remaining": left, "life_plan_id": r.get("life_plan_id")})
+    return out
+
+
 async def _load_reserved_totals(db, user_id: str) -> dict:
     rows = await db.resource_allocations.find(
         {"user_id": user_id, "resource_type": "money",
@@ -472,6 +489,8 @@ async def _load_reserved_totals(db, user_id: str) -> dict:
     for r in rows:
         cur = r.get("currency") or ""
         totals[cur] = totals.get(cur, Decimal(0)) + reservation_amount_for_commitment(r)
+    for item in await planned_set_asides(db, user_id):
+        totals[item["currency"]] = totals.get(item["currency"], Decimal(0)) + item["remaining"]
     return totals
 
 

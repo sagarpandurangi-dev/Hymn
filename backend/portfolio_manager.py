@@ -1197,9 +1197,10 @@ async def update_portfolio_setup_status(
         else:
             updates["portfolio_reporting_currency"] = None
 
-    # Completion flag: setting True requires reporting_currency AND at least
-    # one row in each of the three Portfolio collections. Setting False
-    # clears the timestamp but never deletes user data.
+    # Completion flag. The welcome wizard lets people skip every step, so
+    # finishing needs nothing else: if no reporting currency is set yet it
+    # takes the first bank account's currency, else INR. Setting False clears
+    # the timestamp but never deletes user data.
     if "completed" in incoming:
         want_complete = bool(incoming["completed"])
         if want_complete:
@@ -1208,26 +1209,10 @@ async def update_portfolio_setup_status(
                 current_user.get("portfolio_reporting_currency"),
             )
             if not effective_rc:
-                raise HTTPException(
-                    status_code=400,
-                    detail="reporting_currency is required before completing setup",
-                )
-            probe = await _setup_status_dict({**current_user, **updates})
-            if not probe["has_time_commitments"]:
-                raise HTTPException(
-                    status_code=400,
-                    detail="at least one time_commitment is required before completing setup",
-                )
-            if not probe["has_financial_accounts"]:
-                raise HTTPException(
-                    status_code=400,
-                    detail="at least one financial_account is required before completing setup",
-                )
-            if not probe["has_monthly_money_commitments"]:
-                raise HTTPException(
-                    status_code=400,
-                    detail="at least one monthly_money_commitment is required before completing setup",
-                )
+                acct = await db.financial_accounts.find_one(
+                    {"user_id": current_user["id"], "currency": {"$nin": [None, ""]}},
+                    {"_id": 0, "currency": 1}, sort=[("created_at", 1)])
+                updates["portfolio_reporting_currency"] = (acct or {}).get("currency") or "INR"
             updates["portfolio_setup_completed_at"] = _now()
         else:
             updates["portfolio_setup_completed_at"] = None

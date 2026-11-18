@@ -110,3 +110,47 @@ def test_forecast_reads_planned_money(client, server, user, monkeypatch):
     assert Decimal(nov["projected_net_worth_end_of_month"]) == Decimal("275000")   # SIP isn't lost
     assert Decimal(dec["projected_liquid_end_of_month"]) == Decimal("290000")      # trip -40000; bonus not counted
     assert dec["maybe_income"] == "50000.00"
+
+
+def _available(client, user):
+    d = client.get("/api/finance/dashboard", headers=user["headers"]).json()
+    liq = next(x for x in d["available_liquidity"] if x["currency"] == "INR")
+    res = next((x for x in d["reserved"] if x["currency"] == "INR"), {"reserved_total": "0", "planned_set_aside": []})
+    return Decimal(liq["available_unreserved"]), Decimal(liq["reserved"]), res
+
+
+def test_money_set_aside_for_a_one_off_is_held_back(client, server, user):
+    _account(server.db, user["id"], "bank", value="200000")
+    assert _available(client, user)[:2] == (Decimal("200000"), Decimal("0"))
+    trip = _add(client, user, title="Goa trip", direction="out", purpose="spend", amount="40000", repeat="once",
+                date="2026-12-20", set_aside=True)
+    _add(client, user, title="New phone", direction="out", purpose="spend", amount="30000", repeat="once",
+         date="2026-12-01")                                                    # not set aside: not held
+    avail, reserved, res = _available(client, user)
+    assert (avail, reserved) == (Decimal("160000"), Decimal("40000"))
+    assert [(p["title"], p["amount"]) for p in res["planned_set_aside"]] == [("Goa trip", "40000.00")]
+    client.patch(f"/api/planned-money/{trip['id']}", headers=user["headers"], json={"done_amount": "15000"})
+    assert _available(client, user)[:2] == (Decimal("175000"), Decimal("25000"))     # only what's left is held
+    client.patch(f"/api/planned-money/{trip['id']}", headers=user["headers"], json={"status": "done"})
+    assert _available(client, user)[:2] == (Decimal("200000"), Decimal("0"))
+
+
+def test_events_can_be_filtered_to_those_waiting_for_an_account(client, server, user):
+    from test_ledger_conversion import _event
+    _event(server.db, user["id"], "450", "2026-11-05", description="lunch")
+    _event(server.db, user["id"], "700", "2026-11-05", account_id=None, description="cash spend",
+           lifecycle_status="pending_account_assignment")
+    r = client.get("/api/finance/events?lifecycle_status=pending_account_assignment", headers=user["headers"])
+    assert r.status_code == 200 and [e["description"] for e in r.json()] == ["cash spend"]
+    assert len(client.get("/api/finance/events", headers=user["headers"]).json()) == 2
+    assert client.get("/api/finance/events?lifecycle_status=nonsense", headers=user["headers"]).status_code == 400
+
+
+def test_plans_dont_count_money_set_aside_twice(client, server, user, monkeypatch):
+    import life_plans
+    monkeypatch.setattr(finance_manager, "_today_iso", lambda: "2026-11-01")
+    _account(server.db, user["id"], "bank", value="200000")
+    _add(client, user, title="Goa trip", direction="out", purpose="spend", amount="40000", repeat="once",
+         date="2026-12-20", set_aside=True)
+    m = asyncio.run(life_plans.money_by(server.db, user["id"], "INR", "2027-03-01"))
+    assert (m["now"], m["by_then"]) == (Decimal("160000"), Decimal("160000"))   # held once, not taken off again

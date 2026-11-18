@@ -2968,12 +2968,20 @@ async def _reserved_totals(db, user_id: str) -> dict:
         b = per_currency.setdefault(cur, {"reserved": Decimal(0), "items": []})
         b["reserved"] += reservation_amount_for_commitment(d)
         b["items"].append(_project_commitment(d))
+    # Planned-money one-offs marked "set money aside" hold money too.
+    from money_service import planned_set_asides  # noqa: WPS433
+    for item in await planned_set_asides(db, user_id):
+        b = per_currency.setdefault(item["currency"], {"reserved": Decimal(0), "items": []})
+        b["reserved"] += item["remaining"]
+        b.setdefault("planned", []).append({"id": item["id"], "title": item["title"], "date": item["date"],
+                                            "amount": _quantize_out(item["remaining"])})
     out = []
     for cur, b in per_currency.items():
         out.append({
             "currency": cur,
             "reserved_total": _quantize_out(b["reserved"]),
             "commitments": b["items"],
+            "planned_set_aside": b.get("planned", []),
         })
     out.sort(key=lambda x: x["currency"])
     return out
@@ -3365,11 +3373,15 @@ async def create_event(body: FinancialEventCreate, current_user: dict = Depends(
 async def list_events(
     currency: Optional[str] = Query(None),
     confirmation_status: Optional[str] = Query(None),
+    lifecycle_status: Optional[str] = Query(None),   # e.g. pending_account_assignment (the Assign shortcut)
     limit: int = Query(50, le=500),
     current_user: dict = Depends(get_current_user),
 ):
     db = get_db()
     q: dict = {"user_id": current_user["id"]}
+    if lifecycle_status:
+        _require_in(lifecycle_status, LIFECYCLE_STATUSES, "lifecycle_status")
+        q["lifecycle_status"] = lifecycle_status
     if currency:
         _require_currency(currency, "currency")
         q["currency"] = currency
