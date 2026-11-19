@@ -6,6 +6,8 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 import { AuthProvider, useAuth } from "@/src/lib/AuthContext";
+import { useNotificationTapNavigation } from "@/src/lib/push";
+import ToastHost from "@/src/components/ToastHost";
 import AppBottomNavigation, {
   type MainTabName,
 } from "@/src/components/AppBottomNavigation";
@@ -26,22 +28,22 @@ function AuthGate() {
     // must not redirect the user away from the very screen they need to use.
     // Expo Router currently types `segments` as a one-element tuple, so we
     // join the full path instead of reading a non-existent index.
-    const onPortfolioSetup =
-      segments.join("/") === "portfolio/setup";
+    const onWelcome = seg0 === "welcome";
 
     if (!user && !inAuthGroup) {
       router.replace("/(auth)/sign-in");
       return;
     }
     if (user && inAuthGroup) {
-      router.replace("/(tabs)/today");
+      router.replace(user.portfolio_setup_completed_at ? "/(tabs)/today" : "/welcome");
       return;
     }
-    if (user && !user.portfolio_setup_completed_at && !onPortfolioSetup) {
-      // Portfolio Setup is the mandatory gate for any authenticated user
-      // whose profile is still incomplete. Once completed_at is populated
-      // (see /api/portfolio/setup-status PUT) this block stops firing.
-      router.replace("/portfolio/setup");
+    // Deleting the account must stay possible before setup is finished.
+    const onAccountDelete = segments.join("/") === "account/delete";
+    if (user && !user.portfolio_setup_completed_at && !onWelcome && !onAccountDelete) {
+      // The welcome wizard is the gate for anyone whose setup is incomplete.
+      // Once completed_at is set (PUT /api/portfolio/setup-status) this stops.
+      router.replace("/welcome");
     }
   }, [user, loading, startupError, segments, router]);
 
@@ -78,12 +80,18 @@ function AuthenticatedAppShell() {
   //     its own copy of the same bar, and we must never render two bars.
   //   - `Boolean(seg0)` guards against the initial empty-segments render
   //     where `seg0` is undefined.
+  useNotificationTapNavigation(
+    !loading && Boolean(user?.portfolio_setup_completed_at),
+  );
+
   const showRootBottomNavigation =
     !loading &&
     Boolean(user) &&
     Boolean(seg0) &&
     seg0 !== "(auth)" &&
     seg0 !== "(tabs)" &&
+    seg0 !== "welcome" &&
+    !(seg0 === "account" && !user?.portfolio_setup_completed_at) &&
     !onPortfolioSetup;
 
   const selectRootTab = (name: MainTabName) => {
@@ -137,10 +145,11 @@ function AuthenticatedAppShell() {
         <Stack.Screen name="portfolio/index" />
         <Stack.Screen name="goals/merge" options={{ presentation: "modal", gestureEnabled: false }} />
       </Stack>
+      <ToastHost />
 
       {showRootBottomNavigation ? (
         <AppBottomNavigation
-          activeRouteName={null}
+          activeRouteName={seg0 === "life" ? "life" : null}
           onSelectTab={selectRootTab}
         />
       ) : null}

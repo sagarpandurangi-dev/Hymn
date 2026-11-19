@@ -34,7 +34,9 @@ export default function TabsLayout() {
       <Tabs.Screen name="timeline" />
       <Tabs.Screen name="add-placeholder" options={{ href: null }} />
       <Tabs.Screen name="finance" />
-      <Tabs.Screen name="knowledge" />
+      <Tabs.Screen name="life" />
+      {/* Old Knowledge screen: no longer a tab; opened from Life → Learning. */}
+      <Tabs.Screen name="knowledge" options={{ href: null }} />
     </Tabs>
   );
 }

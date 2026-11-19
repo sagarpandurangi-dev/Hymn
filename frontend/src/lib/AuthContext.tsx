@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
-import { api } from "./api";
+import { api, setUnauthorizedHandler } from "./api";
 import { clearToken, getToken, saveToken } from "./tokenStorage";
+import { registerForPushNotifications, unregisterPushDevice } from "./push";
 
 const AUTH_STARTUP_TIMEOUT_MS = 10_000;
 const AUTH_STARTUP_TIMEOUT_CODE = "AUTH_STARTUP_TIMEOUT";
@@ -38,6 +39,8 @@ export type User = {
   portfolio_setup_completed_at?: string | null;
   portfolio_reporting_currency?: string | null;
   post_creation_decomposition_preference?: PostCreationDecompositionPreference;
+  hymn_id?: string | null;
+  hymn_alias?: string | null;
 };
 
 type AuthState = {
@@ -102,6 +105,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     void hydrateAuth();
   }, [hydrateAuth]);
 
+  // Any 401 on an authenticated call: drop the session; AuthGate sends the user to sign-in.
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      void clearToken();
+      setUser(null);
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  // Register for nudges on app start (restored session) and after login.
+  useEffect(() => {
+    if (user?.id) void registerForPushNotifications();
+  }, [user?.id]);
+
   const signIn = useCallback(async (email: string, password: string) => {
     const res = await api.login({ email, password });
     await saveToken(res.access_token);
@@ -124,6 +141,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   );
 
   const signOut = useCallback(async () => {
+    await unregisterPushDevice();
     try {
       await api.logout();
     } catch {

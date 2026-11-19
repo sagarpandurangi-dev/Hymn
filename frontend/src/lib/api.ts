@@ -1,6 +1,10 @@
+import { Platform } from "react-native";
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
 import { getToken } from "./tokenStorage";
+import { showToast } from "./toast";
 
-const BASE_URL = process.env.EXPO_PUBLIC_BACKEND_URL as string;
+const BASE_URL = "https://hymn-production-4828.up.railway.app";
 
 export type ApiError = { status: number; message: string };
 
@@ -88,12 +92,20 @@ function _stringifyDetail(d: any): string {
   return String(d);
 }
 
+// Called when an authenticated request returns 401 (AuthContext signs out).
+let unauthorizedHandler: (() => void) | null = null;
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
 async function request<T>(
   path: string,
   options: { method?: string; body?: any; auth?: boolean } = {},
 ): Promise<T> {
   const { method = "GET", body, auth = false } = options;
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // Multipart bodies (FormData) set their own Content-Type boundary.
+  const isForm = typeof FormData !== "undefined" && body instanceof FormData;
+  const headers: Record<string, string> = isForm ? {} : { "Content-Type": "application/json" };
   if (auth) {
     const token = await getToken();
     if (token) headers.Authorization = `Bearer ${token}`;
@@ -101,7 +113,7 @@ async function request<T>(
   const res = await fetch(`${BASE_URL}/api${path}`, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    body: isForm ? body : body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
   let data: any = null;
@@ -112,7 +124,13 @@ async function request<T>(
   }
   if (!res.ok) {
     const detail = data && typeof data === "object" ? data.detail ?? data.message : data;
-    const message = _stringifyDetail(detail);
+    const serverText = typeof detail === "string" && detail.trim() && !detail.trim().startsWith("<") ? detail.trim() : "";
+    let message = _stringifyDetail(detail);
+    if (res.status === 413) message = "That file is too large.";
+    else if (res.status === 429) message = serverText || "You've reached the limit for this. Please try again later.";
+    else if (res.status === 503) message = serverText || "This is temporarily unavailable. Please try again shortly.";
+    if (res.status === 413 || res.status === 429 || res.status === 503) showToast(message);
+    if (res.status === 401 && auth && unauthorizedHandler) unauthorizedHandler();
     throw { status: res.status, message } as ApiError;
   }
   return data as T;
@@ -539,7 +557,7 @@ export const api = {
     request<{ id: string }>("/checkins", { method: "POST", body: payload, auth: true }),
   getCheckin: (id: string) =>
     request<any>(`/checkins/${id}`, { auth: true }),
-  updateCheckin: (id: string, payload: { title?: string; date?: string; time?: string; notes?: string; attachment?: string; money_spent?: string | null; money_currency?: string | null; account_id?: string | null; occurred_at?: string | null }) =>
+  updateCheckin: (id: string, payload: { title?: string; date?: string; time?: string; notes?: string; attachment?: string; money_spent?: string | null; money_currency?: string | null; account_id?: string | null; occurred_at?: string | null; duration_minutes?: number }) =>
     request<{ id: string }>(`/checkins/${id}`, { method: "PUT", body: payload, auth: true }),
   deleteCheckin: (id: string) =>
     request<{ detail: string }>(`/checkins/${id}`, { method: "DELETE", auth: true }),
@@ -564,6 +582,8 @@ export const api = {
   // FINANCE ENGINE
   // ============================================================================
   getFinanceDashboard: () => request<any>("/finance/dashboard", { auth: true }),
+  getFinanceScreen: () =>
+    request<{ dashboard: any; planned_upcoming: PlannedItem[]; planned_this_month: PlannedMonth[] }>("/screens/finance", { auth: true }),
   getFinancePosition: () => request<any>("/finance/position", { auth: true }),
   getFinanceMonthly: (month: string, currency: string) =>
     request<any>(`/finance/monthly?month=${encodeURIComponent(month)}&currency=${encodeURIComponent(currency)}`, { auth: true }),
@@ -691,19 +711,6 @@ export const api = {
   rebalanceCandidates: (currency: string, exclude_id?: string) =>
     request<any[]>(`/finance/rebalance-candidates?currency=${encodeURIComponent(currency)}${exclude_id ? `&exclude_id=${encodeURIComponent(exclude_id)}` : ""}`, { auth: true }),
 
-  saveScenario: (payload: { name: string; currency: string; assumptions: any }) =>
-    request<any>("/finance/scenarios/save", { method: "POST", body: payload, auth: true }),
-  listScenarios: () => request<any[]>("/finance/scenarios/list", { auth: true }),
-  getScenario: (id: string) => request<any>(`/finance/scenarios/detail/${id}`, { auth: true }),
-  updateScenario: (id: string, payload: { name: string; currency: string; assumptions: any }) =>
-    request<any>(`/finance/scenarios/detail/${id}`, { method: "PUT", body: payload, auth: true }),
-  duplicateScenario: (id: string) =>
-    request<any>(`/finance/scenarios/detail/${id}/duplicate`, { method: "POST", auth: true }),
-  deleteScenario: (id: string) =>
-    request<{ detail: string }>(`/finance/scenarios/detail/${id}`, { method: "DELETE", auth: true }),
-  evaluateScenario: (id: string) =>
-    request<any>(`/finance/scenarios/detail/${id}/evaluate`, { method: "POST", auth: true }),
-
   getPlanningSpace: (weekStartDate?: string) => {
     const query = weekStartDate
       ? `?week_start_date=${encodeURIComponent(weekStartDate)}`
@@ -762,4 +769,399 @@ export const api = {
     tradeoffs?: { kind: "goal" | "project" | "task"; id: string; action: "postpone" | "cancel"; new_due_date?: string }[];
   }) =>
     request<any>("/planning/merge/apply", { method: "POST", body: payload, auth: true }),
+
+  // -- Inbox: brain dump, daily review, nuggets --
+  createInboxDump: (payload: { text: string; client_dump_id: string; timezone: string }) =>
+    request<InboxDumpResponse>("/inbox/dumps", { method: "POST", body: payload, auth: true }),
+  sortInboxDump: (dumpId: string) =>
+    request<InboxDumpResponse>(`/inbox/dumps/${dumpId}/sort`, { method: "POST", auth: true }),
+  getInboxReview: () => request<InboxReviewResponse>("/inbox/review", { auth: true }),
+  submitInboxReview: (decisions: { item_id: string; decision: InboxDecision }[]) =>
+    request<InboxReviewResponse>("/inbox/review", { method: "POST", body: { decisions }, auth: true }),
+  migrateInboxItem: (
+    itemId: string,
+    payload: {
+      destination: "task" | "calendar" | "wishlist";
+      next_step: string;
+      due_date?: string;
+      time?: string;
+      project_id?: string;
+    },
+  ) => request<any>(`/inbox/items/${itemId}/migrate`, { method: "POST", body: payload, auth: true }),
+  getInboxPatterns: () => request<InboxPatternsResponse>("/inbox/patterns", { auth: true }),
+  refreshInboxPatterns: () =>
+    request<InboxPatternsResponse>("/inbox/patterns", { method: "POST", auth: true }),
+
+  // -- Welcome wizard / setup --
+  createWorkRole: (payload: { type: string; work_days?: string[]; start_time?: string; end_time?: string; commute_minutes?: number }) =>
+    request<any>("/work/roles", { method: "POST", body: payload, auth: true }),
+  listWorkRoles: () => request<any[]>("/work/roles", { auth: true }),
+  listPeople: () => request<any[]>("/people", { auth: true }),
+  createPerson: (payload: { name: string; relation: string; circle: string; birthday?: string | null }) =>
+    request<any>("/people", { method: "POST", body: payload, auth: true }),
+  getTimeReport: (weekStart?: string) =>
+    request<any>(`/reports/time${weekStart ? `?week_start=${encodeURIComponent(weekStart)}` : ""}`, { auth: true }),
+  getAccountSetup: () => request<AccountSetup>("/account/setup", { auth: true }),
+  // -- Investments: CAS / demat statement import (Premium) --
+  casPreview: (file_base64: string, password: string) =>
+    request<any>("/investments/cas/preview", { method: "POST", body: { file_base64, password }, auth: true }),
+  casApply: (id: string, payload: { links: Record<string, string>; replaces: string[] }) =>
+    request<any>(`/investments/cas/${encodeURIComponent(id)}/apply`, { method: "POST", body: payload, auth: true }),
+  casList: () => request<any>("/investments/cas", { auth: true }),
+  // -- Health --
+  getHealthProfile: () => request<any>("/health/profile", { auth: true }),
+  saveHealthProfile: (profile: Record<string, any>) =>
+    request<any>("/health/profile", { method: "PUT", body: profile, auth: true }),
+  getHealthOptions: () => request<any>("/health/options", { auth: true }),
+  logHealthDaily: (payload: Record<string, any>) =>
+    request<any>("/health/daily", { method: "POST", body: payload, auth: true }),
+  getHealthDashboard: () => request<any>("/health/dashboard", { auth: true }),
+  getHealthSuggestions: () => request<any>("/health/suggestions", { auth: true }),
+  deleteAllHealthData: () => request<any>("/health/all", { method: "DELETE", auth: true }),
+  // -- New planner (plan chat + life plans) --
+  planChat: (payload: { message: string; chat_id?: string }) =>
+    request<any>("/plan-chat", { method: "POST", body: payload, auth: true }),
+  getPlanChat: (chatId: string) => request<any>(`/plan-chat/${encodeURIComponent(chatId)}`, { auth: true }),
+  listLifePlans: () => request<any>("/life-plans", { auth: true }),
+  getLifePlan: (id: string) => request<any>(`/life-plans/${encodeURIComponent(id)}`, { auth: true }),
+  acceptLifePlan: (id: string) => request<any>(`/life-plans/${encodeURIComponent(id)}/accept`, { method: "POST", body: {}, auth: true }),
+  deleteLifePlan: (id: string) => request<any>(`/life-plans/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  bookLifePlanSlot: (id: string, payload: { requirement_id: string; date: string; start: string; minutes: number }) =>
+    request<any>(`/life-plans/${encodeURIComponent(id)}/book`, { method: "POST", body: payload, auth: true }),
+  answerLifePlanRequirement: (id: string, rid: string, answer: "yes" | "no" | "unknown") =>
+    request<any>(`/life-plans/${encodeURIComponent(id)}/requirements/${encodeURIComponent(rid)}/answer`, { method: "POST", body: { answer }, auth: true }),
+  // -- Family net worth --
+  getFamily: () => request<any>("/family", { auth: true }),
+  createFamily: () => request<any>("/family", { method: "POST", body: {}, auth: true }),
+  acceptFamilyInvite: (id: string, share: "total" | "full") =>
+    request<any>(`/family/invites/${encodeURIComponent(id)}/accept`, { method: "POST", body: { share }, auth: true }),
+  declineFamilyInvite: (id: string) =>
+    request<any>(`/family/invites/${encodeURIComponent(id)}/decline`, { method: "POST", body: {}, auth: true }),
+  inviteToFamily: (pamphlet_id: string, relation: string) =>
+    request<any>("/family/invite", { method: "POST", body: { pamphlet_id, relation }, auth: true }),
+  addFamilyMember: (name: string, relation: string) =>
+    request<any>("/family/members", { method: "POST", body: { name, relation }, auth: true }),
+  updateFamilyMe: (share: "total" | "full") =>
+    request<any>("/family/me", { method: "PATCH", body: { share }, auth: true }),
+  leaveFamily: () => request<any>("/family/leave", { method: "POST", body: {}, auth: true }),
+  addFamilyItem: (payload: { side: "asset" | "liability"; group: string; name: string; amount: string; shares: Record<string, number> }) =>
+    request<any>("/family/items", { method: "POST", body: payload, auth: true }),
+  deleteFamilyItem: (id: string) => request<any>(`/family/items/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  getFamilyNetWorth: () => request<any>("/family/net-worth", { auth: true }),
+  // -- Things I own & owe (life objects, Premium) --
+  listLifeObjects: () => request<any>("/life-objects", { auth: true }),
+  createLifeObject: (payload: Record<string, any>) =>
+    request<any>("/life-objects", { method: "POST", body: payload, auth: true }),
+  getLifeObject: (id: string) => request<any>(`/life-objects/${encodeURIComponent(id)}`, { auth: true }),
+  updateLifeObject: (id: string, payload: { ended_on?: string; sold_for?: string | null }) =>
+    request<any>(`/life-objects/${encodeURIComponent(id)}`, { method: "PATCH", body: payload, auth: true }),
+  getLifeObjectSchedule: (id: string) => request<any>(`/life-objects/${encodeURIComponent(id)}/schedule`, { auth: true }),
+  getLifeObjectFuel: (id: string) => request<any>(`/life-objects/${encodeURIComponent(id)}/fuel`, { auth: true }),
+  // -- Statements (reports) --
+  getNetWorthReport: () => request<any>("/reports/net-worth", { auth: true }),
+  getIncomeExpenditureReport: (month: string) =>
+    request<any>(`/reports/income-expenditure?month=${encodeURIComponent(month)}`, { auth: true }),
+  getCashFlowReport: (month: string) =>
+    request<any>(`/reports/cash-flow?month=${encodeURIComponent(month)}`, { auth: true }),
+  getReportEntries: (category: string, start: string, end: string) =>
+    request<any>(`/reports/entries?category=${encodeURIComponent(category)}&start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`, { auth: true }),
+  downloadAccountExport: () => downloadAccountExport(),
+  deleteAccount: (password: string) =>
+    request<any>("/account", { method: "DELETE", body: { password, confirm: "DELETE" }, auth: true }),
+
+  // -- Nudges --
+  registerNudgeDevice: (payload: { token: string; platform: "android" | "ios" }) =>
+    request<any>("/nudges/devices", { method: "POST", body: payload, auth: true }),
+  unregisterNudgeDevice: (token: string) =>
+    request<any>(`/nudges/devices?token=${encodeURIComponent(token)}`, { method: "DELETE", auth: true }),
+  getNudgeSettings: () => request<NudgeSettingsResponse>("/nudges/settings", { auth: true }),
+  updateNudgeSettings: (payload: NudgeSettingsUpdate) =>
+    request<NudgeSettings>("/nudges/settings", { method: "PUT", body: payload, auth: true }),
+  listNudges: (limit = 20) => request<Nudge[]>(`/nudges?limit=${limit}`, { auth: true }),
+  markNudgeOpened: (id: string) =>
+    request<any>(`/nudges/${id}/opened`, { method: "POST", auth: true }),
+
+  // -- Statements --
+  uploadStatement: (form: FormData) =>
+    request<Statement>("/statements", { method: "POST", body: form, auth: true }),
+  listStatements: () => request<Statement[]>("/statements", { auth: true }),
+  getStatement: (id: string) => request<StatementDetail>(`/statements/${id}`, { auth: true }),
+  deleteStatement: (id: string) =>
+    request<any>(`/statements/${id}`, { method: "DELETE", auth: true }),
+  deleteAllStatements: () => request<any>("/statements", { method: "DELETE", auth: true }),
+  downloadStatementFile: (id: string, filename: string) => downloadStatementFile(id, filename),
+
+  // -- Money book (ledger conversion) --
+  getLedgerConversionPreview: () =>
+    request<LedgerConversionPreview>("/ledger/conversion/preview", { auth: true }),
+  applyLedgerConversion: (fingerprint: string) =>
+    request<any>("/ledger/conversion/apply", { method: "POST", body: { fingerprint }, auth: true }),
+
+  // -- Statement review & confirm --
+  getStatementSuggestions: (id: string) =>
+    request<StatementSuggestions>(`/statements/${id}/suggestions`, { auth: true }),
+  linkStatementAccount: (id: string, accountId: string) =>
+    request<any>(`/statements/${id}/link`, { method: "POST", body: { account_id: accountId }, auth: true }),
+  confirmStatement: (id: string, decisions: StatementDecision[]) =>
+    request<StatementConfirmResult>(`/statements/${id}/confirm`, { method: "POST", body: { decisions }, auth: true }),
+
+  // -- Planned money --
+  listPlannedMoney: (includeDone = false) =>
+    request<PlannedItem[]>(`/planned-money${includeDone ? "?include_done=true" : ""}`, { auth: true }),
+  createPlannedMoney: (payload: PlannedItemInput) =>
+    request<PlannedItem>("/planned-money", { method: "POST", body: payload, auth: true }),
+  updatePlannedMoney: (id: string, payload: Partial<PlannedItemInput> & { status?: string }) =>
+    request<PlannedItem>(`/planned-money/${id}`, { method: "PATCH", body: payload, auth: true }),
+  deletePlannedMoney: (id: string) =>
+    request<any>(`/planned-money/${id}`, { method: "DELETE", auth: true }),
+  plannedMoneyMonths: (start: string, count = 12) =>
+    request<PlannedMonth[] | { months: PlannedMonth[] }>(`/planned-money/months?start=${start}&count=${count}`, { auth: true }),
+};
+
+export type PlannedPurpose = "income" | "spend" | "saving" | "investment" | "loan_payment" | "other";
+export type PlannedRepeat = "once" | "monthly" | "yearly";
+export type PlannedItem = {
+  id: string;
+  title: string;
+  direction: "in" | "out";
+  purpose: PlannedPurpose;
+  amount: string | number;
+  currency: string;
+  repeat: PlannedRepeat;
+  date?: string | null;
+  start_month?: string | null;
+  end_month?: string | null;
+  certainty: "sure" | "maybe";
+  set_aside?: boolean;
+  status?: string;
+  done_amount?: string | number | null;
+  remaining_amount?: string | number | null;
+  source?: string | null;
+  editable?: boolean;
+};
+export type PlannedItemInput = {
+  title: string;
+  direction: "in" | "out";
+  purpose: PlannedPurpose;
+  amount: string;
+  currency: string;
+  repeat: PlannedRepeat;
+  date?: string | null;
+  start_month?: string | null;
+  end_month?: string | null;
+  certainty: "sure" | "maybe";
+  set_aside: boolean;
+};
+export type PlannedMonth = {
+  month: string;
+  currency?: string;
+  income?: string | number;
+  spend?: string | number;
+  moves?: string | number;
+  set_aside?: string | number;
+  maybe_in?: string | number;
+  maybe_out?: string | number;
+};
+
+export type StatementSuggestion = {
+  action?: string | null;
+  kind?: string | null;
+  category?: string | null;
+  counter_account_id?: string | null;
+  duplicate_of?: string | null;
+  merge_with?: string | null;
+  confidence?: string | null;
+  why?: string | null;
+};
+export type StatementSuggestionLine = {
+  n: number;
+  date?: string;
+  description?: string;
+  debit?: string | number | null;
+  credit?: string | number | null;
+  suggestion?: StatementSuggestion | null;
+};
+export type StatementSuggestions = {
+  account_id?: string | null;
+  account_suggestions?: string[];
+  lines?: StatementSuggestionLine[];
+};
+export type StatementDecision = {
+  n: number;
+  action: string | null;
+  kind: string | null;
+  category: string | null;
+  counter_account_id: string | null;
+  duplicate_of: string | null;
+  merge_with: string | null;
+  always?: boolean;
+};
+export type StatementConfirmResult = {
+  created?: number;
+  linked_to_existing?: number;
+  merged?: number;
+  skipped?: number;
+  balance_check?: {
+    available?: boolean;
+    matches?: boolean;
+    ledger_balance?: string | number | null;
+    statement_closing?: string | number | null;
+  } | null;
+};
+
+/** GET /statements/{id}/file with auth, then open (web) or share (native) the PDF. */
+async function downloadStatementFile(id: string, filename: string): Promise<void> {
+  const token = await getToken();
+  const url = `${BASE_URL}/api/statements/${id}/file`;
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const safeName = (filename || `statement-${id}.pdf`).replace(/[^\w.\- ]+/g, "_");
+  if (Platform.OS === "web") {
+    const res = await fetch(url, { headers });
+    if (!res.ok) {
+      const text = await res.text();
+      let detail: any = text;
+      try { detail = JSON.parse(text)?.detail ?? text; } catch { /* plain-text error */ }
+      throw { status: res.status, message: _stringifyDetail(detail) || "Download failed" } as ApiError;
+    }
+    const blobUrl = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = safeName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    return;
+  }
+  const target = `${FileSystem.cacheDirectory}${safeName.endsWith(".pdf") ? safeName : `${safeName}.pdf`}`;
+  const result = await FileSystem.downloadAsync(url, target, { headers });
+  if (result.status < 200 || result.status >= 300) {
+    let detail: any = "Download failed";
+    try { detail = JSON.parse(await FileSystem.readAsStringAsync(result.uri))?.detail ?? detail; } catch { /* not JSON */ }
+    throw { status: result.status, message: _stringifyDetail(detail) } as ApiError;
+  }
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(result.uri, { mimeType: "application/pdf", UTI: "com.adobe.pdf" });
+  }
+}
+
+/** GET /account/export → hymn-data-YYYY-MM-DD.json, then the share sheet (web: browser download). */
+async function downloadAccountExport(): Promise<void> {
+  const data = await request<any>("/account/export", { auth: true });
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const name = `hymn-data-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.json`;
+  const json = JSON.stringify(data, null, 2);
+  if (Platform.OS === "web") {
+    const blobUrl = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+    const a = document.createElement("a");
+    a.href = blobUrl;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+    return;
+  }
+  const target = `${FileSystem.cacheDirectory}${name}`;
+  await FileSystem.writeAsStringAsync(target, json, { encoding: FileSystem.EncodingType.UTF8 });
+  if (await Sharing.isAvailableAsync()) {
+    await Sharing.shareAsync(target, { mimeType: "application/json", UTI: "public.json", dialogTitle: "Your Hymn data" });
+  }
+}
+
+export type StatementStatus = "reading" | "ready" | "needs_review" | "failed" | string;
+export type Statement = {
+  id: string;
+  filename: string;
+  status: StatementStatus;
+  metadata?: { institution?: string | null; period_start?: string | null; period_end?: string | null } | null;
+};
+export type StatementProblem = { line?: number | null; line_number?: number | null; message?: string; problem?: string; reason?: string; detail?: string };
+export type StatementLine = {
+  line?: number;
+  line_number?: number;
+  date?: string;
+  description?: string;
+  debit?: string | number | null;
+  credit?: string | number | null;
+  balance?: string | number | null;
+};
+export type StatementDetail = Statement & {
+  verification?: { problems?: StatementProblem[] } | null;
+  lines?: StatementLine[];
+};
+export type LedgerConversionPreview = {
+  summary?: string[];
+  accounts?: { id?: string; name: string; currency: string; opening_balance: string | number; ledger_balance_today: string | number }[];
+  already_converted?: boolean;
+  verification?: { balances_match?: boolean; spending_matches?: boolean } | null;
+  fingerprint?: string;
+};
+
+export type NudgeTimedSection = { enabled?: boolean | null; time?: string | null };
+export type NudgeSettings = {
+  daily_review?: { enabled?: boolean | null; time?: string | null; adaptive?: boolean | null };
+  daily_review_plan?: { explanation?: string | null } | null;
+  weekly_patterns?: { enabled?: boolean | null; weekday?: number | null; time?: string | null };
+  reminders?: { enabled?: boolean | null };
+  health?: NudgeTimedSection;
+  people?: NudgeTimedSection;
+  learning?: NudgeTimedSection;
+  work?: NudgeTimedSection;
+  quiet_hours?: { start?: string | null; end?: string | null };
+  timezone?: string | null;
+};
+/** GET /nudges/settings returns the sections under `settings`. */
+export type NudgeSettingsResponse = {
+  settings?: NudgeSettings;
+  timezone?: string | null;
+  daily_review_plan?: { explanation?: string | null } | null;
+} & NudgeSettings;
+export type AccountSetupStep = { key: string; title: string; why?: string; screen: string; done: boolean; optional?: boolean };
+export type AccountSetup = { steps: AccountSetupStep[]; done: number; of: number; complete: boolean; next: AccountSetupStep | null };
+
+export type NudgeSettingsUpdate = {
+  daily_review?: Partial<NonNullable<NudgeSettings["daily_review"]>>;
+  weekly_patterns?: Partial<NonNullable<NudgeSettings["weekly_patterns"]>>;
+  reminders?: Partial<NonNullable<NudgeSettings["reminders"]>>;
+  health?: Partial<NudgeTimedSection>;
+  people?: Partial<NudgeTimedSection>;
+  learning?: Partial<NudgeTimedSection>;
+  work?: Partial<NudgeTimedSection>;
+  quiet_hours?: Partial<NonNullable<NudgeSettings["quiet_hours"]>>;
+  timezone?: string;
+};
+export type Nudge = {
+  id: string;
+  title: string;
+  body: string;
+  created_at?: string;
+  sent_at?: string;
+  data?: { screen?: string; for?: string; [key: string]: unknown } | null;
+};
+export type InboxPatternsResponse = {
+  stats?: {
+    captured?: number;
+    completed?: number;
+    discarded?: number;
+    migrated?: number;
+    avoided?: { id?: string; text: string; review_count: number }[];
+  } | null;
+  insight?: {
+    summary?: string;
+    themes?: any[];
+    avoidance?: any[];
+    suggestions?: any[];
+  } | null;
+  created_at?: string;
+};
+
+export type InboxCategory = "task" | "reminder" | "idea" | "plan" | "unsorted";
+export type InboxItem = { id: string; text: string; category: InboxCategory | string };
+export type InboxDump = { id: string; status: string };
+export type InboxDumpResponse = { dump: InboxDump; items: InboxItem[]; ack: string };
+export type InboxDecision = "done" | "discard" | "nugget" | "keep";
+export type InboxReviewResponse = {
+  prompt?: string;
+  items?: InboxItem[];
+  open_total?: number;
+  nuggets?: InboxItem[];
+  migrate_prompt?: string;
 };

@@ -43,7 +43,17 @@
       "expo-secure-store",
       "expo-status-bar",
       "expo-web-browser",
-      "@react-native-vector-icons/ionicons"
+      "expo-notifications",
+      "@react-native-vector-icons/ionicons",
+      "expo-sharing",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Attach photos from your library to Hymn",
+          "cameraPermission": false,
+          "microphonePermission": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

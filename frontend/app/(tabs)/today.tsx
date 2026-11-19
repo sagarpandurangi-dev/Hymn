@@ -4,6 +4,8 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
+import SetupProgressCard from "@/src/components/SetupProgressCard";
+import { durationSuffix } from "@/src/components/DurationPicker";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
 
@@ -102,6 +104,7 @@ export default function TodayScreen() {
   const [required, setRequired] = useState<RequiredCheckin[]>([]);
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [spending, setSpending] = useState<SpendingGroup[]>([]);
+  const [reviewOpen, setReviewOpen] = useState<number | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
@@ -110,7 +113,7 @@ export default function TodayScreen() {
     // Any individual failure degrades that dataset only — the other cards
     // still render — so returning to Today after completing a task or
     // check-in always reflects the newest state.
-    const [checkinsRes, requiredRes, tasksRes, spendingRes] = await Promise.all([
+    const [checkinsRes, requiredRes, tasksRes, spendingRes, reviewRes] = await Promise.all([
       api.listCheckins().catch(() => []),
       api.listRequiredCheckins(today).catch(() => []),
       // Completed and cancelled tasks are hidden — check-ins now surface
@@ -118,7 +121,9 @@ export default function TodayScreen() {
       // work that still needs attention.
       api.listTasks({ includeCompleted: false }).catch(() => []),
       api.getSpending(today).catch(() => ({ date: today, groups: [] as any })),
+      api.getInboxReview().catch(() => null),
     ]);
+    setReviewOpen(reviewRes ? reviewRes.open_total ?? 0 : null);
 
     // Recent Check-ins: only those recorded on the user's local "today".
     setEvents((checkinsRes as EventItem[]).filter((e) => e.date === today));
@@ -181,6 +186,27 @@ export default function TodayScreen() {
         </View>
 
         <View style={styles.stack}>
+          <SetupProgressCard />
+          <Card
+            testID="card-my-week"
+            title="My week"
+            icon="time-outline"
+            empty=""
+            onPress={() => router.push("/my-week" as any)}
+          >
+            <Text style={styles.cardEmpty}>Where your 168 hours went: planned vs actual.</Text>
+          </Card>
+          <Card
+            testID="card-daily-review"
+            title={`Daily review (${reviewOpen ?? 0} open)`}
+            icon="file-tray-outline"
+            empty=""
+            onPress={() => router.push("/inbox/review")}
+          >
+            <Text style={styles.cardEmpty}>
+              {reviewOpen === null ? "Review couldn't load — tap to open." : "Decide what's done, binned or gold."}
+            </Text>
+          </Card>
           <Card
             testID="card-planning-space"
             title="Planning"
@@ -270,7 +296,7 @@ export default function TodayScreen() {
                 {events.slice(0, 3).map((e) => (
                   <View key={e.id} style={styles.eventRow}>
                     <Text style={styles.eventTime}>{e.time}</Text>
-                    <Text style={styles.eventTitle} numberOfLines={1}>{e.title}</Text>
+                    <Text style={styles.eventTitle} numberOfLines={1}>{e.title}{durationSuffix((e as any).duration_minutes)}</Text>
                   </View>
                 ))}
                 {events.length > 3 && <Text style={styles.eventMore}>+{events.length - 3} more</Text>}

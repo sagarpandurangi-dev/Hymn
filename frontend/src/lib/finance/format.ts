@@ -11,6 +11,22 @@ export const formatMoney = (value: string | number | null | undefined): string =
   return fracPart ? `${withThousands}.${fracPart}` : withThousands;
 };
 
+/**
+ * Rupees with Indian grouping from an amount string: "125000.00" → "₹1,25,000",
+ * "-2500.5" → "-₹2,500.50". Display only.
+ */
+export const formatINR = (value: string | number | null | undefined): string => {
+  const s = value === null || value === undefined || value === "" ? "0" : String(value).trim();
+  const neg = s.startsWith("-");
+  const [rawInt, rawFrac = ""] = (neg ? s.slice(1) : s).split(".");
+  const intPart = rawInt.replace(/^0+(?=\d)/, "") || "0";
+  const last3 = intPart.slice(-3);
+  const rest = intPart.slice(0, -3);
+  const grouped = rest ? `${rest.replace(/\B(?=(\d{2})+(?!\d))/g, ",")},${last3}` : last3;
+  const frac = /[1-9]/.test(rawFrac) ? `.${rawFrac.padEnd(2, "0").slice(0, 2)}` : "";
+  return `${neg ? "-" : ""}₹${grouped}${frac}`;
+};
+
 /** Human-readable month label (e.g. "Jul 2026") from YYYY-MM. */
 export const monthLabel = (m: string): string => {
   if (!m || m.length !== 7) return m;

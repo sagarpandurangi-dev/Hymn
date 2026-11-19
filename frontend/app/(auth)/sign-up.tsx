@@ -31,8 +31,8 @@ export default function SignUpScreen() {
       setError("All fields are required.");
       return;
     }
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters.");
+    if (password.length < 10) {
+      setError("Password must be at least 10 characters.");
       return;
     }
     setBusy(true);
@@ -84,7 +84,7 @@ export default function SignUpScreen() {
             style={styles.input}
             value={password}
             onChangeText={setPassword}
-            placeholder="At least 6 characters"
+            placeholder="At least 10 characters"
             placeholderTextColor={colors.onSurfaceTertiary}
             secureTextEntry
             testID="sign-up-password-input"

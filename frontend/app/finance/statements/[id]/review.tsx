@@ -1,0 +1,606 @@
+import { useCallback, useEffect, useState } from "react";
+import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { useLocalSearchParams } from "expo-router";
+import {
+  api, ApiError, StatementConfirmResult, StatementDecision, StatementSuggestion,
+  StatementSuggestionLine, StatementSuggestions,
+} from "@/src/lib/api";
+import FinanceHeader from "@/src/components/finance/FinanceHeader";
+import { FoldCard, FoldRow, foldPageStyle } from "@/src/components/finance/foldUi";
+import { financeColors, financeRadius, financeSpace } from "@/src/lib/finance/theme";
+import { formatMoney } from "@/src/lib/finance/format";
+
+type Account = { id: string; name: string; currency: string };
+type Choice = StatementSuggestion & { always?: boolean; changed?: boolean };
+
+const KINDS: { value: string; label: string }[] = [
+  { value: "expense", label: "Expense" },
+  { value: "income", label: "Income" },
+  { value: "card_bill", label: "Card bill" },
+  { value: "transfer", label: "Transfer" },
+  { value: "refund", label: "Refund" },
+  { value: "skip", label: "Skip" },
+];
+const EXPENSE_CATEGORIES = [
+  "food", "groceries", "fuel", "transport", "shopping", "bills", "rent", "health", "education",
+  "entertainment", "travel", "family", "personal_care", "insurance", "taxes", "charity",
+  "subscriptions", "uncategorised",
+];
+const INCOME_CATEGORIES = ["salary", "bonus", "interest", "gift", "refund", "other", "uncategorised"];
+const ACCEPTED_CONFIDENCE = new Set(["known", "similar", "habit", "ai", "learned", "rule", "matched"]);
+const ACCOUNT_TYPES: { value: "bank" | "credit_card" | "wallet"; label: string }[] = [
+  { value: "bank", label: "Bank" },
+  { value: "credit_card", label: "Credit card" },
+  { value: "wallet", label: "Wallet" },
+];
+
+const titleCase = (s: string) => s.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+const categoryName = (c?: string | null) => (c ? c.split(":").pop() || "" : "");
+
+function suggestionLabel(s?: Choice | null): string {
+  if (!s) return "No suggestion";
+  if (s.duplicate_of || s.action === "link" || s.action === "linked" || s.action === "already_recorded") return "Already recorded";
+  const kind = KINDS.find((k) => k.value === s.kind)?.label ?? (s.kind ? titleCase(s.kind) : "");
+  const cat = categoryName(s.category);
+  return [kind, cat ? titleCase(cat) : ""].filter(Boolean).join(" · ") || (s.action ? titleCase(s.action) : "No suggestion");
+}
+
+function confidenceColor(c?: string | null) {
+  if (c === "matched" || c === "rule") return financeColors.positive;
+  if (c === "learned") return financeColors.pillInfoInk;
+  return financeColors.inkMuted;
+}
+
+const lineAmount = (l: StatementSuggestionLine) => {
+  const has = (v: unknown) => v !== null && v !== undefined && v !== "" && Number(v) !== 0;
+  if (has(l.debit)) return { text: `−${formatMoney(String(l.debit))}`, out: true };
+  if (has(l.credit)) return { text: `+${formatMoney(String(l.credit))}`, out: false };
+  return { text: "", out: false };
+};
+
+function Chip({ label, selected, onPress, testID }: { label: string; selected: boolean; onPress: () => void; testID?: string }) {
+  return (
+    <Pressable onPress={onPress} style={[styles.chip, selected && styles.chipSel]} testID={testID}>
+      <Text style={[styles.chipText, selected && styles.chipTextSel]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+export default function StatementReviewScreen() {
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const importId = String(id);
+  const [data, setData] = useState<StatementSuggestions | null>(null);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [choices, setChoices] = useState<Record<number, Choice>>({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [linking, setLinking] = useState<string | null>(null);
+  const [pickingAccount, setPickingAccount] = useState(false);
+  const [addingAccount, setAddingAccount] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newType, setNewType] = useState<"bank" | "credit_card" | "wallet">("bank");
+  const [newCurrency, setNewCurrency] = useState("INR");
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [accountError, setAccountError] = useState("");
+  const [editing, setEditing] = useState<{ ns: number[]; title: string; bulk: boolean } | null>(null);
+  const [draft, setDraft] = useState<Choice | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [accepting, setAccepting] = useState(false);
+  const [result, setResult] = useState<StatementConfirmResult | null>(null);
+  // Lines already sent to /confirm (by Accept all guesses or Confirm all).
+  const [confirmedNs, setConfirmedNs] = useState<Set<number>>(new Set());
+  const [selectMode, setSelectMode] = useState(false);
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+
+  const load = useCallback(async () => {
+    setError("");
+    try {
+      const [sug, accs] = await Promise.all([
+        api.getStatementSuggestions(importId),
+        api.listFinancialAccounts().catch(() => []),
+      ]);
+      setData(sug);
+      setAccounts((accs as Account[]) || []);
+      const init: Record<number, Choice> = {};
+      for (const l of sug.lines ?? []) init[l.n] = { ...(l.suggestion ?? {}) };
+      setChoices(init);
+    } catch (e) {
+      setError((e as ApiError).message);
+    }
+  }, [importId]);
+
+  useEffect(() => {
+    (async () => { setLoading(true); await load(); setLoading(false); })();
+  }, [load]);
+
+  const link = async (accountId: string) => {
+    if (linking) return false;
+    setLinking(accountId);
+    setError("");
+    try {
+      await api.linkStatementAccount(importId, accountId);
+      setPickingAccount(false);
+      await load();
+      return true;
+    } catch (e) {
+      // e.g. 409: show the backend's reason; the current account stays linked.
+      setError((e as ApiError).message);
+      return false;
+    } finally {
+      setLinking(null);
+    }
+  };
+
+  const saveNewAccount = async () => {
+    const name = newName.trim();
+    const currency = newCurrency.trim().toUpperCase();
+    if (!name) { setAccountError("Enter a name."); return; }
+    if (!currency) { setAccountError("Enter a currency."); return; }
+    if (savingAccount) return;
+    setSavingAccount(true);
+    setAccountError("");
+    try {
+      const created = await api.createFinancialAccount({
+        name,
+        account_type: newType,
+        currency,
+        current_value: 0,
+        liquidity_type: "liquid",
+        fixed_or_flexible: "flexible",
+      });
+      setAddingAccount(false);
+      setNewName("");
+      setNewType("bank");
+      setNewCurrency("INR");
+      await link(created.id);
+    } catch (e) {
+      setAccountError((e as ApiError).message);
+    } finally {
+      setSavingAccount(false);
+    }
+  };
+
+  const openEdit = (l: StatementSuggestionLine) => {
+    setEditing({ ns: [l.n], title: l.description || "", bulk: false });
+    setDraft({ ...(choices[l.n] ?? {}) });
+  };
+
+  const openBulkEdit = () => {
+    if (selected.size === 0) return;
+    setEditing({ ns: [...selected], title: `${selected.size} line${selected.size === 1 ? "" : "s"} selected`, bulk: true });
+    setDraft({});
+  };
+
+  const toggleSelected = (n: number) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(n)) next.delete(n); else next.add(n);
+      return next;
+    });
+
+  const exitSelect = () => {
+    setSelectMode(false);
+    setSelected(new Set());
+  };
+
+  // Only the on-screen choices change; nothing is saved until Confirm.
+  const saveEdit = () => {
+    if (!editing || !draft) return;
+    if (editing.bulk && !draft.kind) return;
+    setChoices((prev) => {
+      const next = { ...prev };
+      for (const n of editing.ns) next[n] = { ...draft, changed: true };
+      return next;
+    });
+    if (editing.bulk) exitSelect();
+    setEditing(null);
+    setDraft(null);
+  };
+
+  const pickKind = (kind: string) => {
+    setDraft((d) => ({
+      ...(d ?? {}),
+      kind,
+      action: kind === "skip" ? "skip" : "create",
+      category: kind === "expense" ? "expense:uncategorised" : kind === "income" ? "income:uncategorised" : null,
+      counter_account_id: kind === "card_bill" || kind === "transfer" ? d?.counter_account_id ?? null : null,
+      duplicate_of: null,
+      merge_with: null,
+      confidence: null,
+      why: null,
+    }));
+  };
+
+  const toDecision = (l: StatementSuggestionLine): StatementDecision => {
+    const c = choices[l.n] ?? {};
+    const d: StatementDecision = {
+      n: l.n,
+      action: c.action ?? null,
+      kind: c.kind ?? null,
+      category: c.category ?? null,
+      counter_account_id: c.counter_account_id ?? null,
+      duplicate_of: c.duplicate_of ?? null,
+      merge_with: c.merge_with ?? null,
+    };
+    if (c.always) d.always = true;
+    return d;
+  };
+
+  const sendLines = async (lines: StatementSuggestionLine[]) => {
+    const res = await api.confirmStatement(importId, lines.map(toDecision));
+    setResult(res);
+    setConfirmedNs((prev) => new Set([...prev, ...lines.map((l) => l.n)]));
+    exitSelect();
+  };
+
+  const openLines = (data?.lines ?? []).filter((l) => !confirmedNs.has(l.n));
+  const guessLines = openLines.filter((l) => ACCEPTED_CONFIDENCE.has(l.suggestion?.confidence ?? ""));
+
+  const confirmAll = async () => {
+    if (confirming || accepting || openLines.length === 0) return;
+    setConfirming(true);
+    setError("");
+    try {
+      await sendLines(openLines);
+    } catch (e) {
+      setError((e as ApiError).message);
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  // Confirms every line whose suggestion confidence is accepted, using each
+  // line's current on-screen choice. Lines with "new" stay open to pick.
+  const acceptAllGuesses = async () => {
+    if (confirming || accepting || guessLines.length === 0) return;
+    setAccepting(true);
+    setError("");
+    try {
+      await sendLines(guessLines);
+    } catch (e) {
+      setError((e as ApiError).message);
+    } finally {
+      setAccepting(false);
+    }
+  };
+
+  const accountName = (aid?: string | null) => accounts.find((a) => a.id === aid)?.name ?? "";
+  const suggested = data?.account_suggestions ?? [];
+  const orderedAccounts = [
+    ...suggested.map((sid) => accounts.find((a) => a.id === sid)).filter((a): a is Account => !!a),
+    ...accounts.filter((a) => !suggested.includes(a.id)),
+  ];
+
+  const renderResult = (r: StatementConfirmResult) => {
+    const bc = r.balance_check;
+    return (
+      <FoldCard style={styles.resultCard} testID="statement-confirm-result">
+        <Text style={styles.resultText}>
+          {`${r.created ?? 0} added, ${r.linked_to_existing ?? 0} already recorded, ${r.merged ?? 0} fixed, ${r.skipped ?? 0} skipped`}
+        </Text>
+        {bc?.available ? (
+          bc.matches ? (
+            <Text style={[styles.resultText, { color: financeColors.positive }]}>✓ Matches the statement&apos;s closing balance</Text>
+          ) : (
+            <Text style={[styles.resultText, { color: financeColors.negative }]}>
+              {`Money book: ${formatMoney(String(bc.ledger_balance ?? ""))} · Statement: ${formatMoney(String(bc.statement_closing ?? ""))}`}
+            </Text>
+          )
+        ) : null}
+      </FoldCard>
+    );
+  };
+
+  return (
+    <SafeAreaView style={foldPageStyle} edges={["bottom"]}>
+      <FinanceHeader title="Review & confirm" subtitle="Check each line, then confirm" />
+      {loading ? <ActivityIndicator style={{ marginTop: financeSpace.xxxl }} color={financeColors.ink} /> : (
+        <ScrollView contentContainerStyle={styles.scroll}>
+          {error ? <Text style={styles.error} testID="statement-review-error">{error}</Text> : null}
+
+          {data && (!data.account_id || pickingAccount) ? (
+            <>
+              <Text style={styles.question}>Which account is this statement for?</Text>
+              <FoldCard>
+                {orderedAccounts.length === 0 ? <Text style={styles.empty}>No accounts yet.</Text> : null}
+                {orderedAccounts.map((a, i) => (
+                  <FoldRow
+                    key={a.id}
+                    first={i === 0}
+                    label={a.name}
+                    meta={a.id === data.account_id ? `${a.currency} · Current` : a.currency}
+                    right={linking === a.id ? <ActivityIndicator color={financeColors.ink} /> : a.id === suggested[0] ? <Text style={styles.suggested}>Suggested</Text> : undefined}
+                    onPress={() => link(a.id)}
+                    chevron
+                    testID={`statement-link-account-${a.id}`}
+                  />
+                ))}
+              </FoldCard>
+              <Pressable
+                style={styles.secondary}
+                onPress={() => { setAccountError(""); setAddingAccount(true); }}
+                testID="statement-add-account-button"
+              >
+                <Text style={styles.secondaryText}>+ Add account</Text>
+              </Pressable>
+              {data.account_id ? (
+                <Pressable onPress={() => setPickingAccount(false)} hitSlop={8} testID="statement-change-account-cancel">
+                  <Text style={styles.linkText}>Cancel</Text>
+                </Pressable>
+              ) : null}
+            </>
+          ) : data ? (
+            <>
+              <View style={styles.accountRow} testID="statement-linked-account">
+                <Text style={styles.accountName} numberOfLines={1}>
+                  {accountName(data.account_id) || "Linked account"}
+                </Text>
+                <Pressable onPress={() => { setError(""); setPickingAccount(true); }} hitSlop={8} testID="statement-change-account-link">
+                  <Text style={styles.linkText}>Change account</Text>
+                </Pressable>
+              </View>
+              {result ? renderResult(result) : null}
+              {openLines.length > 0 ? (
+                <View style={styles.toolbar}>
+                  {selectMode ? (
+                    <>
+                      <Pressable onPress={exitSelect} hitSlop={8} testID="statement-select-cancel">
+                        <Text style={styles.linkText}>Cancel</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.toolBtn, selected.size === 0 && styles.disabled]}
+                        onPress={openBulkEdit}
+                        disabled={selected.size === 0}
+                        testID="statement-bulk-edit-button"
+                      >
+                        <Text style={styles.toolBtnText}>Set kind & category{selected.size ? ` (${selected.size})` : ""}</Text>
+                      </Pressable>
+                    </>
+                  ) : (
+                    <>
+                      <Pressable style={styles.toolBtn} onPress={() => setSelectMode(true)} testID="statement-select-button">
+                        <Text style={styles.toolBtnText}>Select</Text>
+                      </Pressable>
+                      {guessLines.length > 0 ? (
+                        <Pressable
+                          style={[styles.toolBtn, (accepting || confirming) && styles.disabled]}
+                          onPress={acceptAllGuesses}
+                          disabled={accepting || confirming}
+                          testID="statement-accept-guesses-button"
+                        >
+                          {accepting ? <ActivityIndicator color={financeColors.ink} /> : <Text style={styles.toolBtnText}>Accept all guesses ({guessLines.length})</Text>}
+                        </Pressable>
+                      ) : null}
+                    </>
+                  )}
+                </View>
+              ) : null}
+              <FoldCard>
+                {(data.lines ?? []).length === 0 ? <Text style={styles.empty}>No lines to review.</Text> : null}
+                {(data.lines ?? []).map((l, i) => {
+                  const c = choices[l.n];
+                  const amt = lineAmount(l);
+                  const done = confirmedNs.has(l.n);
+                  const isSel = selected.has(l.n);
+                  return (
+                    <Pressable
+                      key={l.n}
+                      onPress={() => { if (done) return; if (selectMode) toggleSelected(l.n); else openEdit(l); }}
+                      style={[styles.line, i > 0 && styles.lineBorder, done && styles.lineDone]}
+                      testID={`statement-review-line-${l.n}`}
+                    >
+                      <View style={styles.lineHead}>
+                        {selectMode && !done ? (
+                          <View style={[styles.checkbox, isSel && styles.checkboxOn]} testID={`statement-line-checkbox-${l.n}`}>
+                            {isSel ? <Text style={styles.checkMark}>✓</Text> : null}
+                          </View>
+                        ) : null}
+                        <Text style={styles.lineDate}>{l.date || ""}</Text>
+                        <Text style={styles.lineDesc} numberOfLines={2}>{l.description || ""}</Text>
+                        <Text style={[styles.lineAmt, amt.out ? styles.out : styles.in]}>{amt.text}</Text>
+                      </View>
+                      <View style={styles.sugRow}>
+                        <Text style={[styles.sugLabel, { color: confidenceColor(c?.confidence) }]}>
+                          {suggestionLabel(c)}
+                          {c?.counter_account_id && accountName(c.counter_account_id) ? ` → ${accountName(c.counter_account_id)}` : ""}
+                          {c?.always ? " · Always" : ""}
+                          {done ? " · Confirmed" : ""}
+                        </Text>
+                        {c?.confidence === "ai" ? (
+                          <View style={styles.guessTag} testID={`statement-guess-tag-${l.n}`}>
+                            <Text style={styles.guessTagText}>Hymn&apos;s guess</Text>
+                          </View>
+                        ) : null}
+                      </View>
+                      {c?.why ? <Text style={styles.why}>{c.why}</Text> : null}
+                    </Pressable>
+                  );
+                })}
+              </FoldCard>
+              {openLines.length > 0 && !selectMode ? (
+                <Pressable style={[styles.primary, (confirming || accepting) && styles.disabled]} onPress={confirmAll} disabled={confirming || accepting} testID="statement-confirm-all-button">
+                  {confirming ? <ActivityIndicator color="#FBFBF6" /> : <Text style={styles.primaryText}>Confirm all</Text>}
+                </Pressable>
+              ) : null}
+            </>
+          ) : null}
+        </ScrollView>
+      )}
+
+      <Modal visible={addingAccount} transparent animationType="fade" onRequestClose={() => !savingAccount && setAddingAccount(false)}>
+        <View style={[styles.backdrop, styles.centered]}>
+          <View style={styles.formCard}>
+            <Text style={styles.sheetTitle}>Add account</Text>
+            <Text style={styles.fieldLabel}>Name</Text>
+            <TextInput
+              style={styles.input}
+              value={newName}
+              onChangeText={setNewName}
+              placeholder="e.g. HDFC Savings"
+              placeholderTextColor={financeColors.inkFaint}
+              testID="statement-new-account-name"
+            />
+            <Text style={styles.fieldLabel}>Type</Text>
+            <View style={styles.chipWrap}>
+              {ACCOUNT_TYPES.map((t) => (
+                <Chip key={t.value} label={t.label} selected={newType === t.value} onPress={() => setNewType(t.value)} testID={`statement-new-account-type-${t.value}`} />
+              ))}
+            </View>
+            <Text style={styles.fieldLabel}>Currency</Text>
+            <TextInput
+              style={styles.input}
+              value={newCurrency}
+              onChangeText={setNewCurrency}
+              autoCapitalize="characters"
+              maxLength={3}
+              placeholder="INR"
+              placeholderTextColor={financeColors.inkFaint}
+              testID="statement-new-account-currency"
+            />
+            {accountError ? <Text style={styles.error} testID="statement-new-account-error">{accountError}</Text> : null}
+            <View style={styles.sheetActions}>
+              <Pressable style={styles.secondary} onPress={() => setAddingAccount(false)} disabled={savingAccount} testID="statement-new-account-cancel">
+                <Text style={styles.secondaryText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={[styles.primary, styles.flex1, savingAccount && styles.disabled]} onPress={saveNewAccount} disabled={savingAccount} testID="statement-new-account-save">
+                {savingAccount ? <ActivityIndicator color="#FBFBF6" /> : <Text style={styles.primaryText}>Save</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={!!editing} transparent animationType="slide" onRequestClose={() => setEditing(null)}>
+        <View style={styles.backdrop}>
+          <View style={styles.sheet}>
+            <ScrollView contentContainerStyle={{ gap: financeSpace.md }}>
+              <Text style={styles.sheetTitle} numberOfLines={2}>{editing?.title}</Text>
+              <Text style={styles.fieldLabel}>Kind</Text>
+              <View style={styles.chipWrap}>
+                {KINDS.map((k) => (
+                  <Chip key={k.value} label={k.label} selected={draft?.kind === k.value} onPress={() => pickKind(k.value)} testID={`statement-kind-${k.value}`} />
+                ))}
+              </View>
+
+              {draft?.kind === "expense" || draft?.kind === "income" ? (
+                <>
+                  <Text style={styles.fieldLabel}>Category</Text>
+                  <View style={styles.chipWrap}>
+                    {(draft.kind === "expense" ? EXPENSE_CATEGORIES : INCOME_CATEGORIES).map((cat) => {
+                      const value = `${draft.kind}:${cat}`;
+                      return (
+                        <Chip
+                          key={cat}
+                          label={titleCase(cat)}
+                          selected={draft.category === value}
+                          onPress={() => setDraft((d) => ({ ...(d ?? {}), category: value }))}
+                          testID={`statement-category-${cat}`}
+                        />
+                      );
+                    })}
+                  </View>
+                </>
+              ) : null}
+
+              {draft?.kind === "card_bill" || draft?.kind === "transfer" ? (
+                <>
+                  <Text style={styles.fieldLabel}>Other account</Text>
+                  <View style={styles.chipWrap}>
+                    {accounts.filter((a) => a.id !== data?.account_id).map((a) => (
+                      <Chip
+                        key={a.id}
+                        label={a.name}
+                        selected={draft.counter_account_id === a.id}
+                        onPress={() => setDraft((d) => ({ ...(d ?? {}), counter_account_id: a.id }))}
+                        testID={`statement-counter-${a.id}`}
+                      />
+                    ))}
+                  </View>
+                </>
+              ) : null}
+
+              <View style={styles.switchRow}>
+                <Text style={styles.switchLabel}>Always do this</Text>
+                <Switch
+                  value={!!draft?.always}
+                  onValueChange={(v) => setDraft((d) => ({ ...(d ?? {}), always: v }))}
+                  trackColor={{ false: financeColors.divider, true: financeColors.ink }}
+                  testID="statement-always-switch"
+                />
+              </View>
+
+              <View style={styles.sheetActions}>
+                <Pressable style={styles.secondary} onPress={() => { setEditing(null); setDraft(null); }} testID="statement-edit-cancel">
+                  <Text style={styles.secondaryText}>Cancel</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.primary, styles.flex1, editing?.bulk && !draft?.kind && styles.disabled]}
+                  onPress={saveEdit}
+                  disabled={!!editing?.bulk && !draft?.kind}
+                  testID="statement-edit-save"
+                >
+                  <Text style={styles.primaryText}>Done</Text>
+                </Pressable>
+              </View>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  scroll: { padding: financeSpace.xl, gap: financeSpace.md, paddingBottom: financeSpace.xxxl },
+  error: { fontSize: 13, color: financeColors.negative },
+  empty: { fontSize: 13, color: financeColors.inkMuted, padding: financeSpace.xl, textAlign: "center", fontStyle: "italic" },
+  question: { fontSize: 16, fontWeight: "700", color: financeColors.ink },
+  suggested: { fontSize: 11, fontWeight: "700", color: financeColors.positive },
+  line: { paddingVertical: financeSpace.md, paddingHorizontal: financeSpace.lg, gap: 3 },
+  lineBorder: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: financeColors.divider },
+  lineHead: { flexDirection: "row", alignItems: "flex-start", gap: financeSpace.md },
+  lineDate: { width: 78, fontSize: 12, color: financeColors.inkMuted },
+  lineDesc: { flex: 1, fontSize: 13.5, color: financeColors.ink },
+  lineAmt: { fontSize: 13.5, fontWeight: "700", fontVariant: ["tabular-nums"] },
+  out: { color: financeColors.ink },
+  in: { color: financeColors.positive },
+  sugLabel: { fontSize: 13, fontWeight: "700" },
+  sugRow: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: financeSpace.sm, marginLeft: 78 + financeSpace.md },
+  toolbar: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: financeSpace.md },
+  toolBtn: { minHeight: 40, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, alignItems: "center", justifyContent: "center" },
+  toolBtnText: { fontSize: 13, fontWeight: "700", color: financeColors.ink },
+  lineDone: { opacity: 0.55 },
+  checkbox: { width: 22, height: 22, borderRadius: 6, borderWidth: 1.5, borderColor: financeColors.inkMuted, alignItems: "center", justifyContent: "center", marginTop: 1 },
+  checkboxOn: { backgroundColor: financeColors.ink, borderColor: financeColors.ink },
+  checkMark: { color: "#FBFBF6", fontSize: 13, fontWeight: "800" },
+  guessTag: { backgroundColor: financeColors.pillInfoBg, borderRadius: financeRadius.pill, paddingHorizontal: 8, paddingVertical: 2 },
+  guessTagText: { fontSize: 10.5, fontWeight: "700", color: financeColors.pillInfoInk },
+  accountRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: financeSpace.md, minHeight: 44 },
+  accountName: { flex: 1, fontSize: 15, fontWeight: "700", color: financeColors.ink },
+  linkText: { fontSize: 13.5, fontWeight: "700", color: financeColors.pillInfoInk, textDecorationLine: "underline", textAlign: "center" },
+  centered: { justifyContent: "center", padding: financeSpace.xl },
+  formCard: { backgroundColor: financeColors.card, borderRadius: financeRadius.lg, padding: financeSpace.xl, gap: financeSpace.md },
+  input: { borderWidth: 1, borderColor: financeColors.cardBorder, borderRadius: financeRadius.md, paddingHorizontal: financeSpace.md, minHeight: 48, fontSize: 15, color: financeColors.ink },
+  why: { fontSize: 11.5, color: financeColors.inkMuted, marginLeft: 78 + financeSpace.md },
+  resultCard: { padding: financeSpace.lg, gap: financeSpace.xs },
+  resultText: { fontSize: 14, color: financeColors.ink, fontWeight: "600" },
+  primary: { backgroundColor: financeColors.ink, minHeight: 48, borderRadius: financeRadius.pill, alignItems: "center", justifyContent: "center", paddingHorizontal: financeSpace.lg },
+  primaryText: { color: "#FBFBF6", fontSize: 14, fontWeight: "700" },
+  secondary: { minHeight: 48, paddingHorizontal: financeSpace.lg, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, alignItems: "center", justifyContent: "center" },
+  secondaryText: { color: financeColors.ink, fontSize: 14, fontWeight: "600" },
+  disabled: { opacity: 0.5 },
+  flex1: { flex: 1 },
+  backdrop: { flex: 1, backgroundColor: "rgba(20,20,18,0.4)", justifyContent: "flex-end" },
+  sheet: { backgroundColor: financeColors.card, borderTopLeftRadius: financeRadius.lg, borderTopRightRadius: financeRadius.lg, padding: financeSpace.xl, maxHeight: "85%" },
+  sheetTitle: { fontSize: 16, fontWeight: "700", color: financeColors.ink },
+  fieldLabel: { fontSize: 12, fontWeight: "600", color: financeColors.inkMuted, letterSpacing: 0.4 },
+  chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: financeSpace.sm },
+  chip: { minHeight: 36, paddingHorizontal: financeSpace.md, borderRadius: financeRadius.pill, borderWidth: StyleSheet.hairlineWidth, borderColor: financeColors.cardBorder, alignItems: "center", justifyContent: "center" },
+  chipSel: { backgroundColor: financeColors.ink, borderColor: financeColors.ink },
+  chipText: { fontSize: 13, color: financeColors.ink },
+  chipTextSel: { color: "#FBFBF6", fontWeight: "700" },
+  switchRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", minHeight: 44 },
+  switchLabel: { fontSize: 15, color: financeColors.ink },
+  sheetActions: { flexDirection: "row", gap: financeSpace.md, marginTop: financeSpace.sm },
+});
