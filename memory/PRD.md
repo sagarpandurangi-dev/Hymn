@@ -107,3 +107,8 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 ## Health extras — frontend
 - app/life/health/{checkups, labs, progress, doctor}.tsx, linked from Health home "more" card. niceDay() in src/components/health/ui.tsx.
 - Doctor questions saved by GET profile → PUT full profile with new doctor_questions (max 10). Share as text uses RN Share with ?format=text.
+
+## People I look after + watch — frontend
+- src/lib/healthPerson.ts: in-memory chosen person; api.ts health calls wrapped in forPerson() → ?for=<id>. Life tab resets to Me on focus.
+- PersonSwitcher on Health home; HealthHeader shows "<Name>'s health" banner. Food/habits/people/watch hidden for others; profile form hides planner switch for others.
+- app/life/health/{people, watch}.tsx. Settings has "Use my health in plans" switch (inside HealthProfileForm, full profile PUT).

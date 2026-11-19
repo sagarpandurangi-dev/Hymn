@@ -7,6 +7,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import { api } from "@/src/lib/api";
+import { setHealthPerson } from "@/src/lib/healthPerson";
 
 export const FOCUS_AREAS_KEY = "hymn.focusAreas";
 
@@ -41,6 +42,8 @@ export default function LifeScreen() {
   useFocusEffect(
     useCallback(() => {
       let alive = true;
+      // The Life tab always shows my own health line.
+      setHealthPerson(null);
       api.getHealthProfile()
         .then(async (p: any) => {
           if (!p?.consent) { if (alive) setHealthLine("Set up"); return; }

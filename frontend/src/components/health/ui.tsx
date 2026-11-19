@@ -7,16 +7,25 @@ import { useRouter } from "expo-router";
 import Ionicons from "@react-native-vector-icons/ionicons";
 
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
+import { useHealthPerson } from "@/src/lib/healthPerson";
 
-export function HealthHeader({ title, right, testID }: { title: string; right?: React.ReactNode; testID?: string }) {
+export function HealthHeader({ title, right, testID, hidePerson }: { title: string; right?: React.ReactNode; testID?: string; hidePerson?: boolean }) {
   const router = useRouter();
+  const person = useHealthPerson();
   return (
-    <View style={hs.header}>
-      <Pressable onPress={() => (router.canGoBack() ? router.back() : router.replace("/(tabs)/life" as any))} hitSlop={12} style={hs.iconBtn} testID={`${testID ?? "health"}-back`}>
-        <Ionicons name="chevron-back" size={24} color={colors.onSurface} />
-      </Pressable>
-      <Text style={hs.title} numberOfLines={1}>{title}</Text>
-      {right}
+    <View>
+      <View style={hs.header}>
+        <Pressable onPress={() => (router.canGoBack() ? router.back() : router.replace("/(tabs)/life" as any))} hitSlop={12} style={hs.iconBtn} testID={`${testID ?? "health"}-back`}>
+          <Ionicons name="chevron-back" size={24} color={colors.onSurface} />
+        </Pressable>
+        <Text style={hs.title} numberOfLines={1}>{title}</Text>
+        {right}
+      </View>
+      {person && !hidePerson ? (
+        <Text style={{ marginTop: -spacing.sm, paddingLeft: 64, fontSize: 13, fontWeight: "600", color: colors.brandPrimary }} testID="health-person-banner">
+          {person.name}&apos;s health
+        </Text>
+      ) : null}
     </View>
   );
 }

@@ -8,10 +8,12 @@ import { api, ApiError } from "@/src/lib/api";
 import HealthProfileForm from "@/src/components/health/HealthProfileForm";
 import { HealthHeader, hs } from "@/src/components/health/ui";
 import { showToast } from "@/src/lib/toast";
+import { useHealthPerson } from "@/src/lib/healthPerson";
 import { colors, spacing } from "@/src/lib/theme";
 
 export default function HealthSettingsScreen() {
   const router = useRouter();
+  const person = useHealthPerson();
   const [profile, setProfile] = useState<any>(null);
   const [options, setOptions] = useState<any>(null);
   const [error, setError] = useState("");
@@ -19,8 +21,8 @@ export default function HealthSettingsScreen() {
   useEffect(() => {
     Promise.all([api.getHealthProfile(), api.getHealthOptions().catch(() => null)])
       .then(([p, o]) => { setProfile(p); setOptions(o); })
-      .catch((e: ApiError) => setError(e.message || "Couldn't load your profile."));
-  }, []);
+      .catch((e: ApiError) => setError(e.message || "Couldn't load the profile."));
+  }, [person]);
 
   return (
     <SafeAreaView style={hs.safe} edges={["top", "bottom"]} testID="health-settings-screen">
@@ -30,13 +32,15 @@ export default function HealthSettingsScreen() {
           {!profile ? (error ? <Text style={hs.error}>{error}</Text> : <ActivityIndicator color={colors.onSurfaceTertiary} />) : (
             <>
               <View>
-                <Text style={hs.h}>Your profile</Text>
-                <HealthProfileForm initial={profile} options={options} saveLabel="Save changes" onSaved={(p) => { setProfile(p); showToast("Profile saved."); }} />
+                <Text style={hs.h}>{person ? `${person.name}'s profile` : "Your profile"}</Text>
+                <HealthProfileForm key={person?.id ?? "me"} initial={profile} options={options} forOther={!!person} saveLabel="Save changes" onSaved={(p) => { setProfile(p); showToast("Profile saved."); }} />
               </View>
-              <Pressable style={[hs.secondary, { borderColor: colors.error, marginTop: spacing.lg }]} onPress={() => router.push("/life/health/delete" as any)} testID="health-open-delete">
-                <Ionicons name="trash-outline" size={18} color={colors.error} />
-                <Text style={[hs.secondaryText, { color: colors.error }]}>Delete all my health data</Text>
-              </Pressable>
+              {!person ? (
+                <Pressable style={[hs.secondary, { borderColor: colors.error, marginTop: spacing.lg }]} onPress={() => router.push("/life/health/delete" as any)} testID="health-open-delete">
+                  <Ionicons name="trash-outline" size={18} color={colors.error} />
+                  <Text style={[hs.secondaryText, { color: colors.error }]}>Delete all my health data</Text>
+                </Pressable>
+              ) : null}
             </>
           )}
         </ScrollView>

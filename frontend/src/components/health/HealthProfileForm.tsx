@@ -66,7 +66,7 @@ function Toggle({ label, value, onChange, testID }: { label: string; value: bool
 const SEX: Opt[] = [{ code: "female", label: "Female" }, { code: "male", label: "Male" }, { code: "other", label: "Other" }];
 const SMOKING: Opt[] = [{ code: "never", label: "Never" }, { code: "former", label: "Used to" }, { code: "current", label: "Yes, now" }];
 
-export default function HealthProfileForm({ initial, options, saveLabel, onSaved }: { initial: any; options: any; saveLabel: string; onSaved: (p: any) => void }) {
+export default function HealthProfileForm({ initial, options, saveLabel, onSaved, forOther }: { initial: any; options: any; saveLabel: string; onSaved: (p: any) => void; forOther?: boolean }) {
   const p = initial ?? {};
   const [dob, setDob] = useState<string>(p.date_of_birth ?? "");
   const [sex, setSex] = useState<string>(p.sex ?? "");
@@ -108,7 +108,7 @@ export default function HealthProfileForm({ initial, options, saveLabel, onSaved
         on_glucose_lowering_medicine: glucoseMed,
         hearing_difficulty: hearing,
         doctor_questions: questions,
-        use_in_planner: planner,
+        use_in_planner: forOther ? false : planner,
       });
       onSaved(saved);
     } catch (e) {
@@ -149,9 +149,12 @@ export default function HealthProfileForm({ initial, options, saveLabel, onSaved
       <Text style={hs.label}>Questions for your doctor</Text>
       <TagList value={questions} onChange={setQuestions} placeholder="Something you want to ask" testID="health-questions" />
 
-      <View style={{ marginTop: spacing.md }}>
-        <Toggle label="Let the planner use this when checking plans" value={planner} onChange={setPlanner} testID="health-use-in-planner" />
-      </View>
+      {!forOther ? (
+        <View style={{ marginTop: spacing.md }}>
+          <Toggle label="Use my health in plans" value={planner} onChange={setPlanner} testID="health-use-in-planner" />
+          <Text style={hs.muted}>The planner sees a short summary — never your logs, lab values or symptoms.</Text>
+        </View>
+      ) : null}
 
       {error ? <Text style={[hs.error, { marginTop: spacing.md }]} testID="health-profile-error">{error}</Text> : null}
       <Pressable style={[hs.primary, { marginTop: spacing.xl }, busy && { opacity: 0.5 }]} onPress={save} disabled={busy} testID="health-profile-save">

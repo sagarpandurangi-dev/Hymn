@@ -8,13 +8,24 @@ import { api, ApiError } from "@/src/lib/api";
 import DraftNote from "@/src/components/DraftNote";
 import HealthProfileForm from "@/src/components/health/HealthProfileForm";
 import { HealthHeader, hs, RedFlags, statusColour } from "@/src/components/health/ui";
+import PersonSwitcher from "@/src/components/health/PersonSwitcher";
+import { CarePerson, useHealthPerson } from "@/src/lib/healthPerson";
 import { colors, spacing } from "@/src/lib/theme";
 
 /** Metrics the 30-second daily log can fill in. */
 export const DAILY_METRICS = ["energy", "mood", "stress", "digestion", "bowel", "sleep_hours", "steps", "active_minutes", "strength_session", "veg_fruit_portions", "protein_servings", "sugary_items", "outside_meals", "water_glasses"];
 
-function Consent({ options, onSaved }: { options: any; onSaved: (p: any) => void }) {
+function Consent({ options, onSaved, person }: { options: any; onSaved: (p: any) => void; person: CarePerson | null }) {
   const [agreed, setAgreed] = useState(false);
+  if (person) {
+    return (
+      <View>
+        <Text style={hs.h}>A little about {person.name}</Text>
+        <Text style={hs.body}>This helps Hymn use the ranges that fit them. Skip anything you don&apos;t know.</Text>
+        <HealthProfileForm key={person.id} initial={null} options={options} forOther saveLabel="Save and continue" onSaved={onSaved} />
+      </View>
+    );
+  }
   return (
     <>
       <View style={hs.card} testID="health-consent">
@@ -49,6 +60,7 @@ function Consent({ options, onSaved }: { options: any; onSaved: (p: any) => void
 
 export default function HealthHome() {
   const router = useRouter();
+  const person = useHealthPerson();
   const [profile, setProfile] = useState<any>(null);
   const [options, setOptions] = useState<any>(null);
   const [dash, setDash] = useState<any>(null);
@@ -58,6 +70,8 @@ export default function HealthHome() {
   const [showAllMissing, setShowAllMissing] = useState(false);
 
   const load = useCallback(async () => {
+    setDash(null);
+    setSuggestions([]);
     try {
       const [p, o] = await Promise.all([api.getHealthProfile(), api.getHealthOptions().catch(() => null)]);
       setProfile(p);
@@ -71,7 +85,7 @@ export default function HealthHome() {
     } catch (e) {
       setError((e as ApiError).message || "Couldn't load your health right now.");
     }
-  }, []);
+  }, [person]); // eslint-disable-line react-hooks/exhaustive-deps
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const consent = !!profile?.consent;
@@ -82,7 +96,8 @@ export default function HealthHome() {
   return (
     <SafeAreaView style={hs.safe} edges={["top", "bottom"]} testID="health-home">
       <HealthHeader
-        title="Health"
+        title={person ? `${person.name}'s health` : "Health"}
+        hidePerson
         testID="health-home"
         right={consent ? (
           <Pressable onPress={() => router.push("/life/health/settings" as any)} hitSlop={8} style={hs.iconBtn} testID="health-open-settings">
@@ -90,6 +105,7 @@ export default function HealthHome() {
           </Pressable>
         ) : undefined}
       />
+      <PersonSwitcher />
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView
           contentContainerStyle={hs.scroll}
@@ -99,7 +115,7 @@ export default function HealthHome() {
           {!profile ? (
             error ? <Text style={hs.error}>{error}</Text> : <ActivityIndicator color={colors.onSurfaceTertiary} />
           ) : !consent ? (
-            <Consent options={options} onSaved={() => load()} />
+            <Consent options={options} onSaved={() => load()} person={person} />
           ) : (
             <>
               <RedFlags flags={dash?.red_flags ?? []} />
@@ -109,20 +125,28 @@ export default function HealthHome() {
               <Pressable style={hs.primary} onPress={() => router.push("/life/health/daily" as any)} testID="health-open-daily">
                 <Text style={hs.primaryText}>Log today · 30 seconds</Text>
               </Pressable>
-              <Pressable style={hs.secondary} onPress={() => router.push("/life/health/food" as any)} testID="health-open-food">
-                <Ionicons name="restaurant-outline" size={18} color={colors.onSurface} />
-                <Text style={hs.secondaryText}>Food</Text>
-              </Pressable>
-              <Pressable style={hs.secondary} onPress={() => router.push("/life/health/habits" as any)} testID="health-open-habits">
-                <Ionicons name="leaf-outline" size={18} color={colors.onSurface} />
-                <Text style={hs.secondaryText}>Habits to change</Text>
-              </Pressable>
+              {!person ? (
+                <>
+                  <Pressable style={hs.secondary} onPress={() => router.push("/life/health/food" as any)} testID="health-open-food">
+                    <Ionicons name="restaurant-outline" size={18} color={colors.onSurface} />
+                    <Text style={hs.secondaryText}>Food</Text>
+                  </Pressable>
+                  <Pressable style={hs.secondary} onPress={() => router.push("/life/health/habits" as any)} testID="health-open-habits">
+                    <Ionicons name="leaf-outline" size={18} color={colors.onSurface} />
+                    <Text style={hs.secondaryText}>Habits to change</Text>
+                  </Pressable>
+                </>
+              ) : null}
               <View style={hs.card} testID="health-more">
                 {[
                   ["medkit-outline", "Check-ups", "/life/health/checkups", "health-open-checkups"],
                   ["flask-outline", "Lab reports", "/life/health/labs", "health-open-labs"],
                   ["trending-up-outline", "90-day report", "/life/health/progress", "health-open-progress"],
                   ["document-text-outline", "For my doctor", "/life/health/doctor", "health-open-doctor"],
+                  ...(person ? [] : [
+                    ["people-outline", "People I look after", "/life/health/people", "health-open-people"],
+                    ["watch-outline", "Connect a watch", "/life/health/watch", "health-open-watch"],
+                  ]),
                 ].map(([icon, label, path, tid]) => (
                   <Pressable key={path} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, minHeight: 48 }} onPress={() => router.push(path as any)} testID={tid}>
                     <Ionicons name={icon as any} size={20} color={colors.brandPrimary} />

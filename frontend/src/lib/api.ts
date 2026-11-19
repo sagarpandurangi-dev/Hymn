@@ -3,6 +3,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import { getToken } from "./tokenStorage";
 import { showToast } from "./toast";
+import { forPerson } from "./healthPerson";
 
 const BASE_URL = "https://hymn-production-4828.up.railway.app";
 
@@ -830,30 +831,40 @@ export const api = {
   listMyFoods: () => request<any[]>("/food/my-foods", { auth: true }),
   addMyFood: (payload: Record<string, any>) => request<any>("/food/my-foods", { method: "POST", body: payload, auth: true }),
   deleteMyFood: (id: string) => request<any>(`/food/my-foods/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  // -- People I look after (care) + watch sync --
+  listCare: () => request<any[]>("/care", { auth: true }),
+  addCare: (payload: { name: string; relation: string; their_consent: true }) =>
+    request<any>("/care", { method: "POST", body: payload, auth: true }),
+  renameCare: (id: string, name: string) =>
+    request<any>(`/care/${encodeURIComponent(id)}`, { method: "PATCH", body: { name }, auth: true }),
+  deleteCare: (id: string) => request<any>(`/care/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  getHealthSync: () => request<any>("/health/sync", { auth: true }),
+  disconnectHealthSource: (source_app: string, delete_data: boolean) =>
+    request<any>("/health/sync/disconnect", { method: "POST", body: { source_app, delete_data }, auth: true }),
   // -- Health --
-  getHealthProfile: () => request<any>("/health/profile", { auth: true }),
+  getHealthProfile: () => request<any>(forPerson("/health/profile"), { auth: true }),
   saveHealthProfile: (profile: Record<string, any>) =>
-    request<any>("/health/profile", { method: "PUT", body: profile, auth: true }),
+    request<any>(forPerson("/health/profile"), { method: "PUT", body: profile, auth: true }),
   getHealthOptions: () => request<any>("/health/options", { auth: true }),
   logHealthDaily: (payload: Record<string, any>) =>
-    request<any>("/health/daily", { method: "POST", body: payload, auth: true }),
-  getHealthDashboard: () => request<any>("/health/dashboard", { auth: true }),
-  getHealthSuggestions: () => request<any>("/health/suggestions", { auth: true }),
-  deleteAllHealthData: () => request<any>("/health/all", { method: "DELETE", auth: true }),
-  getCheckups: () => request<any>("/health/checkups", { auth: true }),
+    request<any>(forPerson("/health/daily"), { method: "POST", body: payload, auth: true }),
+  getHealthDashboard: () => request<any>(forPerson("/health/dashboard"), { auth: true }),
+  getHealthSuggestions: () => request<any>(forPerson("/health/suggestions"), { auth: true }),
+  deleteAllHealthData: () => request<any>(forPerson("/health/all"), { method: "DELETE", auth: true }),
+  getCheckups: () => request<any>(forPerson("/health/checkups"), { auth: true }),
   markCheckupDone: (key: string, date: string) =>
-    request<any>(`/health/checkups/${encodeURIComponent(key)}/done`, { method: "POST", body: { date }, auth: true }),
+    request<any>(forPerson(`/health/checkups/${encodeURIComponent(key)}/done`), { method: "POST", body: { date }, auth: true }),
   readLabReport: (file_base64: string, media_type: string) =>
-    request<any>("/health/labs/read", { method: "POST", body: { file_base64, media_type }, auth: true }),
+    request<any>(forPerson("/health/labs/read"), { method: "POST", body: { file_base64, media_type }, auth: true }),
   saveLabReport: (payload: { report_date: string; lab?: string | null; results: any[] }) =>
-    request<any>("/health/labs", { method: "POST", body: payload, auth: true }),
-  listLabReports: () => request<any[]>("/health/labs", { auth: true }),
-  deleteLabReport: (id: string) => request<any>(`/health/labs/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
-  getHealthProgress: () => request<any>("/health/progress", { auth: true }),
+    request<any>(forPerson("/health/labs"), { method: "POST", body: payload, auth: true }),
+  listLabReports: () => request<any[]>(forPerson("/health/labs"), { auth: true }),
+  deleteLabReport: (id: string) => request<any>(forPerson(`/health/labs/${encodeURIComponent(id)}`), { method: "DELETE", auth: true }),
+  getHealthProgress: () => request<any>(forPerson("/health/progress"), { auth: true }),
   getDoctorSummary: (includePrivate: boolean) =>
-    request<any>(`/health/doctor-summary${includePrivate ? "?include_private=true" : ""}`, { auth: true }),
+    request<any>(forPerson(`/health/doctor-summary${includePrivate ? "?include_private=true" : ""}`), { auth: true }),
   getDoctorSummaryText: (includePrivate: boolean) =>
-    request<string>(`/health/doctor-summary?format=text${includePrivate ? "&include_private=true" : ""}`, { auth: true }),
+    request<string>(forPerson(`/health/doctor-summary?format=text${includePrivate ? "&include_private=true" : ""}`), { auth: true }),
   // -- New planner (plan chat + life plans) --
   planChat: (payload: { message: string; chat_id?: string }) =>
     request<any>("/plan-chat", { method: "POST", body: payload, auth: true }),
