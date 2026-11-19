@@ -412,6 +412,7 @@ export default function FinanceScreen() {
             <FoldRow first label="Statement of Net Worth" meta="What you own and owe, side by side" onPress={() => router.push("/finance/reports/net-worth" as any)} chevron testID="finance-report-net-worth" />
             <FoldRow label="Income & Expenditure" meta="This month, last month and year to date" onPress={() => router.push("/finance/reports/income-expenditure" as any)} chevron testID="finance-report-ie" />
             <FoldRow label="Cash Flow" meta="Opening cash to closing cash" onPress={() => router.push("/finance/reports/cash-flow" as any)} chevron testID="finance-report-cash-flow" />
+            <FoldRow label="Things I own & owe" meta="Lifetime cost of your car, home, loans · Premium" onPress={() => router.push("/finance/things" as any)} chevron testID="finance-things" />
             <FoldRow label="Add investments from a statement" meta="Mutual fund or demat statement (PDF) · Premium" onPress={() => router.push("/finance/investments/cas" as any)} chevron testID="finance-cas-import" />
           </FoldCard>
         </View>

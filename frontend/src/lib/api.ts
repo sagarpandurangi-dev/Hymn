@@ -808,6 +808,15 @@ export const api = {
   casApply: (id: string, payload: { links: Record<string, string>; replaces: string[] }) =>
     request<any>(`/investments/cas/${encodeURIComponent(id)}/apply`, { method: "POST", body: payload, auth: true }),
   casList: () => request<any>("/investments/cas", { auth: true }),
+  // -- Things I own & owe (life objects, Premium) --
+  listLifeObjects: () => request<any>("/life-objects", { auth: true }),
+  createLifeObject: (payload: Record<string, any>) =>
+    request<any>("/life-objects", { method: "POST", body: payload, auth: true }),
+  getLifeObject: (id: string) => request<any>(`/life-objects/${encodeURIComponent(id)}`, { auth: true }),
+  updateLifeObject: (id: string, payload: { ended_on?: string; sold_for?: string | null }) =>
+    request<any>(`/life-objects/${encodeURIComponent(id)}`, { method: "PATCH", body: payload, auth: true }),
+  getLifeObjectSchedule: (id: string) => request<any>(`/life-objects/${encodeURIComponent(id)}/schedule`, { auth: true }),
+  getLifeObjectFuel: (id: string) => request<any>(`/life-objects/${encodeURIComponent(id)}/fuel`, { auth: true }),
   // -- Statements (reports) --
   getNetWorthReport: () => request<any>("/reports/net-worth", { auth: true }),
   getIncomeExpenditureReport: (month: string) =>

@@ -74,3 +74,9 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 
 ## My week (Jun 2026)
 - /my-week (card on Today): GET /reports/time?week_start=, week arrows; commitments bar (fixed/flexible & set aside/free of 168h) + time invested this year; time spent table (planned/actual/gap, red rules per area, expandable lines), soul when show_soul, waking-hours %; time flow; untimed check-ins notice.
+
+## Things I own & owe (life objects, Premium) — frontend
+- Finance tab > Statements > "Things I own & owe" → app/finance/things/{index,new,[id],schedule,fuel}.tsx; helpers in src/components/finance/lifeObjects.tsx; api.ts listLifeObjects/createLifeObject/getLifeObject/updateLifeObject/getLifeObjectSchedule/getLifeObjectFuel.
+- 403 → "Premium feature" card. POST fields: type, kind, name, started_on, price, extra_costs, expected_life_months, resale_value, account_id, loan_amount, interest_rate, tenure_months, first_emi_date, method, emi, currency.
+- Project check-in on a car/bike project: data.{odometer, price_per_litre, litres, full_tank}.
+- Set aside detail on Finance tab lists reserved[].planned_set_aside under commitments.
