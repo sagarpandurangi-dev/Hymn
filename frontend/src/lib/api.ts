@@ -799,7 +799,8 @@ export const api = {
   listPeople: () => request<any[]>("/people", { auth: true }),
   createPerson: (payload: { name: string; relation: string; circle: string; birthday?: string | null }) =>
     request<any>("/people", { method: "POST", body: payload, auth: true }),
-  getTimeReport: () => request<any>("/reports/time", { auth: true }),
+  getTimeReport: (weekStart?: string) =>
+    request<any>(`/reports/time${weekStart ? `?week_start=${encodeURIComponent(weekStart)}` : ""}`, { auth: true }),
   getAccountSetup: () => request<AccountSetup>("/account/setup", { auth: true }),
   // -- Investments: CAS / demat statement import (Premium) --
   casPreview: (file_base64: string, password: string) =>

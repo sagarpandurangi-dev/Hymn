@@ -28,6 +28,7 @@ import {
 import { financeColors, financeSpace, financeType } from "@/src/lib/finance/theme";
 import {
   currentMonthIso,
+  dateLabel,
   formatMoney,
   monthLabel,
 } from "@/src/lib/finance/format";
@@ -265,7 +266,10 @@ export default function FinanceScreen() {
           {liquidity.length > 0 ? (
             <FoldCard testID="finance-available-money">
               {liquidity.map((l: any, idx: number) => {
-                const setAside = l.reserved ?? l.reserved_total ?? reserved.find((r: any) => r.currency === l.currency)?.reserved_total;
+                const reservedEntry = reserved.find((r: any) => r.currency === l.currency);
+                const setAside = l.reserved ?? l.reserved_total ?? reservedEntry?.reserved_total;
+                const setAsideCommitments: any[] = reservedEntry?.commitments || [];
+                const setAsidePlanned: any[] = reservedEntry?.planned_set_aside || [];
                 return (
                   <View key={`liq-${l.currency}`}>
                     <FoldRow
@@ -282,6 +286,26 @@ export default function FinanceScreen() {
                         testID={`set-aside-${l.currency}`}
                       />
                     ) : null}
+                    {setAsideCommitments.map((c: any, i: number) => (
+                      <FoldRow
+                        key={`sa-c-${c.id ?? i}`}
+                        label={`   ${c.title ?? c.name ?? "Commitment"}`}
+                        meta={c.date ?? c.due_date ? dateLabel(c.date ?? c.due_date) : "Commitment"}
+                        right={<FoldAmount currency={l.currency} value={formatMoney(c.amount ?? c.reserved_amount ?? c.remaining_reserved)} />}
+                        onPress={c.id ? () => router.push(`/finance/commitments/${c.id}`) : undefined}
+                        chevron={!!c.id}
+                        testID={`set-aside-commitment-${c.id ?? i}`}
+                      />
+                    ))}
+                    {setAsidePlanned.map((p: any, i: number) => (
+                      <FoldRow
+                        key={`sa-p-${p.id ?? i}`}
+                        label={`   ${p.title}`}
+                        meta={p.date ? `Planned · ${dateLabel(p.date)}` : "Planned"}
+                        right={<FoldAmount currency={l.currency} value={formatMoney(p.amount)} />}
+                        testID={`set-aside-planned-${p.id ?? i}`}
+                      />
+                    ))}
                     {l.pending_account_events && l.pending_account_events.length > 0 ? (
                       <FoldRow
                         label={`Pending account (${l.currency})`}

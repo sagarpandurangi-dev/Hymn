@@ -188,6 +188,15 @@ export default function TodayScreen() {
         <View style={styles.stack}>
           <SetupProgressCard />
           <Card
+            testID="card-my-week"
+            title="My week"
+            icon="time-outline"
+            empty=""
+            onPress={() => router.push("/my-week" as any)}
+          >
+            <Text style={styles.cardEmpty}>Where your 168 hours went: planned vs actual.</Text>
+          </Card>
+          <Card
             testID="card-daily-review"
             title={`Daily review (${reviewOpen ?? 0} open)`}
             icon="file-tray-outline"

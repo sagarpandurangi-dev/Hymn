@@ -71,3 +71,6 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 ## Recent activity (ledger rows) + CAS import (Jun 2026)
 - Finance Recent activity → RecentActivityList: transfers "↔" grey no sign; detail "ledger" opens read-only sheet (kind labels), "event" opens event screen.
 - /finance/investments/cas (Premium; 403 → "Premium feature"): how-to text, pickPdf + password → POST /investments/cas/preview, preview card (CasPreviewCard: source, period, investor, total, lines w/ action tags, check warnings, expandable stock/bond/nps items), CasAccountLinker for your_other_investment_accounts → links/replaces, apply → "Added N, updated N" + missing, Past statements (GET /investments/cas). Field names read defensively (shape unverified — QA user is not Premium).
+
+## My week (Jun 2026)
+- /my-week (card on Today): GET /reports/time?week_start=, week arrows; commitments bar (fixed/flexible & set aside/free of 168h) + time invested this year; time spent table (planned/actual/gap, red rules per area, expandable lines), soul when show_soul, waking-hours %; time flow; untimed check-ins notice.
