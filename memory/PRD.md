@@ -80,3 +80,7 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 - 403 → "Premium feature" card. POST fields: type, kind, name, started_on, price, extra_costs, expected_life_months, resale_value, account_id, loan_amount, interest_rate, tenure_months, first_emi_date, method, emi, currency.
 - Project check-in on a car/bike project: data.{odometer, price_per_litre, litres, full_tank}.
 - Set aside detail on Finance tab lists reserved[].planned_set_aside under commitments.
+
+## Family net worth — frontend
+- Finance tab > Statements > "Family net worth" → app/finance/family/{index,add-item,net-worth}.tsx; FamilyMemberSheet; src/lib/family.ts.
+- No server list of entries: entries added on this phone are kept in AsyncStorage (hymn.family.items.<familyId>) for deletion. My member id remembered on accept (hymn.family.me.<familyId>), else owner→"self" row, else name match.

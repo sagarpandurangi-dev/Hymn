@@ -808,6 +808,24 @@ export const api = {
   casApply: (id: string, payload: { links: Record<string, string>; replaces: string[] }) =>
     request<any>(`/investments/cas/${encodeURIComponent(id)}/apply`, { method: "POST", body: payload, auth: true }),
   casList: () => request<any>("/investments/cas", { auth: true }),
+  // -- Family net worth --
+  getFamily: () => request<any>("/family", { auth: true }),
+  createFamily: () => request<any>("/family", { method: "POST", body: {}, auth: true }),
+  acceptFamilyInvite: (id: string, share: "total" | "full") =>
+    request<any>(`/family/invites/${encodeURIComponent(id)}/accept`, { method: "POST", body: { share }, auth: true }),
+  declineFamilyInvite: (id: string) =>
+    request<any>(`/family/invites/${encodeURIComponent(id)}/decline`, { method: "POST", body: {}, auth: true }),
+  inviteToFamily: (pamphlet_id: string, relation: string) =>
+    request<any>("/family/invite", { method: "POST", body: { pamphlet_id, relation }, auth: true }),
+  addFamilyMember: (name: string, relation: string) =>
+    request<any>("/family/members", { method: "POST", body: { name, relation }, auth: true }),
+  updateFamilyMe: (share: "total" | "full") =>
+    request<any>("/family/me", { method: "PATCH", body: { share }, auth: true }),
+  leaveFamily: () => request<any>("/family/leave", { method: "POST", body: {}, auth: true }),
+  addFamilyItem: (payload: { side: "asset" | "liability"; group: string; name: string; amount: string; shares: Record<string, number> }) =>
+    request<any>("/family/items", { method: "POST", body: payload, auth: true }),
+  deleteFamilyItem: (id: string) => request<any>(`/family/items/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  getFamilyNetWorth: () => request<any>("/family/net-worth", { auth: true }),
   // -- Things I own & owe (life objects, Premium) --
   listLifeObjects: () => request<any>("/life-objects", { auth: true }),
   createLifeObject: (payload: Record<string, any>) =>
