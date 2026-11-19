@@ -308,6 +308,9 @@ def test_daily_study_nudge_and_deadlines(client, server, user, ai):
     db = server.db
     asyncio.run(nudges.ensure_nudge_indexes(db))
     asyncio.run(db.users.update_one({"id": user["id"]}, {"$set": {"timezone": "Asia/Kolkata"}}))
+    # This test checks learning's own 07:00 time; the morning brief is tested in test_nudge_limits.
+    client.put("/api/nudges/settings", headers=user["headers"],
+               json={"limits": {"morning_brief": False, "daily_max": 20}})
     j, _ = _start(client, user)
     _accept(client, user, j)
     k = ZoneInfo("Asia/Kolkata")

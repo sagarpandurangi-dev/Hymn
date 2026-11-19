@@ -70,7 +70,17 @@ DEFAULT_SETTINGS = {
     "learning": {"enabled": True, "time": "07:00"},  # today's study sessions; deadlines
     "work": {"enabled": True, "time": "18:30"},      # appraisal prep, expiring leave, Friday "in its box"
     "quiet_hours": {"start": "22:00", "end": "07:00"},
+    # At most daily_max pushes a day (what you asked to be reminded of always gets through).
+    # Morning brief: the morning parts (health, people, learning) arrive together at
+    # brief_time as one notification instead of one each.
+    "limits": {"daily_max": 4, "morning_brief": True, "brief_time": "08:30"},
 }
+
+# Always pushed (counted, never held): reminders the person set, habit urge check-ins
+# (only useful at that moment) and the daily review time they chose.
+ALWAYS_KINDS = {"reminder", "habit_urge", "daily_review"}
+# Areas whose before-noon times the morning brief moves to brief_time.
+BRIEF_AREAS = ("health", "people", "learning")
 
 _HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
@@ -372,6 +382,69 @@ async def _plan_check(db, user: dict, settings: dict, now: datetime) -> Optional
     return None
 
 
+def with_brief(settings: dict) -> dict:
+    """Settings the area jobs run with: morning areas at brief_time when the brief is on."""
+    limits = settings["limits"]
+    if not limits.get("morning_brief"):
+        return settings
+    out = {k: dict(v) for k, v in settings.items()}
+    for area in BRIEF_AREAS:
+        t = out[area].get("time")
+        if t and hhmm_to_minute(t) < 12 * 60:
+            out[area]["time"] = limits["brief_time"]
+    return out
+
+
+def _brief_text(items: List[dict]) -> str:
+    lines = [n["title"] for n in items[:3]]
+    if len(items) > 3:
+        lines.append(f"and {len(items) - 3} more")
+    return " · ".join(lines)
+
+
+async def _dispatch(db, user: dict, settings: dict, due: List[dict], now: datetime) -> List[dict]:
+    """Push what's due within the daily limit; several at once go out as one brief.
+
+    Everything stays in the in-app feed either way; held ones are just not pushed."""
+    if not due:
+        return []
+    local = now.astimezone(_tz(user.get("timezone")))
+    today = local.date().isoformat()
+    cap = int(settings["limits"].get("daily_max") or 4)
+    pushed = await db.nudges.count_documents({"user_id": user["id"], "pushed_on": today})
+
+    async def push(n: dict) -> None:
+        nonlocal pushed
+        await db.nudges.update_one({"id": n["id"]}, {"$set": {"pushed_on": today}})
+        pushed += 1
+        await _deliver(db, n)
+
+    out = []
+    for n in [n for n in due if n["kind"] in ALWAYS_KINDS]:
+        await push(n)
+        out.append(n)
+    rest = [n for n in due if n["kind"] not in ALWAYS_KINDS]
+    if not rest:
+        return out
+    if pushed >= cap:
+        for n in rest:
+            await db.nudges.update_one({"id": n["id"]}, {"$set": {"status": "held"}})
+        logger.info("nudges: daily limit reached for user %s; %d kept in the feed only", user["id"], len(rest))
+        return out
+    if len(rest) == 1:
+        await push(rest[0])
+        return out + rest
+    title = "Your morning from Hymn" if local.hour < 12 else "From Hymn"
+    brief = await _claim(db, user["id"], "brief", f"brief:{today}:{local.strftime('%H:%M')}", title,
+                         _brief_text(rest), {"screen": "nudges", "items": [n["id"] for n in rest]}, now)
+    if brief is None:
+        return out
+    for n in rest:
+        await db.nudges.update_one({"id": n["id"]}, {"$set": {"status": "in_brief", "brief_id": brief["id"]}})
+    await push(brief)
+    return out + rest
+
+
 async def run_due_nudges(db, now: Optional[datetime] = None) -> List[dict]:
     """One scheduler tick: create and deliver every nudge that is due."""
     now = now or _now()
@@ -380,7 +453,7 @@ async def run_due_nudges(db, now: Optional[datetime] = None) -> List[dict]:
     for user in users:
         try:
             stored = await db.nudge_settings.find_one({"user_id": user["id"]}, {"_id": 0})
-            settings = merge_settings(stored)
+            settings = with_brief(merge_settings(stored))
             due = await _reminders(db, user, settings, now)
             for job in (_daily_review, _weekly_patterns, _plan_check):
                 nudge = await job(db, user, settings, now)
@@ -394,9 +467,7 @@ async def run_due_nudges(db, now: Optional[datetime] = None) -> List[dict]:
             due.extend(await learning_nudges(db, user, settings, now))
             from work import work_nudges
             due.extend(await work_nudges(db, user, settings, now))
-            for nudge in due:
-                await _deliver(db, nudge)
-            sent.extend(due)
+            sent.extend(await _dispatch(db, user, settings, due, now))
         except Exception:  # one user's failure must not stop the others
             logger.exception("nudges: tick failed for user %s", user.get("id"))
     return sent
@@ -445,6 +516,12 @@ class QuietHours(BaseModel):
     end: Optional[str] = None
 
 
+class LimitSettings(BaseModel):
+    daily_max: Optional[int] = Field(default=None, ge=1, le=20)
+    morning_brief: Optional[bool] = None
+    brief_time: Optional[str] = None
+
+
 class SettingsUpdate(BaseModel):
     daily_review: Optional[DailyReviewSettings] = None
     weekly_patterns: Optional[WeeklySettings] = None
@@ -454,6 +531,7 @@ class SettingsUpdate(BaseModel):
     learning: Optional[HealthSettings] = None
     work: Optional[HealthSettings] = None
     quiet_hours: Optional[QuietHours] = None
+    limits: Optional[LimitSettings] = None
     timezone: Optional[str] = None
 
 
@@ -483,12 +561,12 @@ async def update_settings(body: SettingsUpdate, current_user: dict = Depends(get
     db = get_db()
     updates: dict = {}
     for section in ("daily_review", "weekly_patterns", "reminders", "health", "people", "learning", "work",
-                    "quiet_hours"):
+                    "quiet_hours", "limits"):
         values = getattr(body, section)
         if values is None:
             continue
         for field, value in values.model_dump(exclude_none=True).items():
-            if field in ("time", "start", "end") and not _HHMM.match(value):
+            if field in ("time", "start", "end", "brief_time") and not _HHMM.match(value):
                 raise HTTPException(status_code=400, detail=f"{section}.{field} must be HH:MM")
             updates[f"{section}.{field}"] = value
     user = current_user
@@ -531,7 +609,7 @@ async def unregister_device(token: str = Query(min_length=10),
 async def list_nudges(limit: int = Query(default=20, ge=1, le=100),
                       current_user: dict = Depends(get_current_user)):
     return await get_db().nudges.find(
-        {"user_id": current_user["id"]}, {"_id": 0},
+        {"user_id": current_user["id"], "kind": {"$ne": "brief"}}, {"_id": 0},
     ).sort("created_at", -1).limit(limit).to_list(length=limit)
 
 

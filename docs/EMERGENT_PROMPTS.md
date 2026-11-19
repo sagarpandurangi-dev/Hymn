@@ -323,6 +323,7 @@ Build Work (Life tab → Work): work pays for the life you want and grows you, w
 5. Payslips (salaried, Premium; 403 → "Premium feature"): upload PDF (optional password) or photo → POST /api/work/payslips/read {file_base64, media_type, password}. Show earnings and deductions (each with its kind, editable), gross, net, employer PF, problems[] in amber. "Save" → POST /api/work/payslips {role_id, month, earnings, deductions, gross, net, employer_pf, pf_account_id (the EPF account if any)} → show recorded_in_money_book. 400 shows what doesn't add up; 409 "That month is already saved". List: GET /api/work/payslips.
 6. Life tab → Work card line: the week's summary.
 7. Finance fix: the "Pending account → Assign" shortcut should open the events list filtered with GET /api/finance/events?lifecycle_status=pending_account_assignment.
+8. Me → Notifications: add "At most [N] notifications a day" (limits.daily_max, 1–20) and a "Morning summary" switch with its time (limits.morning_brief, limits.brief_time) through PUT /api/nudges/settings {"limits": {...}}. A push with data.screen "nudges" opens the notifications feed.
 
 Tell me what you changed.
 ```
