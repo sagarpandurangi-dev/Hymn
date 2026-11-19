@@ -324,6 +324,7 @@ Build Work (Life tab → Work): work pays for the life you want and grows you, w
 6. Life tab → Work card line: the week's summary.
 7. Finance fix: the "Pending account → Assign" shortcut should open the events list filtered with GET /api/finance/events?lifecycle_status=pending_account_assignment.
 8. Me → Notifications: add "At most [N] notifications a day" (limits.daily_max, 1–20) and a "Morning summary" switch with its time (limits.morning_brief, limits.brief_time) through PUT /api/nudges/settings {"limits": {...}}. A push with data.screen "nudges" opens the notifications feed.
+9. Me → WhatsApp (show only when GET /api/whatsapp returns available: true): if not linked, the consent_text with a checkbox and "Connect WhatsApp" → POST /api/whatsapp/link {"consent": true} → open the returned url (it opens WhatsApp with the code typed in; the person taps send). If linked: the number, a "Pause messages" switch (POST /api/whatsapp/pause {"paused": true|false}) and "Disconnect" (DELETE /api/whatsapp/link).
 
 Tell me what you changed.
 ```
