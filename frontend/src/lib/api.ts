@@ -840,6 +840,20 @@ export const api = {
   getHealthDashboard: () => request<any>("/health/dashboard", { auth: true }),
   getHealthSuggestions: () => request<any>("/health/suggestions", { auth: true }),
   deleteAllHealthData: () => request<any>("/health/all", { method: "DELETE", auth: true }),
+  getCheckups: () => request<any>("/health/checkups", { auth: true }),
+  markCheckupDone: (key: string, date: string) =>
+    request<any>(`/health/checkups/${encodeURIComponent(key)}/done`, { method: "POST", body: { date }, auth: true }),
+  readLabReport: (file_base64: string, media_type: string) =>
+    request<any>("/health/labs/read", { method: "POST", body: { file_base64, media_type }, auth: true }),
+  saveLabReport: (payload: { report_date: string; lab?: string | null; results: any[] }) =>
+    request<any>("/health/labs", { method: "POST", body: payload, auth: true }),
+  listLabReports: () => request<any[]>("/health/labs", { auth: true }),
+  deleteLabReport: (id: string) => request<any>(`/health/labs/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  getHealthProgress: () => request<any>("/health/progress", { auth: true }),
+  getDoctorSummary: (includePrivate: boolean) =>
+    request<any>(`/health/doctor-summary${includePrivate ? "?include_private=true" : ""}`, { auth: true }),
+  getDoctorSummaryText: (includePrivate: boolean) =>
+    request<string>(`/health/doctor-summary?format=text${includePrivate ? "&include_private=true" : ""}`, { auth: true }),
   // -- New planner (plan chat + life plans) --
   planChat: (payload: { message: string; chat_id?: string }) =>
     request<any>("/plan-chat", { method: "POST", body: payload, auth: true }),

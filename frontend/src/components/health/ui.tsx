@@ -36,6 +36,13 @@ export const humanize = (code: string) => {
   return s.charAt(0).toUpperCase() + s.slice(1);
 };
 
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export const niceDay = (iso?: string | null) => {
+  if (!iso) return "";
+  const [y, m, d] = String(iso).slice(0, 10).split("-").map(Number);
+  return y && m && d ? `${d} ${MONTHS_SHORT[m - 1]} ${y}` : String(iso);
+};
+
 const PHONE = /(\b112\b|\b14416\b|\b1800[\d-]{6,}\b|\b\d{10}\b)/g;
 
 export function PhoneText({ text, style }: { text: string; style?: any }) {

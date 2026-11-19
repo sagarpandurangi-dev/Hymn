@@ -117,6 +117,20 @@ export default function HealthHome() {
                 <Ionicons name="leaf-outline" size={18} color={colors.onSurface} />
                 <Text style={hs.secondaryText}>Habits to change</Text>
               </Pressable>
+              <View style={hs.card} testID="health-more">
+                {[
+                  ["medkit-outline", "Check-ups", "/life/health/checkups", "health-open-checkups"],
+                  ["flask-outline", "Lab reports", "/life/health/labs", "health-open-labs"],
+                  ["trending-up-outline", "90-day report", "/life/health/progress", "health-open-progress"],
+                  ["document-text-outline", "For my doctor", "/life/health/doctor", "health-open-doctor"],
+                ].map(([icon, label, path, tid]) => (
+                  <Pressable key={path} style={{ flexDirection: "row", alignItems: "center", gap: spacing.md, minHeight: 48 }} onPress={() => router.push(path as any)} testID={tid}>
+                    <Ionicons name={icon as any} size={20} color={colors.brandPrimary} />
+                    <Text style={[hs.body, { flex: 1, color: colors.onSurface, fontWeight: "600" }]}>{label}</Text>
+                    <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+                  </Pressable>
+                ))}
+              </View>
 
               {seeDoctor.length > 0 ? (
                 <View style={hs.card} testID="health-see-doctor">

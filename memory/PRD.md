@@ -103,3 +103,7 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 ## Habits to change (in Health) — frontend
 - app/life/health/habits/{index, new, [id]}.tsx; src/lib/habits.ts; PhoneText exported from src/components/health/ui.tsx (tappable 112/14416/1800-… numbers).
 - No streaks: progress shown as "N of the last M days on track". Dream fund button only when cost_per_unit > 0 and serves_plan_id.
+
+## Health extras — frontend
+- app/life/health/{checkups, labs, progress, doctor}.tsx, linked from Health home "more" card. niceDay() in src/components/health/ui.tsx.
+- Doctor questions saved by GET profile → PUT full profile with new doctor_questions (max 10). Share as text uses RN Share with ?format=text.
