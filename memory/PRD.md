@@ -84,3 +84,8 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 ## Family net worth — frontend
 - Finance tab > Statements > "Family net worth" → app/finance/family/{index,add-item,net-worth}.tsx; FamilyMemberSheet; src/lib/family.ts.
 - No server list of entries: entries added on this phone are kept in AsyncStorage (hymn.family.items.<familyId>) for deletion. My member id remembered on accept (hymn.family.me.<familyId>), else owner→"self" row, else name match.
+
+## New planner — frontend
+- app/planner/{index (chat), plans (My plans), [id] (plan + Drop)}.tsx; src/components/planner/{PlanCard, PlanPager, SimpleMarkdown}.tsx; api.ts planChat/getPlanChat/listLifePlans/getLifePlan/acceptLifePlan/deleteLifePlan/bookLifePlanSlot/answerLifePlanRequirement.
+- Last chat_id kept in AsyncStorage hymn.planner.chatId (history restored on this device). Old planner = /(tabs)/planning-space, reachable from Me/Settings "Old planner".
+- Life tab Plans card → /planner with "N plans"; welcome "planner", setup card "plan-chat" and push "plans" now go to the new planner.

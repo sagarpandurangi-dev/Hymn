@@ -84,7 +84,7 @@ export function openNudgeScreen(router: ReturnType<typeof useRouter>, data: unkn
 
   let path: string;
   if (screen === "inbox/review" || screen === "inbox/patterns") path = `/${screen}`;
-  else if (screen === "plans") path = `/(tabs)/planning-space${q({ plan_id: id("plan_id") })}`;
+  else if (screen === "plans") path = id("plan_id") ? `/planner/${id("plan_id")}` : "/planner";
   else if (screen === "health") path = "/life/health";
   else if (screen.startsWith("health/")) path = `/life/health${q({ section: screen.slice(7) })}`;
   else if (screen === "habits") path = `/life/health${q({ section: "habits", habit_id: id("habit_id") })}`;

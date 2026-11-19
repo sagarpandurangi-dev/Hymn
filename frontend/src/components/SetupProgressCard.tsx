@@ -15,7 +15,7 @@ const SCREEN_ROUTES: Record<string, string> = {
   "portfolio/setup": "/portfolio",
   work: "/life/work",
   people: "/life/family",
-  "plan-chat": "/(tabs)/planning-space",
+  "plan-chat": "/planner",
   health: "/life/health",
   "inbox/dump": "/inbox/dump",
 };

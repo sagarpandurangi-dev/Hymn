@@ -60,7 +60,7 @@ export default function WelcomeScreen() {
       await api.updatePortfolioSetupStatus(currency ? { reporting_currency: currency, completed: true } : { completed: true });
       await clearWelcome();
       await refreshUser();
-      router.replace(dest === "planner" ? "/(tabs)/planning-space" : "/(tabs)/today");
+      router.replace(dest === "planner" ? "/planner" : "/(tabs)/today");
     } catch (e) {
       finishingRef.current = false;
       throw e;

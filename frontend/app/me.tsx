@@ -164,6 +164,14 @@ export default function MeScreen() {
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
           </Pressable>
+
+          <Pressable style={styles.row} onPress={() => router.push("/(tabs)/planning-space" as any)} testID="me-open-old-planner">
+            <View style={styles.rowLeft}>
+              <Ionicons name="time-outline" size={20} color={colors.onSurface} />
+              <Text style={styles.rowText}>Old planner</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+          </Pressable>
         </View>
 
         <AccountDataSection />

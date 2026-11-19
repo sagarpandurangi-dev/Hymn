@@ -6,6 +6,7 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
+import { api } from "@/src/lib/api";
 
 export const FOCUS_AREAS_KEY = "hymn.focusAreas";
 
@@ -22,7 +23,7 @@ const AREAS: Area[] = [
   { key: "family", name: "Family & Relationships", icon: "people-outline", path: "/life/family", line: "" },
   { key: "learning", name: "Learning", icon: "school-outline", path: "/(tabs)/knowledge", line: "" },
   { key: "work", name: "Work", icon: "briefcase-outline", path: "/life/work", line: "" },
-  { key: "plans", name: "Plans", icon: "map-outline", path: "/(tabs)/planning-space", line: "" },
+  { key: "plans", name: "Plans", icon: "map-outline", path: "/planner", line: "" },
 ];
 
 /** Saved focus areas come first (in their saved order), then the rest in default order. */
@@ -34,10 +35,14 @@ function orderAreas(focus: string[]): Area[] {
 export default function LifeScreen() {
   const router = useRouter();
   const [areas, setAreas] = useState<Area[]>(AREAS);
+  const [planCount, setPlanCount] = useState<number | null>(null);
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
+      api.listLifePlans()
+        .then((res: any) => { if (alive) setPlanCount((Array.isArray(res) ? res : res?.items ?? res?.plans ?? []).length); })
+        .catch(() => { if (alive) setPlanCount(null); });
       AsyncStorage.getItem(FOCUS_AREAS_KEY)
         .then((raw) => {
           const parsed = raw ? JSON.parse(raw) : [];
@@ -53,7 +58,9 @@ export default function LifeScreen() {
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.header}>Life</Text>
         <View style={styles.list}>
-          {areas.map((a) => (
+          {areas.map((a) => {
+            const line = a.key === "plans" && planCount !== null ? `${planCount} ${planCount === 1 ? "plan" : "plans"}` : a.line;
+            return (
             <Pressable
               key={a.key}
               onPress={() => router.push(a.path as any)}
@@ -66,11 +73,12 @@ export default function LifeScreen() {
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.name}>{a.name}</Text>
-                {a.line ? <Text style={styles.line} numberOfLines={1}>{a.line}</Text> : null}
+                {line ? <Text style={styles.line} numberOfLines={1} testID={`life-card-${a.key}-line`}>{line}</Text> : null}
               </View>
               <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
             </Pressable>
-          ))}
+            );
+          })}
         </View>
       </ScrollView>
     </SafeAreaView>

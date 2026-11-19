@@ -808,6 +808,18 @@ export const api = {
   casApply: (id: string, payload: { links: Record<string, string>; replaces: string[] }) =>
     request<any>(`/investments/cas/${encodeURIComponent(id)}/apply`, { method: "POST", body: payload, auth: true }),
   casList: () => request<any>("/investments/cas", { auth: true }),
+  // -- New planner (plan chat + life plans) --
+  planChat: (payload: { message: string; chat_id?: string }) =>
+    request<any>("/plan-chat", { method: "POST", body: payload, auth: true }),
+  getPlanChat: (chatId: string) => request<any>(`/plan-chat/${encodeURIComponent(chatId)}`, { auth: true }),
+  listLifePlans: () => request<any>("/life-plans", { auth: true }),
+  getLifePlan: (id: string) => request<any>(`/life-plans/${encodeURIComponent(id)}`, { auth: true }),
+  acceptLifePlan: (id: string) => request<any>(`/life-plans/${encodeURIComponent(id)}/accept`, { method: "POST", body: {}, auth: true }),
+  deleteLifePlan: (id: string) => request<any>(`/life-plans/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  bookLifePlanSlot: (id: string, payload: { requirement_id: string; date: string; start: string; minutes: number }) =>
+    request<any>(`/life-plans/${encodeURIComponent(id)}/book`, { method: "POST", body: payload, auth: true }),
+  answerLifePlanRequirement: (id: string, rid: string, answer: "yes" | "no" | "unknown") =>
+    request<any>(`/life-plans/${encodeURIComponent(id)}/requirements/${encodeURIComponent(rid)}/answer`, { method: "POST", body: { answer }, auth: true }),
   // -- Family net worth --
   getFamily: () => request<any>("/family", { auth: true }),
   createFamily: () => request<any>("/family", { method: "POST", body: {}, auth: true }),
