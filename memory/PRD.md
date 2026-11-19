@@ -94,3 +94,8 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 - app/life/health/{index (consent → profile form, or dashboard + suggestions), daily, domain?key=, settings, delete}.tsx; src/components/health/{ui (header, RedFlags w/ tappable 112/14416, status helpers), HealthProfileForm}.tsx; api.ts health methods.
 - PUT profile always sends every field. Daily log sends only filled fields; stress faces are reversed (happy face = 1 low stress). No overall score anywhere. DraftNote when rules_reviewed === false.
 - Life tab Health line: "Set up" (no consent) or first suggestion's what.
+
+## Food (in Health) — frontend
+- app/life/health/food/{index (day view + delete meal), add (meal builder: search / photo / something else), my-foods (list, add, delete; ?prefill=<label JSON> from photo label)}.tsx; src/components/food/FoodBits.tsx (FoodSearch, AmountStepper).
+- upload.ts: takePhoto() added (camera, resized like pickImage); app.json cameraPermission text set. Camera permission: check → explain → ask → Open Settings when blocked.
+- Calories shown only when totals.calories present and the day has meals; portions first.

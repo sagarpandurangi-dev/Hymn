@@ -34,6 +34,22 @@ export async function pickImage(): Promise<PickedFile | null> {
   const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 1 });
   const asset = res.canceled ? null : res.assets?.[0];
   if (!asset) return null;
+  return shrinkToJpeg(asset);
+}
+
+/**
+ * Take a photo with the camera (caller handles the camera permission first),
+ * shrunk and returned as base64 like pickImage. Null if the user cancels.
+ */
+export async function takePhoto(): Promise<PickedFile | null> {
+  const res = await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 1 });
+  const asset = res.canceled ? null : res.assets?.[0];
+  if (!asset) return null;
+  return shrinkToJpeg(asset);
+}
+
+/** Shrink to at most 1024 px on the long side and save as JPEG (quality 0.7). */
+async function shrinkToJpeg(asset: { uri: string; width?: number; height?: number }): Promise<PickedFile> {
   let w = asset.width || 0;
   let h = asset.height || 0;
   if (!w || !h) {

@@ -50,7 +50,7 @@
         "expo-image-picker",
         {
           "photosPermission": "Attach photos from your library to Hymn",
-          "cameraPermission": false,
+          "cameraPermission": "Snap your plate to log meals quickly",
           "microphonePermission": false
         }
       ]

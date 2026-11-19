@@ -808,6 +808,17 @@ export const api = {
   casApply: (id: string, payload: { links: Record<string, string>; replaces: string[] }) =>
     request<any>(`/investments/cas/${encodeURIComponent(id)}/apply`, { method: "POST", body: payload, auth: true }),
   casList: () => request<any>("/investments/cas", { auth: true }),
+  // -- Food --
+  getFoodDay: (date: string) => request<any>(`/food/day?date=${encodeURIComponent(date)}`, { auth: true }),
+  searchFoods: (q: string) => request<any[]>(`/food/search?q=${encodeURIComponent(q)}`, { auth: true }),
+  readFoodPhoto: (image_base64: string, media_type: string) =>
+    request<any>("/food/photo", { method: "POST", body: { image_base64, media_type }, auth: true }),
+  saveMeal: (payload: { date: string; meal: string; outside: boolean; from_photo: boolean; items: ({ food_id: string; amount: number } | { name: string })[] }) =>
+    request<any>("/food/meals", { method: "POST", body: payload, auth: true }),
+  deleteMeal: (id: string) => request<any>(`/food/meals/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  listMyFoods: () => request<any[]>("/food/my-foods", { auth: true }),
+  addMyFood: (payload: Record<string, any>) => request<any>("/food/my-foods", { method: "POST", body: payload, auth: true }),
+  deleteMyFood: (id: string) => request<any>(`/food/my-foods/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
   // -- Health --
   getHealthProfile: () => request<any>("/health/profile", { auth: true }),
   saveHealthProfile: (profile: Record<string, any>) =>

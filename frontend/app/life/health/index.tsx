@@ -109,6 +109,10 @@ export default function HealthHome() {
               <Pressable style={hs.primary} onPress={() => router.push("/life/health/daily" as any)} testID="health-open-daily">
                 <Text style={hs.primaryText}>Log today · 30 seconds</Text>
               </Pressable>
+              <Pressable style={hs.secondary} onPress={() => router.push("/life/health/food" as any)} testID="health-open-food">
+                <Ionicons name="restaurant-outline" size={18} color={colors.onSurface} />
+                <Text style={hs.secondaryText}>Food</Text>
+              </Pressable>
 
               {seeDoctor.length > 0 ? (
                 <View style={hs.card} testID="health-see-doctor">
