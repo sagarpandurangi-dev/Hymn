@@ -808,6 +808,16 @@ export const api = {
   casApply: (id: string, payload: { links: Record<string, string>; replaces: string[] }) =>
     request<any>(`/investments/cas/${encodeURIComponent(id)}/apply`, { method: "POST", body: payload, auth: true }),
   casList: () => request<any>("/investments/cas", { auth: true }),
+  // -- Health --
+  getHealthProfile: () => request<any>("/health/profile", { auth: true }),
+  saveHealthProfile: (profile: Record<string, any>) =>
+    request<any>("/health/profile", { method: "PUT", body: profile, auth: true }),
+  getHealthOptions: () => request<any>("/health/options", { auth: true }),
+  logHealthDaily: (payload: Record<string, any>) =>
+    request<any>("/health/daily", { method: "POST", body: payload, auth: true }),
+  getHealthDashboard: () => request<any>("/health/dashboard", { auth: true }),
+  getHealthSuggestions: () => request<any>("/health/suggestions", { auth: true }),
+  deleteAllHealthData: () => request<any>("/health/all", { method: "DELETE", auth: true }),
   // -- New planner (plan chat + life plans) --
   planChat: (payload: { message: string; chat_id?: string }) =>
     request<any>("/plan-chat", { method: "POST", body: payload, auth: true }),

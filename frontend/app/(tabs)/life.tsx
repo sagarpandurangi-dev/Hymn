@@ -36,10 +36,19 @@ export default function LifeScreen() {
   const router = useRouter();
   const [areas, setAreas] = useState<Area[]>(AREAS);
   const [planCount, setPlanCount] = useState<number | null>(null);
+  const [healthLine, setHealthLine] = useState("");
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
+      api.getHealthProfile()
+        .then(async (p: any) => {
+          if (!p?.consent) { if (alive) setHealthLine("Set up"); return; }
+          const s: any = await api.getHealthSuggestions().catch(() => []);
+          const list = Array.isArray(s) ? s : s?.items ?? s?.suggestions ?? [];
+          if (alive) setHealthLine(list[0]?.what ?? "");
+        })
+        .catch(() => { if (alive) setHealthLine(""); });
       api.listLifePlans()
         .then((res: any) => { if (alive) setPlanCount((Array.isArray(res) ? res : res?.items ?? res?.plans ?? []).length); })
         .catch(() => { if (alive) setPlanCount(null); });
@@ -59,7 +68,7 @@ export default function LifeScreen() {
         <Text style={styles.header}>Life</Text>
         <View style={styles.list}>
           {areas.map((a) => {
-            const line = a.key === "plans" && planCount !== null ? `${planCount} ${planCount === 1 ? "plan" : "plans"}` : a.line;
+            const line = a.key === "plans" && planCount !== null ? `${planCount} ${planCount === 1 ? "plan" : "plans"}` : a.key === "health" ? healthLine : a.line;
             return (
             <Pressable
               key={a.key}

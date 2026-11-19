@@ -89,3 +89,8 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 - app/planner/{index (chat), plans (My plans), [id] (plan + Drop)}.tsx; src/components/planner/{PlanCard, PlanPager, SimpleMarkdown}.tsx; api.ts planChat/getPlanChat/listLifePlans/getLifePlan/acceptLifePlan/deleteLifePlan/bookLifePlanSlot/answerLifePlanRequirement.
 - Last chat_id kept in AsyncStorage hymn.planner.chatId (history restored on this device). Old planner = /(tabs)/planning-space, reachable from Me/Settings "Old planner".
 - Life tab Plans card → /planner with "N plans"; welcome "planner", setup card "plan-chat" and push "plans" now go to the new planner.
+
+## Health — frontend
+- app/life/health/{index (consent → profile form, or dashboard + suggestions), daily, domain?key=, settings, delete}.tsx; src/components/health/{ui (header, RedFlags w/ tappable 112/14416, status helpers), HealthProfileForm}.tsx; api.ts health methods.
+- PUT profile always sends every field. Daily log sends only filled fields; stress faces are reversed (happy face = 1 low stress). No overall score anywhere. DraftNote when rules_reviewed === false.
+- Life tab Health line: "Set up" (no consent) or first suggestion's what.
