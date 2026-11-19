@@ -67,3 +67,7 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 - Finance tab "Statements" section → /finance/reports/net-worth (side-by-side ≥720px, stacked on phones), /finance/reports/income-expenditure (month picker, 3 columns, expand groups → categories → /finance/reports/entries), /finance/reports/cash-flow (sections, net change, closing, ✓ Adds up).
 - Helpers in src/components/finance/ReportBits.tsx read group fields defensively (label/name, amount/total, lines/categories). Actual group shapes not yet seen with real data.
 - Report lines: multi-column lines put the label on its own row (phone-readable); negatives shown in brackets; Documents row renamed "Bank statements".
+
+## Recent activity (ledger rows) + CAS import (Jun 2026)
+- Finance Recent activity → RecentActivityList: transfers "↔" grey no sign; detail "ledger" opens read-only sheet (kind labels), "event" opens event screen.
+- /finance/investments/cas (Premium; 403 → "Premium feature"): how-to text, pickPdf + password → POST /investments/cas/preview, preview card (CasPreviewCard: source, period, investor, total, lines w/ action tags, check warnings, expandable stock/bond/nps items), CasAccountLinker for your_other_investment_accounts → links/replaces, apply → "Added N, updated N" + missing, Past statements (GET /investments/cas). Field names read defensively (shape unverified — QA user is not Premium).

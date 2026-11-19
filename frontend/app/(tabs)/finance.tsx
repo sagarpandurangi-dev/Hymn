@@ -14,6 +14,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import { api, PlannedItem } from "@/src/lib/api";
 import PlannedItemForm from "@/src/components/finance/PlannedItemForm";
 import PlannedRow from "@/src/components/finance/PlannedRow";
+import RecentActivityList from "@/src/components/finance/RecentActivityList";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
 import {
   FoldAmount,
@@ -27,7 +28,6 @@ import {
 import { financeColors, financeSpace, financeType } from "@/src/lib/finance/theme";
 import {
   currentMonthIso,
-  dateLabel,
   formatMoney,
   monthLabel,
 } from "@/src/lib/finance/format";
@@ -388,6 +388,7 @@ export default function FinanceScreen() {
             <FoldRow first label="Statement of Net Worth" meta="What you own and owe, side by side" onPress={() => router.push("/finance/reports/net-worth" as any)} chevron testID="finance-report-net-worth" />
             <FoldRow label="Income & Expenditure" meta="This month, last month and year to date" onPress={() => router.push("/finance/reports/income-expenditure" as any)} chevron testID="finance-report-ie" />
             <FoldRow label="Cash Flow" meta="Opening cash to closing cash" onPress={() => router.push("/finance/reports/cash-flow" as any)} chevron testID="finance-report-cash-flow" />
+            <FoldRow label="Add investments from a statement" meta="Mutual fund or demat statement (PDF) · Premium" onPress={() => router.push("/finance/investments/cas" as any)} chevron testID="finance-cas-import" />
           </FoldCard>
         </View>
 
@@ -429,25 +430,7 @@ export default function FinanceScreen() {
             </FoldCard>
           ) : (
             <FoldCard>
-              {recentEvents.slice(0, 8).map((e: any, idx: number) => (
-                <FoldRow
-                  key={e.id}
-                  first={idx === 0}
-                  label={e.description || "(no description)"}
-                  meta={`${dateLabel(e.event_date)} · ${e.source}`}
-                  right={
-                    <FoldAmount
-                      currency={e.currency}
-                      value={formatMoney(e.amount)}
-                      sign={e.direction === "outflow" ? "-" : "+"}
-                      tone={e.direction === "inflow" ? "positive" : "ink"}
-                    />
-                  }
-                  onPress={() => router.push(`/finance/events/${e.id}`)}
-                  chevron
-                  testID={`event-${e.id}`}
-                />
-              ))}
+              <RecentActivityList items={recentEvents.slice(0, 8)} />
             </FoldCard>
           )}
         </View>

@@ -801,6 +801,12 @@ export const api = {
     request<any>("/people", { method: "POST", body: payload, auth: true }),
   getTimeReport: () => request<any>("/reports/time", { auth: true }),
   getAccountSetup: () => request<AccountSetup>("/account/setup", { auth: true }),
+  // -- Investments: CAS / demat statement import (Premium) --
+  casPreview: (file_base64: string, password: string) =>
+    request<any>("/investments/cas/preview", { method: "POST", body: { file_base64, password }, auth: true }),
+  casApply: (id: string, payload: { links: Record<string, string>; replaces: string[] }) =>
+    request<any>(`/investments/cas/${encodeURIComponent(id)}/apply`, { method: "POST", body: payload, auth: true }),
+  casList: () => request<any>("/investments/cas", { auth: true }),
   // -- Statements (reports) --
   getNetWorthReport: () => request<any>("/reports/net-worth", { auth: true }),
   getIncomeExpenditureReport: (month: string) =>
