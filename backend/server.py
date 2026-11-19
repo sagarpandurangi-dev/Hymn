@@ -2932,6 +2932,7 @@ from family import family_router, ensure_family_indexes  # noqa: E402
 from life_objects import life_objects_router, ensure_life_object_indexes  # noqa: E402
 from hymn_ids import hymn_id_router, ensure_hymn_id_indexes, ensure_hymn_id  # noqa: E402
 from planned_money import planned_money_router, ensure_planned_money_indexes  # noqa: E402
+from whatsapp import whatsapp_router, ensure_whatsapp_indexes  # noqa: E402
 import ledger_conversion  # noqa: F401,E402  (registers conversion routes on ledger_router)
 from statements import statements_router, ensure_statement_indexes  # noqa: E402
 from statement_matching import ensure_matching_indexes  # noqa: E402  (registers matching routes)
@@ -2969,6 +2970,7 @@ api_router.include_router(life_objects_router)
 api_router.include_router(hymn_id_router)
 api_router.include_router(planned_money_router)
 api_router.include_router(statements_router)
+api_router.include_router(whatsapp_router)
 app.include_router(api_router)
 
 # Auth is a bearer header, never a cookie, so credentialed CORS is not
@@ -3057,6 +3059,7 @@ async def startup_indexes():
     await ensure_planned_money_indexes(db)
     await ensure_statement_indexes(db)
     await ensure_matching_indexes(db)
+    await ensure_whatsapp_indexes(db)
     try:
         touched = await backfill_fc_into_allocations(db)
         if touched:

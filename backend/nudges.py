@@ -479,6 +479,11 @@ async def nudge_loop() -> None:
             await run_due_nudges(get_db())
         except Exception:
             logger.exception("nudges: tick failed")
+        try:
+            from whatsapp import whatsapp_tick
+            await whatsapp_tick(get_db())
+        except Exception:
+            logger.exception("whatsapp: tick failed")
         await asyncio.sleep(TICK_SECONDS)
 
 
