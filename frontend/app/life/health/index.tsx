@@ -113,6 +113,10 @@ export default function HealthHome() {
                 <Ionicons name="restaurant-outline" size={18} color={colors.onSurface} />
                 <Text style={hs.secondaryText}>Food</Text>
               </Pressable>
+              <Pressable style={hs.secondary} onPress={() => router.push("/life/health/habits" as any)} testID="health-open-habits">
+                <Ionicons name="leaf-outline" size={18} color={colors.onSurface} />
+                <Text style={hs.secondaryText}>Habits to change</Text>
+              </Pressable>
 
               {seeDoctor.length > 0 ? (
                 <View style={hs.card} testID="health-see-doctor">

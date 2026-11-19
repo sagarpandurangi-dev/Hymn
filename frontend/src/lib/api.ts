@@ -808,6 +808,17 @@ export const api = {
   casApply: (id: string, payload: { links: Record<string, string>; replaces: string[] }) =>
     request<any>(`/investments/cas/${encodeURIComponent(id)}/apply`, { method: "POST", body: payload, auth: true }),
   casList: () => request<any>("/investments/cas", { auth: true }),
+  // -- Habits to change --
+  listHabits: () => request<any[]>("/habits", { auth: true }),
+  getHabitKinds: () => request<Record<string, { label: string; goals: string[]; unit: string }>>("/habits/kinds", { auth: true }),
+  createHabit: (payload: Record<string, any>) => request<any>("/habits", { method: "POST", body: payload, auth: true }),
+  getHabit: (id: string) => request<any>(`/habits/${encodeURIComponent(id)}`, { auth: true }),
+  habitUrge: (id: string, payload: { date: string; trigger?: string }) =>
+    request<any>(`/habits/${encodeURIComponent(id)}/urge`, { method: "POST", body: payload, auth: true }),
+  logHabit: (id: string, payload: { date: string; amount: number; triggers: string[] }) =>
+    request<any>(`/habits/${encodeURIComponent(id)}/log`, { method: "POST", body: payload, auth: true }),
+  habitDreamFund: (id: string) => request<any>(`/habits/${encodeURIComponent(id)}/dream-fund`, { method: "POST", body: {}, auth: true }),
+  deleteHabit: (id: string) => request<any>(`/habits/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
   // -- Food --
   getFoodDay: (date: string) => request<any>(`/food/day?date=${encodeURIComponent(date)}`, { auth: true }),
   searchFoods: (q: string) => request<any[]>(`/food/search?q=${encodeURIComponent(q)}`, { auth: true }),

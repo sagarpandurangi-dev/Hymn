@@ -38,10 +38,10 @@ export const humanize = (code: string) => {
 
 const PHONE = /(\b112\b|\b14416\b|\b1800[\d-]{6,}\b|\b\d{10}\b)/g;
 
-function ActionText({ text }: { text: string }) {
+export function PhoneText({ text, style }: { text: string; style?: any }) {
   const parts = String(text || "").split(PHONE);
   return (
-    <Text style={hs.flagAction}>
+    <Text style={style ?? hs.flagAction}>
       {parts.map((p, i) =>
         p.match(PHONE) ? (
           <Text key={i} style={hs.phone} onPress={() => Linking.openURL(`tel:${p.replace(/-/g, "")}`)} accessibilityRole="link" testID={`red-flag-call-${p}`}>
@@ -64,7 +64,7 @@ export function RedFlags({ flags }: { flags: any[] }) {
             <Ionicons name="alert-circle" size={26} color={colors.error} />
             <Text style={hs.flagWhat}>{f.what}</Text>
           </View>
-          <ActionText text={f.action} />
+          <PhoneText text={f.action} />
           {String(f.action || "").match(PHONE) ? null : (
             <Pressable style={hs.callBtn} onPress={() => Linking.openURL("tel:112")} testID={`red-flag-call-default-${i}`}>
               <Ionicons name="call" size={18} color={colors.onBrandPrimary} />

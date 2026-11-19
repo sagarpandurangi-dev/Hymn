@@ -99,3 +99,7 @@ Hymn is an Android/mobile app foundation that helps a person remember what they 
 - app/life/health/food/{index (day view + delete meal), add (meal builder: search / photo / something else), my-foods (list, add, delete; ?prefill=<label JSON> from photo label)}.tsx; src/components/food/FoodBits.tsx (FoodSearch, AmountStepper).
 - upload.ts: takePhoto() added (camera, resized like pickImage); app.json cameraPermission text set. Camera permission: check → explain → ask → Open Settings when blocked.
 - Calories shown only when totals.calories present and the day has meals; portions first.
+
+## Habits to change (in Health) — frontend
+- app/life/health/habits/{index, new, [id]}.tsx; src/lib/habits.ts; PhoneText exported from src/components/health/ui.tsx (tappable 112/14416/1800-… numbers).
+- No streaks: progress shown as "N of the last M days on track". Dream fund button only when cost_per_unit > 0 and serves_plan_id.
