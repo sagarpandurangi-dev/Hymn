@@ -38,6 +38,8 @@ def _signup(client, db, email, profile=None):
     h = {"Authorization": f"Bearer {b['access_token']}"}
     if profile is not None:
         client.put("/api/health/profile", headers=h, json={"consent": True, **profile})
+    # These tests check each area's own timing; the morning brief and daily limit are tested in test_nudge_limits.
+    client.put("/api/nudges/settings", headers=h, json={"limits": {"morning_brief": False, "daily_max": 20}})
     return b["user"]["id"], h
 
 

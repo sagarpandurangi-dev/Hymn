@@ -16,6 +16,8 @@ import {
   MONEY_COMMITMENT_PRESETS,
   TIME_CATEGORY_LABEL,
   formatMoney,
+  isCrossMidnight,
+  nextDay,
   localMondayISO,
   localMonthISO,
   splitCrossMidnight,
@@ -154,6 +156,18 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
     return acc;
   }, [items]);
 
+  // Overnight blocks (end earlier than start) spill into the next morning.
+  const carryInByDay: Record<DayOfWeek, any[]> = useMemo(() => {
+    const acc: Record<DayOfWeek, any[]> = {
+      monday: [], tuesday: [], wednesday: [], thursday: [], friday: [], saturday: [], sunday: [],
+    };
+    items.forEach((b) => {
+      const key = b.day_of_week as DayOfWeek;
+      if (acc[key] && b.end_time !== "00:00" && isCrossMidnight(b.start_time, b.end_time)) acc[nextDay(key)].push(b);
+    });
+    return acc;
+  }, [items]);
+
   const draftsByDay: Record<DayOfWeek, TimeBlockDraft[]> = useMemo(() => {
     const acc = {} as Record<DayOfWeek, TimeBlockDraft[]>;
     (DAYS_OF_WEEK as readonly DayOfWeek[]).forEach((d) => {
@@ -200,9 +214,8 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
         flexibility: payload.flexibility,
       });
     } else {
-      // Creating: one entry per record. Cross-midnight blocks emit 2
-      // entries per selected day (day D 22:30 → 24:00 AND day D+1 00:00
-      // → 06:30). Multi-day selection emits N entries per day.
+      // Creating: one record per selected day. Overnight blocks are saved
+      // as a single record with their real times (e.g. 23:00 → 07:00).
       await Promise.all(
         payload.entries.map((p) =>
           api.createTimeCommitment({
@@ -368,8 +381,13 @@ export function WeeklyTimePortfolio({ onChanged }: { onChanged?: () => void }) {
                 </Pressable>
               </View>
             </View>
+            {carryInByDay[day].map((b) => (
+              <Text key={`carry-${b.id}`} style={styles.empty} testID={`block-carry-${b.id}`}>
+                {b.title} continues until {b.end_time} (from {DAY_LABELS[b.day_of_week as DayOfWeek]} night)
+              </Text>
+            ))}
             {!hasBlocks ? (
-              <Text style={styles.empty}>No blocks yet.</Text>
+              carryInByDay[day].length === 0 ? <Text style={styles.empty}>No blocks yet.</Text> : null
             ) : (
               <View style={{ gap: spacing.xs }}>
                 {blocks.map((b) => (

@@ -9,6 +9,7 @@ import { useAuth } from "@/src/lib/AuthContext";
 import { colors, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
+import DurationPicker, { DURATION_REQUIRED } from "@/src/components/DurationPicker";
 import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
 import AccountPickerModal from "@/src/components/AccountPickerModal";
 import { toLocalTimezoneIso } from "@/src/lib/finance/occurredAt";
@@ -51,6 +52,7 @@ export default function GoalCheckinScreen() {
   const [time, setTime] = useState(nowTime());
   const [notes, setNotes] = useState("");
   const [attachment, setAttachment] = useState("");
+  const [duration, setDuration] = useState<number | null>(null);
   const [addFollowUp, setAddFollowUp] = useState(false);
   const [followUpTitle, setFollowUpTitle] = useState("");
   // Money spent alongside this check-in. Optional. When set, the amount is
@@ -140,6 +142,7 @@ export default function GoalCheckinScreen() {
     setError(null);
     if (!eoId) { setError("Add an expected outcome to this goal first."); return; }
     if (!title.trim()) { setError("Title is required."); return; }
+    if (!duration) { setError(DURATION_REQUIRED); return; }
     const missing = fields.filter((f) => f.required && (dynamicData[f.key] === undefined || dynamicData[f.key] === "" || dynamicData[f.key] === null)).map((f) => f.label);
     if (missing.length > 0) { setError(`Missing required fields: ${missing.join(", ")}`); return; }
     // Money spent input is optional. When provided, it must be a positive
@@ -158,6 +161,7 @@ export default function GoalCheckinScreen() {
       const payload: any = {
         type: "goal", title: title.trim(), date, time, notes: notes.trim(),
         attachment, expected_outcome_id: eoId, source: "manual", data: dynamicData,
+        duration_minutes: duration,
       };
       if (taskId) {
         payload.task_id = taskId;
@@ -293,6 +297,8 @@ export default function GoalCheckinScreen() {
             </View>
           </View>
 
+          <DurationPicker value={duration} onChange={(m) => { setDuration(m); setError(null); }} testID="goal-checkin-duration" />
+
           <Text style={s.label}>Notes</Text>
           <TextInput style={s.notes} value={notes} onChangeText={setNotes} multiline textAlignVertical="top" testID="goal-checkin-notes-input" />
 
@@ -386,10 +392,10 @@ export default function GoalCheckinScreen() {
             <TextInput style={[s.input, { marginTop: spacing.sm }]} value={followUpTitle} onChangeText={setFollowUpTitle} placeholder="Follow-up task title" placeholderTextColor={colors.onSurfaceTertiary} testID="goal-checkin-followup-title-input" />
           )}
 
-          {error ? <Text style={s.errorText} testID="goal-checkin-error">{error}</Text> : null}
         </ScrollView>
 
         <View style={s.footer}>
+          {error ? <Text style={[s.errorText, { marginTop: 0, marginBottom: spacing.sm }]} testID="goal-checkin-error">{error}</Text> : null}
           <Pressable style={[s.cta, busy && s.ctaDisabled]} onPress={onSave} disabled={busy} testID="goal-checkin-save-button">
             {busy ? <ActivityIndicator color={colors.onSurfaceInverse} /> : <Text style={s.ctaText}>Save check-in</Text>}
           </Pressable>

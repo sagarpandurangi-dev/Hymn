@@ -50,7 +50,7 @@ short. Never ask them to paste secrets into chat.
 | `server.py` | FastAPI app, auth (throttle, token_version revocation, 10-char passwords), goals/projects/tasks/check-ins, router wiring, startup indexes |
 | `plans.py` | free/premium plans (`users.plan` → `HYMN_PREMIUM_EMAILS` → `HYMN_DEFAULT_PLAN`) |
 | `inbox.py`, `inbox_ai.py` | brain dump → task/reminder/idea/plan; daily review; nuggets → task/calendar/wishlist; weekly patterns |
-| `nudges.py` | scheduler (every minute): daily review (adaptive time), reminders, weekly summary; Expo push; in-app feed |
+| `nudges.py` | scheduler (every minute): daily review (adaptive time), reminders, weekly summary; Expo push; in-app feed. Limits (setting `limits`): at most `daily_max` pushes a day (default 4; reminders, habit urges and the daily review always get through, extras `held` in the feed); morning brief (default on, 08:30): health/people/learning morning times move to `brief_time` and arrive as one push; any 2+ due together are bundled |
 | `planning_engine.py`, `goal_merge.py` | AI planning chat with web search; plan hierarchy; goal merge |
 | `finance_manager.py`, `finance_advanced.py`, `money_service.py`, `portfolio_manager.py` | existing finance engine: plans, commitments, forecasts. For converted users `money_service` (balances, availability, monthly spending), Finance position and Today `/spending` read the ledger; shapes unchanged |
 | `planned_money.py` | one list of expected money in/out (once / monthly / yearly; sure / maybe; set-aside one-offs); shows older monthly commitments, one-off commitments and expected income read-only; the forecast reads it. API notes: `docs/PLANNED_MONEY_API.md` |
@@ -81,7 +81,7 @@ short. Never ask them to paste secrets into chat.
 | `work.py`, `payslip_ai.py` | Work: roles (type salaried/self_employed/business_owner/freelancer/articleship/looking_for_work/homemaker; one schema, parts switch on by type: leave + appraisals for employed, payslips for salaried) whose hours and commute become fixed time blocks (`source_type` system, `source_id` role); work days that ran over/ended early → "Overtime" in time statements; week view "in its box" (≤2h over) with family time, sleep, stress; leave balances per leave year with expiry beyond carry-forward, planner tool `check_leave`; wins log and appraisal pack; payslips (Premium): AI copies, code checks sums and sorts deductions; on the money book PF → EPF (`income:salary_withheld`), tax/PT/insurance/other → `salary_deduction` entries, so income shows gross without double counting take-home; nudges (setting `work`, 18:30): appraisal −21 days, leave expiring −30 days, Friday overtime. API notes: `docs/WORK_API.md` |
 | `ai_budget.py`, `account.py` | beta safety: daily AI caps per person (`ai_budget.daily("strong"|"light")` route dependency; strong 15/60 Premium, light 100/300; attempts counted) on plan chat, learning setup, old planner, goal merge, brain dump, payslips, statements; `GET /api/account/setup` (first-time checklist across areas), `GET /api/account/export` (all data, no secrets), `DELETE /api/account` (password + "DELETE"; also care profiles and their data, family membership; Pamphlet ID retired, never reissued). `server.py`: API docs off in production, 30 MB body cap, safe headers |
 
-Plans and decisions: `docs/plans/finance-audit.md`. Audits (16 Nov 2026): `docs/audits/2026-11-16-stale-and-duplicate-paths.md` (removal review — nothing removed until the owner ticks items; note `main`'s `frontend/` is older than the `emergent-frontend` branch, whose `backend/` must never be merged), `docs/audits/2026-11-16-beta-readiness.md` (security, backups, setup), tester plan `docs/BETA_TEST_PLAN.md`. Ready-to-paste Emergent prompts, A–U in build order: `docs/EMERGENT_PROMPTS.md` (also a copy-button page for the owner). API notes for Emergent:
+Plans and decisions: `docs/plans/finance-audit.md`. Audits (16 Nov 2026): `docs/audits/2026-11-16-stale-and-duplicate-paths.md` (removal review — nothing removed until the owner ticks items; `main`'s `frontend/` was synced from `emergent-frontend` on 19 Nov 2026 (prompts A–M); copy only `frontend/`, never that branch's `backend/`), `docs/audits/2026-11-16-beta-readiness.md` (security, backups, setup), tester plan `docs/BETA_TEST_PLAN.md`. Ready-to-paste Emergent prompts, A–R in build order: `docs/EMERGENT_PROMPTS.md` (also a copy-button page for the owner). API notes for Emergent:
 `docs/INBOX_API.md`, `docs/NUDGES_API.md`. Deploy guide: `docs/DEPLOY_RAILWAY.md`.
 
 ## Owner decisions to respect
@@ -121,8 +121,8 @@ Next:
 4. Before public launch: email/OTP verification for sign-up and reset, health data encryption, privacy
    policy and DPDP review, a penetration test, doctor and nutritionist sign-offs.
 
-**Emergent prompts:** all owed screens are written up as prompts A–U in `docs/EMERGENT_PROMPTS.md`
-(17 Nov 2026; Emergent credits back). The owner pastes them in order and saves to `emergent-frontend`
+**Emergent prompts:** A–M are built (19 Nov 2026; credits ran out). What's left is N–R in `docs/EMERGENT_PROMPTS.md`
+(the old N–U merged to save credits; statement polish moved to Later), for when credits renew around 17–18 Dec. The owner pastes them in order and saves to `emergent-frontend`
 after each; check each save against the backend (field names, routes) before the next, and add any
 missing response fields on the backend rather than spending Emergent credits. After the last: copy
 `frontend/` from `emergent-frontend` into `main` (never its `backend/`) and switch on

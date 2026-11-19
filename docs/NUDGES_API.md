@@ -43,7 +43,7 @@ the feed, or from a push whose matching feed entry you find by time), call
   "title": "Time for your 2-minute review",
   "body": "3 things waiting in your inbox.",
   "data": { "screen": "inbox/review" },
-  "status": "pending | sent | no_device | failed",
+  "status": "pending | sent | no_device | failed | held | in_brief",
   "opened_at": null,
   "created_at": "ISO 8601"
 }]
@@ -63,7 +63,8 @@ the feed, or from a push whose matching feed entry you find by time), call
     "people":          { "enabled": true, "time": "09:00" },
     "learning":        { "enabled": true, "time": "07:00" },
     "work":            { "enabled": true, "time": "18:30" },
-    "quiet_hours":     { "start": "22:00", "end": "07:00" }
+    "quiet_hours":     { "start": "22:00", "end": "07:00" },
+    "limits":          { "daily_max": 4, "morning_brief": true, "brief_time": "08:30" }
   },
   "timezone": "Asia/Kolkata",
   "daily_review_plan": {
@@ -93,6 +94,18 @@ the feed, or from a push whose matching feed entry you find by time), call
   before. See `docs/LEARNING_API.md`.
 
 - `work`: appraisal in 3 weeks, leave expiring in 30 days, Friday overtime. See `docs/WORK_API.md`.
+
+- `limits` (fewer, calmer notifications):
+  - `daily_max` (1–20, default 4): at most this many pushes a day. Reminders the person set, habit urge
+    check-ins and the daily review always get through (they still count). Anything else over the limit is
+    not pushed but stays in the feed with status `held`.
+  - `morning_brief` (default on): the morning parts (health, people, learning, whose times are before noon)
+    run at `brief_time` instead of their own times, and arrive together as ONE push, "Your morning from
+    Hymn", whose body lists their titles ("Amma's birthday today · 2 revisions today · and 1 more"). The
+    push's `data` is `{ "screen": "nudges", "items": [ids] }` → open the feed. The items themselves are in
+    the feed with status `in_brief`; the brief itself is not listed. Turn the brief off to get each part
+    at its own time. Any two or more non-urgent nudges due at the same moment are bundled the same way.
+  - Suggested settings UI: "At most [4] notifications a day" and "Morning summary at [08:30]" (switch).
 
 `PUT /nudges/settings` takes any subset, e.g.
 `{ "daily_review": { "time": "07:45" }, "timezone": "Asia/Kolkata" }`, and

@@ -27,12 +27,16 @@ export default function ForecastMonth() {
         <ScrollView contentContainerStyle={styles.scroll}>
           <FoldHero currency={currency} amount={formatMoney(m?.projected_liquid_end_of_month || "0")} size="xl" caption="Projected liquid end of month" />
           {m?.shortfall ? <FoldPill label="Shortfall" tone="err" /> : null}
+          {typeof cur?.basis === "string" && cur.basis.trim() ? (
+            <Text style={styles.basis} testID="forecast-month-basis">{cur.basis}</Text>
+          ) : null}
 
           <FoldSectionHeader label="Assumptions" />
           <FoldCard>
             {[
               ["Recurring income", m?.recurring_income],
               ["Recurring outflows", m?.recurring_outflows],
+              ["Everyday spending", m?.usual_spending],
               ["Reserved commitments", m?.reserved_commitments_amount],
               ["Projected net worth EoM", m?.projected_net_worth_end_of_month],
             ].map(([label, val], idx) => (
@@ -43,6 +47,20 @@ export default function ForecastMonth() {
                 right={<FoldAmount currency={currency} value={formatMoney(String(val || "0"))} />}
               />
             ))}
+            {[
+              ["Maybe income", m?.maybe_income],
+              ["Maybe spending", m?.maybe_spending],
+            ]
+              .filter(([, val]) => Number(val || 0) !== 0)
+              .map(([label, val]) => (
+                <FoldRow
+                  key={String(label)}
+                  label={<Text style={styles.maybe}>{String(label)}</Text>}
+                  meta="Maybe"
+                  right={<Text style={styles.maybe}>{currency} {formatMoney(String(val))}</Text>}
+                  testID={`forecast-month-${String(label).toLowerCase().replace(" ", "-")}`}
+                />
+              ))}
           </FoldCard>
 
           <FoldSectionHeader label="Contributing commitments" />
@@ -74,4 +92,6 @@ const styles = StyleSheet.create({
   rowDivider: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: financeColors.divider },
   linkText: { fontSize: 13, color: financeColors.accent, fontWeight: "600" },
   empty: { fontSize: 13, color: financeColors.inkMuted, padding: financeSpace.lg, fontStyle: "italic", textAlign: "center" },
+  basis: { fontSize: 12, color: financeColors.inkMuted, lineHeight: 17 },
+  maybe: { fontSize: 14, color: financeColors.inkMuted },
 });

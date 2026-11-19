@@ -4,6 +4,8 @@ import Ionicons from "@react-native-vector-icons/ionicons";
 import { useEffect, useState } from "react";
 import { useRouter } from "expo-router";
 import { useAuth } from "@/src/lib/AuthContext";
+import AccountDataSection from "@/src/components/AccountDataSection";
+import PamphletIdCard from "@/src/components/PamphletIdCard";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 
 export default function MeScreen() {
@@ -71,6 +73,8 @@ export default function MeScreen() {
           )}
           <Text style={styles.email} testID="me-email">{user?.email || ""}</Text>
         </View>
+
+        <PamphletIdCard hymnId={user?.hymn_id} hymnAlias={user?.hymn_alias} />
 
         <View style={styles.section}>
           <Text style={styles.editorLabel}>Name</Text>
@@ -145,6 +149,14 @@ export default function MeScreen() {
             <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
           </Pressable>
 
+          <Pressable style={styles.row} onPress={() => router.push("/nudges" as any)} testID="me-open-nudges">
+            <View style={styles.rowLeft}>
+              <Ionicons name="notifications-outline" size={20} color={colors.onSurface} />
+              <Text style={styles.rowText}>Notifications</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+          </Pressable>
+
           <Pressable style={styles.row} onPress={() => router.push("/settings/decomposition" as any)} testID="me-open-decomposition">
             <View style={styles.rowLeft}>
               <Ionicons name="git-network-outline" size={20} color={colors.onSurface} />
@@ -152,7 +164,17 @@ export default function MeScreen() {
             </View>
             <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
           </Pressable>
+
+          <Pressable style={styles.row} onPress={() => router.push("/(tabs)/planning-space" as any)} testID="me-open-old-planner">
+            <View style={styles.rowLeft}>
+              <Ionicons name="time-outline" size={20} color={colors.onSurface} />
+              <Text style={styles.rowText}>Old planner</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={colors.onSurfaceTertiary} />
+          </Pressable>
         </View>
+
+        <AccountDataSection />
 
         <View style={styles.section}>
           <Pressable style={styles.logoutButton} onPress={onLogout} disabled={busy} testID="logout-button">

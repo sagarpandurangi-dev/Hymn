@@ -1,8 +1,10 @@
-# Emergent prompts, A to U
+# Emergent prompts, A to R
 
 Paste **one prompt at a time, in order**. After each one, use **"Save to GitHub"** onto the `emergent-frontend` branch and tell Claude, so it can check the work before the next. Every prompt starts with the same two safety lines: keep them.
 
-A–B finish the earlier fixes. C lays the groundwork the rest builds on. D–E are the first-time experience and the Me screen. F–L are Money, time and plans. M–Q are Health. R–T are Family, Learning and Work. U is optional polish.
+**Status (19 Nov 2026):** A–M are built and saved. N–R are what's left: the old N–U, merged into five tighter prompts to save credits (old U, statement polish, moved to "Later").
+
+A–B finish the earlier fixes. C lays the groundwork the rest builds on. D–E are the first-time experience and the Me screen. F–L are Money, time and plans. M–O are Health. P–R are Family, Learning and Work.
 
 Backend API notes, if Emergent asks for more detail: `docs/HEALTH_API.md`, `docs/PEOPLE_API.md`, `docs/LEARNING_API.md`, `docs/WORK_API.md`, `docs/INVESTMENTS_API.md`, `docs/PLANNED_MONEY_API.md`, `docs/REPORTS_API.md`, `docs/NUDGES_API.md`, `docs/INBOX_API.md`.
 
@@ -227,128 +229,110 @@ Build the Health screens (Life tab → Health). Tone: calm, never scary, never g
 Tell me what you changed.
 ```
 
-## N. Health 2: food log with photos
+## N. Health 2: food log and habits to change
 
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
 
-Add "Food" in Health (needs health consent).
-1. Today's food (GET /api/food/day?date=YYYY-MM-DD): meals in order (breakfast, lunch, dinner, snack) with their items; totals with PORTIONS FIRST (fruit & veg, protein, sweets, outside/fried meals) and calories after, as a range: "about 1,200 (1,000–1,450)" from totals.calories {estimate, low, high} with its note in grey. If totals.calories is null, show portions only and never mention calories. Show <DraftNote text="Food values are typical, pending a nutritionist's review"/> when values_reviewed is false.
-2. Add a meal: pick breakfast/lunch/dinner/snack, "Eaten out / ordered in" switch, then add items by:
-   a. Search (GET /api/food/search?q=): name and unit ("1 katori", "1 piece"); − / + amount in halves; "My foods" appear in the results too.
-   b. Photo: take or pick a photo (use the upload helper; images resized) → POST /api/food/photo {image_base64, media_type}. For kind "plate": a line per item with seen_as, the matched food (or "Not sure — search"), amount with − / +, confidence (show "?" for low), and "Change" picking from alternatives or search. For kind "label": prefill "Save as my food" (step 4). For kind "not_food": "That doesn't look like food." Show photos_left small. 429 → server message; 503 → "Couldn't read the photo — search instead."
-   c. "Something else": type a name (saved but not counted).
-   Save with POST /api/food/meals {date, meal, outside, from_photo, items: [{food_id, amount} | {name}]}.
-3. Delete a meal: DELETE /api/food/meals/{id}.
-4. My foods: list (GET /api/food/my-foods), add (POST /api/food/my-foods {name, unit, kcal, protein_g, carbs_g, fat_g, fibre_g, veg_fruit_portions, protein_servings, sugary, fried}), delete.
+Add two parts to Health (both need health consent). Tone: supportive, never shaming; no streaks anywhere.
+
+FOOD
+1. Today's food (GET /api/food/day?date=YYYY-MM-DD): meals (breakfast, lunch, dinner, snack) with their items. Totals with PORTIONS FIRST (fruit & veg, protein, sweets, outside/fried meals), then calories as a range: "about 1,200 (1,000–1,450)" from totals.calories {estimate, low, high} with its note in grey. If totals.calories is null, show portions only and never mention calories. <DraftNote text="Food values are typical, pending a nutritionist's review"/> when values_reviewed is false.
+2. Add a meal: meal type, "Eaten out / ordered in" switch, then items by
+   a. Search (GET /api/food/search?q=): name and unit ("1 katori"); − / + in halves. My foods appear in the results.
+   b. Photo (upload helper, images resized) → POST /api/food/photo {image_base64, media_type}. kind "plate": a line per item with seen_as, the matched food (or "Not sure — search"), amount − / +, "?" when confidence is low, "Change" from alternatives or search. kind "label": prefill "Save as my food". kind "not_food": "That doesn't look like food." Show photos_left small. 429 → server message; 503 → "Couldn't read the photo — search instead."
+   c. "Something else": a typed name (saved, not counted).
+   Save: POST /api/food/meals {date, meal, outside, from_photo, items: [{food_id, amount} | {name}]}. Delete: DELETE /api/food/meals/{id}.
+3. My foods: list (GET /api/food/my-foods), add (POST /api/food/my-foods {name, unit, kcal, protein_g, carbs_g, fat_g, fibre_g, veg_fruit_portions, protein_servings, sugary, fried}), delete.
+
+HABITS TO CHANGE
+4. List (GET /api/habits): reason ("For: <serves.title or for_what>"), "N of the last M days on track" (progress.days_on_track / days_logged), money_freed and hours_freed when present.
+5. Add (POST /api/habits): kind from GET /api/habits/kinds (with its label), goal quit or cut down (only the goals the kind allows), baseline_per_day, target (cut down), cost per unit (optional), "What life is this for?" (for_what, or pick a plan → serves_plan_id), private switch (on by default for "other"). After saving show the support text (helpline numbers tappable).
+6. Habit screen (GET /api/habits/{id}): big "I'm having an urge" button → POST /api/habits/{id}/urge {date, trigger (optional chips: stress, after a meal, with friends, bored, tired)} → show your_reason BIG, then try_this[] and the note. Daily "How much today?" (0 = a clean day) with trigger chips → POST /api/habits/{id}/log {date, amount, triggers[]}. Show progress.welcome_back, top_triggers and steady_the_edge when present. "Send what I save to my dream" (when it has a cost and a plan) → POST /api/habits/{id}/dream-fund. Delete: DELETE /api/habits/{id}.
 
 Tell me what you changed.
 ```
 
-## O. Health 3: habits to change
+## O. Health 3: check-ups, lab reports, reports for the doctor, people I look after
 
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
 
-Add "Habits to change" in Health. Tone: supportive, never shaming; no streaks anywhere.
-1. List (GET /api/habits): each habit with its reason ("For: <serves.title or for_what>"), "N of the last M days on track" (progress.days_on_track / days_logged), money_freed and hours_freed when present.
-2. Add (POST /api/habits): kind from GET /api/habits/kinds (tobacco, betting, alcohol, sugar, junk food, screens, late nights, caffeine, other — with its label), goal quit or cut down (only the goals that kind allows), usual amount a day (baseline_per_day), target (for cut down), cost per unit (₹, optional), "What life is this for?" (for_what, or pick one of my plans → serves_plan_id), private switch (on by default for "other"). Show the habit's support text after saving (e.g. the quitline number, tappable).
-3. Habit screen (GET /api/habits/{id}): a big "I'm having an urge" button → POST /api/habits/{id}/urge {date, trigger (optional chips: stress, after a meal, with friends, bored, tired)} → show your_reason BIG, then try_this[] and the note. A daily check-in: "How much today?" (0 = a clean day) with trigger chips → POST /api/habits/{id}/log {date, amount, triggers[]}. Show progress.welcome_back when present, top_triggers, steady_the_edge tips.
-4. "Send what I save to my dream" (when the habit has a cost and a plan): POST /api/habits/{id}/dream-fund.
-5. Delete (DELETE /api/habits/{id}).
+Show <DraftNote/> wherever rules_reviewed is false.
+1. Check-ups (GET /api/health/checkups): overdue first, then never done, due soon, OK: label, why, last done, next due, "Ask your doctor" tag when ask_doctor. "Done" → date → POST /api/health/checkups/{key}/done {date}. If missing_profile is not empty: "Add your date of birth and sex for a better list."
+2. Lab reports (optional, never nagged): upload a PDF or photo → POST /api/health/labs/read {file_base64, media_type}. Each result as printed (test, value, unit, range, flag); for tracked ones also hymn_value + hymn_unit and a status dot; a warning on lines with check. "Save" → POST /api/health/labs {report_date, lab, results}. List (GET /api/health/labs), delete (DELETE /api/health/labs/{id}). 429 → server message; 503 → "Couldn't read it — you can type values in."
+3. 90-day report (GET /api/health/progress): "Day N of 90" until complete; lines with before → after and better (green) / worse (amber) / steady / changed (weight: no colour, no praise or blame).
+4. Doctor summary (GET /api/health/doctor-summary): a clean one-page view of its sections. "Share as text" (?format=text → share sheet), a switch "Include private habits" (include_private=true), and editing "My questions for the doctor" (profile doctor_questions, up to 10).
+5. People I look after (Health → "People I look after"): list (GET /api/care: name, relation, a dot when checkups_due > 0). Add (POST /api/care {name, relation: mother|father|parent_in_law|grandparent|spouse|child|sibling|other, their_consent: true}) with a required checkbox "They know and agree, or I'm their guardian". Rename (PATCH /api/care/{id} {name}); remove (DELETE /api/care/{id}; confirm "This deletes all their health data").
+6. A person switcher at the top of Health: "Me" or a person I look after. For a person, every call for profile, measurements, daily log, dashboard, suggestions, check-ups, labs, 90-day report and doctor summary adds ?for=<their id>; hide food and habits for them; titles say whose ("Amma's health").
+7. Health settings: a switch "Use my health in plans" (profile use_in_planner) with "The planner sees a short summary — never your logs, lab values or symptoms." (save the full profile with PUT /api/health/profile), and a line "Watch and phone sync is coming in the next app update."
 
 Tell me what you changed.
 ```
 
-## P. Health 4: check-ups, lab reports, 90-day report, doctor summary
+## P. Family & Relationships
 
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
-
-Add four Health screens. Show <DraftNote/> when rules_reviewed is false.
-1. Check-ups (GET /api/health/checkups): overdue first, then never done, due soon, OK: label, why, last done, next due, "Ask your doctor" tag when ask_doctor. Button "Done" → date picker → POST /api/health/checkups/{key}/done {date}. If missing_profile is not empty: "Add your date of birth and sex for a better list."
-2. Lab reports (optional — never required): upload a PDF or photo (upload helper) → POST /api/health/labs/read {file_base64, media_type}. Show each result as printed (test name, value, unit, reference range, flag); for tracked ones (metric set) also hymn_value + hymn_unit and a status dot; a warning on lines with check. "Save" → POST /api/health/labs {report_date, lab, results} (send the lines back). List past reports (GET /api/health/labs), delete (DELETE /api/health/labs/{id}). 429 → server message; 503 → "Couldn't read it — you can type values in."
-3. 90-day report (GET /api/health/progress): "Day N of 90" until complete; lines with before → after and a word: better (green), worse (amber), steady, changed (for weight — no colour, no praise or blame). Note when lines is empty.
-4. Doctor summary (GET /api/health/doctor-summary): a clean one-page view of the sections (about, conditions, medicines, family history, latest readings with date and source, changes over 90 days, symptoms logged, habits, check-ups due, latest lab report, my questions). Buttons: "Share as text" (GET /api/health/doctor-summary?format=text → share sheet) and a switch "Include private habits" (include_private=true). Edit "My questions for the doctor" (doctor_questions in the profile, up to 10).
-
-Tell me what you changed.
-```
-
-## Q. Health 5: people I look after, watch, health in plans
-
-```text
-Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
-
-1. People I look after (Health → "People I look after"): list from GET /api/care (name, relation, a dot when checkups_due > 0, last reading). Add (POST /api/care {name, relation: mother|father|parent_in_law|grandparent|spouse|child|sibling|other, their_consent: true}) with a required checkbox "They know and agree, or I'm their guardian". Rename (PATCH /api/care/{id} {name}), remove (DELETE /api/care/{id}, confirm: "This deletes all their health data").
-2. A person switcher at the top of Health: "Me" or one of the people I look after. When a person is chosen, every Health call for profile, measurements, daily log, dashboard, suggestions, check-ups, lab reports, 90-day report and doctor summary adds ?for=<their id>. Food, habits and watch stay "Me" only (hide them for others). The screens say whose data it is ("Amma's health").
-3. Watch & phone (Health → "Connect a watch"): from GET /api/health/sync show hubs[] (phone, hub, works_with) and sources[] (connected apps with last_sync). The actual connection to Health Connect / Apple Health comes with the next native app update: show a disabled "Connect" button with "Coming in the next app update". "Disconnect" for a listed source → POST /api/health/sync/disconnect {source_app, delete_data} (ask whether to delete its readings).
-4. In Health settings, a switch "Use my health in plans" (profile use_in_planner) with the line "The planner sees a short summary — never your logs, lab values or symptoms." Save through PUT /api/health/profile with the full profile.
-
-Tell me what you changed.
-```
-
-## R. Family & Relationships
-
-```text
-Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
 
 Build Family & Relationships (Life tab). Gentle by design: never "overdue", no streaks.
-1. Home: the summary card (GET /api/people/summary): hours with your inner circle this month, people reached, "Might like to hear from you" (up to 3, with "It's been N days"), "Coming up" (next days that matter: "Amma's birthday · Friday · turns 70").
-2. People list (GET /api/people): grouped Inner circle / Close / Wider; each with relation, last together ("3 days ago"), a soft dot when might_like_to_hear_from_you, and next_day.
-3. Add / edit a person (POST /api/people, PATCH /api/people/{id}): name, relation (mother, father, spouse, partner, child, sibling, grandparent, grandchild, parent_in_law, relative, friend, mentor, colleague, neighbour, other), circle (inner/close/wider), birthday (day + month, optional year → "MM-DD" or "YYYY-MM-DD"), gift budget for the birthday (birthday_gift), other days (occasions: label, date, gift_budget), "Keep in touch every N days" (keep_in_touch_days; 0 = don't remind), private notes, and a link to a person I look after (care_id from GET /api/care, optional). Delete: DELETE /api/people/{id}.
-4. Person screen (GET /api/people/{id}): details, next day, last 50 moments.
-5. Log a moment: quick buttons "Called", "Video call", "Met", "Meal", "Messaged", "Helped", with time chips 15m / 30m / 1h / 2h+ and an optional note; can include several people. POST /api/people/moments {person_ids[], date, kind: call|video_call|visit|meal|outing|message|help|celebration|other, minutes, note}. Delete a moment: DELETE /api/people/moments/{id}.
-6. Life tab → Family card line: the first of might_like_to_hear_from_you or coming_up.
+1. Home (GET /api/people/summary): hours with your inner circle this month, people reached, "Might like to hear from you" (up to 3, "It's been N days"), "Coming up" ("Amma's birthday · Friday · turns 70"). Below it, people (GET /api/people) grouped Inner circle / Close / Wider, each with relation, last together ("3 days ago"), a soft dot when might_like_to_hear_from_you, and next_day.
+2. Add / edit a person (POST /api/people, PATCH /api/people/{id}): name, relation (mother, father, spouse, partner, child, sibling, grandparent, grandchild, parent_in_law, relative, friend, mentor, colleague, neighbour, other), circle (inner/close/wider), birthday (day + month, optional year → "MM-DD" or "YYYY-MM-DD"), birthday gift budget (birthday_gift), other days (occasions: label, date, gift_budget), "Keep in touch every N days" (keep_in_touch_days; 0 = don't remind), private notes, optional link to a person I look after (care_id from GET /api/care). Delete: DELETE /api/people/{id}.
+3. Person screen (GET /api/people/{id}): details, next day, recent moments.
+4. Log a moment: quick buttons Called, Video call, Met, Meal, Messaged, Helped; time chips 15m / 30m / 1h / 2h+; optional note; several people allowed. POST /api/people/moments {person_ids[], date, kind: call|video_call|visit|meal|outing|message|help|celebration|other, minutes, note}. Delete: DELETE /api/people/moments/{id}.
+5. Life tab → Family card line: the first of might_like_to_hear_from_you or coming_up.
 
 Tell me what you changed.
 ```
 
-## S. Learning journeys
+## Q. Learning journeys
 
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
 
-Build Learning (Life tab → Learning; replaces the old Knowledge screen, which stays reachable as "Older learning goals").
-1. List (GET /api/learning): each journey with title, status, pace (on_track / behind by N h / ahead) and today_minutes. Button "Start learning something".
-2. Start: one text box "What do you want to learn or pass?" (e.g. "CA", "Driving licence by March") → POST /api/learning {goal} → it returns questions[] {key, question, options[]}. Ask them one at a time (chips when options exist, else a text box). Then POST /api/learning/{id}/answers {answers: {key: value}} — this takes up to a minute (web lookups): show "Checking the facts…".
-3. Review before starting (the journey response):
-   a. checks[] FIRST: level "confirm" → a card with "Looks right" (adds its key to confirmed) or, when options exist, pick one (fact_choices {fact key without "fact:": value}); level "error" → must be fixed (e.g. set an exam date with a date picker → stage_dates {stage key: date}).
-   b. "Where are you in each subject?": for each subject, chips not started / attending classes / classes done / first reading done / revising / done → subject_status {"stage.subject": status}.
-   c. The plan: total_hours, verdict (fits / short), per stage: exam date, hours needed vs capacity_hours, and when short: short_by_hours, needs_weekly_hours, would_fit_by, and options[] as buttons ("Study 22 hours a week", "Aim for after <date>", "Take Group I first"). Phases as a timeline (learning, practice, revision 1, revision 2, study leave). Subjects with hours (learning, reviews, practice, final_revision) and their source ("Hymn's estimate" in grey with "Edit" → estimates {"stage.subject": {class_hours, self_study_hours}}). Facts with source links. Hours a week and study-leave weeks editable (weekly_hours, leave_weeks).
-   All edits: PATCH /api/learning/{id} with only what changed; the response is the whole updated journey.
-   d. "Start" (enabled when can_start) → POST /api/learning/{id}/accept. A 400 shows the remaining checks.
-4. Every day (GET /api/learning/{id}/today): today's sessions in order — revisions first (with "N days late" when overdue_days > 0), then new chapters, then practice/revision. For a revision: show recall questions (GET /api/learning/{id}/chapters/{chapter_key}/questions — question first, tap to reveal the answer; on 503 "Revise from your notes"), then Easy / OK / Hard. "Done" → POST /api/learning/{id}/sessions {kind, chapter_key or subject_key, minutes, date, rating (for revisions)}. Show pace after each.
+Build Learning (Life tab → Learning; the old Knowledge screen stays reachable as "Older learning goals").
+1. List (GET /api/learning): title, status, pace (on_track / behind by N h / ahead), today_minutes. Button "Start learning something".
+2. Start: "What do you want to learn or pass?" → POST /api/learning {goal} → questions[] {key, question, options[]}, asked one at a time (chips when options exist, else a text box) → POST /api/learning/{id}/answers {answers: {key: value}}. This takes up to a minute: show "Checking the facts…".
+3. Review before starting (the journey response). All edits: PATCH /api/learning/{id} with only what changed; the response is the whole journey.
+   a. checks[] FIRST: "confirm" → "Looks right" (adds its key to confirmed) or pick an option (fact_choices {fact key without "fact:": value}); "error" → must be fixed (e.g. exam date picker → stage_dates {stage key: date}).
+   b. "Where are you in each subject?": chips not started / attending classes / classes done / first reading done / revising / done → subject_status {"stage.subject": status}.
+   c. The plan: total_hours, verdict (fits / short); per stage: exam date, hours needed vs capacity_hours; when short: short_by_hours, needs_weekly_hours, would_fit_by and options[] as buttons. Phases as a simple timeline. Subjects with hours and their source ("Hymn's estimate" in grey with "Edit" → estimates {"stage.subject": {class_hours, self_study_hours}}). Facts with source links. Editable weekly_hours and leave_weeks.
+   d. "Start" (when can_start) → POST /api/learning/{id}/accept; a 400 shows the remaining checks.
+4. Today (GET /api/learning/{id}/today): sessions in order — revisions first ("N days late" when overdue_days > 0), then new chapters, then practice. For a revision: recall questions (GET /api/learning/{id}/chapters/{chapter_key}/questions — question first, tap to reveal; on 503 "Revise from your notes"), then Easy / OK / Hard. "Done" → POST /api/learning/{id}/sessions {kind, chapter_key or subject_key, minutes, date, rating (revisions)}. Show pace after.
 5. Stop a journey: DELETE /api/learning/{id}.
 6. Life tab → Learning card line: "N min today" across active journeys.
 
 Tell me what you changed.
 ```
 
-## T. Work
+## R. Work, and one Finance fix
 
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
 
-Build Work (Life tab → Work). Its message: work pays for the life you want and grows you, without eating everything else.
-1. Roles (GET /api/work/roles): each role with type, organisation, title, planned hours a week, commute hours a week. Add / edit (POST /api/work/roles, PATCH /api/work/roles/{id}): type, organisation, title, started_on, work days, start/end time, office days (for commute), commute minutes each way, next appraisal date, and — only for salaried / articleship — leave types (key earned/casual/sick/other, label, per year, carried forward, carry-forward limit, leave year starts MM-DD). "I left this job" → PATCH {ended_on}. Show only the parts in the role's features {leave, appraisal, payslips, wins, time}.
-2. This week (GET /api/work/week): summary BIG ("Work stayed in its box this week." / "Work ran 5.5 hours over plan, family time was down 3 hours."), work planned vs actual, commute, family hours vs last week, sleep and stress averages when present. Quick buttons to log today: "+30m", "+1h", "+2h", "Left 1h early", "Half day" → POST /api/work/days {role_id, date, extra_minutes (30, 60, 120, −60, −240)}.
-3. Leave (employed roles): balances from the role's leave[] (type, left, taken, planned; "N days expire on <year_ends>" when expiring). Book leave: POST /api/work/leave {role_id, type, from, to, half_day, days (optional override), reason} → show the balance and the warning if any. Cancel: DELETE /api/work/leave/{id}.
-4. Wins: one-line "Something went well" box → POST /api/work/wins {role_id, date, text}; list; delete. Appraisal pack (GET /api/work/roles/{id}/appraisal-pack): wins by month and learning hours, with a share button.
-5. Payslips (salaried, Premium; 403 → "Premium feature"): upload a PDF (with optional password) or photo → POST /api/work/payslips/read {file_base64, media_type, password}. Show earnings and deductions (each deduction with its kind: PF, income tax, professional tax, health insurance, other — editable), gross, net, employer PF, and problems[] in amber. "Save" → POST /api/work/payslips {role_id, month, earnings, deductions, gross, net, employer_pf, pf_account_id (pick the EPF account if there is one)} → show recorded_in_money_book. 400 shows what doesn't add up; 409 "That month is already saved". List: GET /api/work/payslips.
+Build Work (Life tab → Work): work pays for the life you want and grows you, without eating everything else.
+1. Roles (GET /api/work/roles): type, organisation, title, planned hours a week, commute hours a week. Add / edit (POST /api/work/roles, PATCH /api/work/roles/{id}): type, organisation, title, started_on, work days, start/end time, office days, commute minutes each way, next appraisal date, and — only for salaried / articleship — leave types (key earned/casual/sick/other, label, per year, carried forward, carry-forward limit, leave year starts MM-DD). "I left this job" → PATCH {ended_on}. Show only the parts in the role's features {leave, appraisal, payslips, wins, time}.
+2. This week (GET /api/work/week): the summary BIG ("Work stayed in its box this week."), work planned vs actual, commute, family hours vs last week, sleep and stress when present. Quick buttons for today: "+30m", "+1h", "+2h", "Left 1h early", "Half day" → POST /api/work/days {role_id, date, extra_minutes (30, 60, 120, −60, −240)}.
+3. Leave (employed roles): balances from the role's leave[] (type, left, taken, planned; "N days expire on <year_ends>"). Book: POST /api/work/leave {role_id, type, from, to, half_day, reason} → show the balance and any warning. Cancel: DELETE /api/work/leave/{id}.
+4. Wins: "Something went well" box → POST /api/work/wins {role_id, date, text}; list; delete. Appraisal pack (GET /api/work/roles/{id}/appraisal-pack) with a share button.
+5. Payslips (salaried, Premium; 403 → "Premium feature"): upload PDF (optional password) or photo → POST /api/work/payslips/read {file_base64, media_type, password}. Show earnings and deductions (each with its kind, editable), gross, net, employer PF, problems[] in amber. "Save" → POST /api/work/payslips {role_id, month, earnings, deductions, gross, net, employer_pf, pf_account_id (the EPF account if any)} → show recorded_in_money_book. 400 shows what doesn't add up; 409 "That month is already saved". List: GET /api/work/payslips.
 6. Life tab → Work card line: the week's summary.
+7. Finance fix: the "Pending account → Assign" shortcut should open the events list filtered with GET /api/finance/events?lifecycle_status=pending_account_assignment.
+8. Me → Notifications: add "At most [N] notifications a day" (limits.daily_max, 1–20) and a "Morning summary" switch with its time (limits.morning_brief, limits.brief_time) through PUT /api/nudges/settings {"limits": {...}}. A push with data.screen "nudges" opens the notifications feed.
 
 Tell me what you changed.
 ```
 
-## U. Optional polish: statement review
+---
 
-```text
-Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+## Later (after the beta, only if wanted)
 
-Statement review screen: (1) "Accept all guesses" accepts every line's current suggestion except confidence = new, then shows the confirm summary; (2) "Select" mode to set the same kind/category on several lines; (3) a search box on statement detail filtering lines by description or amount; (4) the category picker uses the two-level tree from GET /api/ledger/categories (groups, then categories).
-
-Tell me what you changed.
-```
+Statement review polish: "Accept all guesses" (except confidence = new), "Select" mode to set one kind/category on several lines, a search box on statement detail, and the two-level category picker from GET /api/ledger/categories.
 
 ---
 

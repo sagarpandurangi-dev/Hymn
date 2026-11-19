@@ -43,7 +43,7 @@ export default function ForgotPasswordScreen() {
   const submitReset = async () => {
     setError(null);
     if (!answer || !newPassword) { setError("All fields are required."); return; }
-    if (newPassword.length < 6) { setError("Password must be at least 6 characters."); return; }
+    if (newPassword.length < 10) { setError("Password must be at least 10 characters."); return; }
     setBusy(true);
     try {
       await api.forgotPassword({
@@ -113,7 +113,7 @@ export default function ForgotPasswordScreen() {
                 style={styles.input}
                 value={newPassword}
                 onChangeText={setNewPassword}
-                placeholder="At least 6 characters"
+                placeholder="At least 10 characters"
                 placeholderTextColor={colors.onSurfaceTertiary}
                 secureTextEntry
                 testID="forgot-new-password-input"

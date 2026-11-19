@@ -14,6 +14,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import Ionicons from "@react-native-vector-icons/ionicons";
 import { api } from "@/src/lib/api";
+import { durationSuffix } from "@/src/components/DurationPicker";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import HeaderAvatar from "@/src/components/HeaderAvatar";
 
@@ -230,7 +231,7 @@ export default function TimelineScreen() {
                       <View style={styles.dotLine} />
                     </View>
                     <View style={styles.rowBody}>
-                      <Text style={styles.rowType}>{e.type.toUpperCase()}</Text>
+                      <Text style={styles.rowType}>{e.type.toUpperCase()}{durationSuffix((e as any).duration_minutes)}</Text>
                       {highlight(e.title, debounced, styles.rowTitle, styles.hit, 1)}
                       {e.notes ? highlight(e.notes, debounced, styles.rowNotes, styles.hit, 2) : null}
                     </View>

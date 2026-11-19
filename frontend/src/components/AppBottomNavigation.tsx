@@ -34,7 +34,7 @@ export type MainTabName =
   | "today"
   | "timeline"
   | "finance"
-  | "knowledge";
+  | "life";
 
 type AppBottomNavigationProps = {
   activeRouteName?: string | null;
@@ -72,11 +72,11 @@ const TAB_DEFINITIONS: TabDefinition[] = [
     testID: "tab-finance",
   },
   {
-    name: "knowledge",
-    path: "/(tabs)/knowledge",
-    icon: "school-outline",
-    label: "Knowledge",
-    testID: "tab-knowledge",
+    name: "life",
+    path: "/(tabs)/life",
+    icon: "leaf-outline",
+    label: "Life",
+    testID: "tab-life",
   },
 ];
 
@@ -146,6 +146,13 @@ function ChooserModal({ visible, onClose }: { visible: boolean; onClose: () => v
               <Text style={styles.chooserRowText}>Standalone note about your day</Text>
             </View>
           </Pressable>
+          <Pressable style={styles.chooserRow} onPress={() => go("/inbox/dump")} testID="chooser-brain-dump">
+            <Ionicons name="cloud-outline" size={22} color={colors.brandPrimary} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.chooserRowTitle}>Brain dump</Text>
+              <Text style={styles.chooserRowText}>Empty your head; Hymn sorts it</Text>
+            </View>
+          </Pressable>
 
           <Pressable style={styles.chooserCancel} onPress={onClose} testID="chooser-cancel">
             <Text style={styles.chooserCancelText}>Cancel</Text>
@@ -192,7 +199,7 @@ export default function AppBottomNavigation(props: AppBottomNavigationProps) {
         <View style={styles.tabItem} />
         {/* Finance */}
         {renderTabButton(TAB_DEFINITIONS[2], activeRouteName, selectTab)}
-        {/* Knowledge */}
+        {/* Life */}
         {renderTabButton(TAB_DEFINITIONS[3], activeRouteName, selectTab)}
       </View>
 
@@ -220,7 +227,10 @@ function renderTabButton(
   activeRouteName: string | null | undefined,
   selectTab: (tab: TabDefinition) => void,
 ) {
-  const focused = activeRouteName === tab.name;
+  // Learning (old Knowledge) and Plans (planning space) live under Life.
+  const focused =
+    activeRouteName === tab.name ||
+    (tab.name === "life" && (activeRouteName === "knowledge" || activeRouteName === "planning-space"));
   return (
     <Pressable
       key={tab.name}

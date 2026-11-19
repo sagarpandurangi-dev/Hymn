@@ -9,6 +9,7 @@ import { useAuth } from "@/src/lib/AuthContext";
 import { colors, spacing } from "@/src/lib/theme";
 import { formStyles as s } from "@/src/lib/formStyles";
 import DateTimeField from "@/src/components/DateTimeField";
+import DurationPicker, { DURATION_REQUIRED } from "@/src/components/DurationPicker";
 import CurrencyPickerModal from "@/src/components/portfolio/CurrencyPickerModal";
 import AccountPickerModal from "@/src/components/AccountPickerModal";
 import { toLocalTimezoneIso } from "@/src/lib/finance/occurredAt";
@@ -44,6 +45,13 @@ export default function ProjectCheckinScreen() {
   const [accountId, setAccountId] = useState<string | null>(null);
   const [accountLabel, setAccountLabel] = useState<string>("Choose account");
   const [accountPickerOpen, setAccountPickerOpen] = useState(false);
+  const [duration, setDuration] = useState<number | null>(null);
+  // Optional fuel log when this project belongs to a car or bike (Premium life objects).
+  const [vehicleProjectIds, setVehicleProjectIds] = useState<string[]>([]);
+  const [odometer, setOdometer] = useState("");
+  const [pricePerLitre, setPricePerLitre] = useState("");
+  const [litres, setLitres] = useState("");
+  const [fullTank, setFullTank] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -55,7 +63,15 @@ export default function ProjectCheckinScreen() {
         if (ps.length > 0) setProjectId(ps[0].id);
       } catch { /* ignore */ }
     })();
+    // Non-Premium users get a 403 here; the fuel fields simply stay hidden.
+    api.listLifeObjects()
+      .then((res: any) => {
+        const list: any[] = Array.isArray(res) ? res : res?.items ?? res?.life_objects ?? [];
+        setVehicleProjectIds(list.filter((o) => (o.kind === "car" || o.kind === "bike") && o.project_id).map((o) => o.project_id));
+      })
+      .catch(() => setVehicleProjectIds([]));
   }, []);
+  const isVehicleProject = !!projectId && vehicleProjectIds.includes(projectId);
 
   useEffect(() => {
     if (!projectId) { setTasks([]); return; }
@@ -73,6 +89,7 @@ export default function ProjectCheckinScreen() {
     setError(null);
     if (!projectId) { setError("Create a project first."); return; }
     if (!title.trim()) { setError("Title is required."); return; }
+    if (!duration) { setError(DURATION_REQUIRED); return; }
     const trimmedMoney = (moneySpent || "").trim();
     if (trimmedMoney && !/^\d+(\.\d+)?$/.test(trimmedMoney)) {
       setError("Money spent must be a positive number.");
@@ -84,7 +101,7 @@ export default function ProjectCheckinScreen() {
     }
     setBusy(true);
     try {
-      const payload: any = { type: "project", title: title.trim(), date, time, notes: notes.trim(), attachment, project_id: projectId, source: "manual" };
+      const payload: any = { type: "project", title: title.trim(), date, time, notes: notes.trim(), attachment, project_id: projectId, source: "manual", duration_minutes: duration };
       if (taskId) {
         payload.task_id = taskId;
         // Task completion is opt-in — a check-in is normally an update, not
@@ -97,6 +114,14 @@ export default function ProjectCheckinScreen() {
         if (accountId) payload.account_id = accountId;
         const occ = toLocalTimezoneIso(date, time);
         if (occ) payload.occurred_at = occ;
+      }
+      if (isVehicleProject) {
+        const data: Record<string, any> = {};
+        if (odometer) data.odometer = Number(odometer);
+        if (pricePerLitre) data.price_per_litre = pricePerLitre;
+        if (litres) data.litres = litres;
+        if (odometer || litres) data.full_tank = fullTank;
+        if (Object.keys(data).length > 0) payload.data = data;
       }
       if (addFollowUp && followUpTitle.trim()) payload.follow_up_task = { title: followUpTitle.trim() };
       await api.createCheckin(payload);
@@ -165,6 +190,8 @@ export default function ProjectCheckinScreen() {
             </View>
           </View>
 
+          <DurationPicker value={duration} onChange={(m) => { setDuration(m); setError(null); }} testID="project-checkin-duration" />
+
           <Text style={s.label}>Notes</Text>
           <TextInput style={s.notes} value={notes} onChangeText={setNotes} multiline textAlignVertical="top" testID="project-checkin-notes-input" />
 
@@ -215,6 +242,27 @@ export default function ProjectCheckinScreen() {
             </>
           )}
 
+          {isVehicleProject && (
+            <View testID="project-checkin-fuel">
+              <Text style={s.label}>Odometer (optional)</Text>
+              <TextInput style={s.input} value={odometer} onChangeText={(v) => setOdometer(v.replace(/[^0-9.]/g, ""))} keyboardType="decimal-pad" placeholder="km" placeholderTextColor={colors.onSurfaceTertiary} testID="project-checkin-odometer-input" />
+              <View style={{ flexDirection: "row", gap: spacing.md }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.label}>Price per litre</Text>
+                  <TextInput style={s.input} value={pricePerLitre} onChangeText={(v) => setPricePerLitre(v.replace(/[^0-9.]/g, ""))} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={colors.onSurfaceTertiary} testID="project-checkin-price-per-litre-input" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.label}>Litres</Text>
+                  <TextInput style={s.input} value={litres} onChangeText={(v) => setLitres(v.replace(/[^0-9.]/g, ""))} keyboardType="decimal-pad" placeholder="0" placeholderTextColor={colors.onSurfaceTertiary} testID="project-checkin-litres-input" />
+                </View>
+              </View>
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.md }}>
+                <Text style={{ fontSize: 14, color: colors.onSurface }}>Full tank</Text>
+                <Switch value={fullTank} onValueChange={setFullTank} testID="project-checkin-full-tank-switch" />
+              </View>
+            </View>
+          )}
+
           <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: spacing.lg }}>
             <Text style={{ fontSize: 14, color: colors.onSurface }}>Create follow-up task</Text>
             <Switch value={addFollowUp} onValueChange={setAddFollowUp} testID="project-checkin-followup-switch" />
@@ -223,10 +271,10 @@ export default function ProjectCheckinScreen() {
             <TextInput style={[s.input, { marginTop: spacing.sm }]} value={followUpTitle} onChangeText={setFollowUpTitle} placeholder="Follow-up task title" placeholderTextColor={colors.onSurfaceTertiary} testID="project-checkin-followup-title-input" />
           )}
 
-          {error ? <Text style={s.errorText} testID="project-checkin-error">{error}</Text> : null}
         </ScrollView>
 
         <View style={s.footer}>
+          {error ? <Text style={[s.errorText, { marginTop: 0, marginBottom: spacing.sm }]} testID="project-checkin-error">{error}</Text> : null}
           <Pressable style={[s.cta, busy && s.ctaDisabled]} onPress={onSave} disabled={busy} testID="project-checkin-save-button">
             {busy ? <ActivityIndicator color={colors.onSurfaceInverse} /> : <Text style={s.ctaText}>Save check-in</Text>}
           </Pressable>
