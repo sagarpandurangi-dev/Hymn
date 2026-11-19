@@ -8,6 +8,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { colors, fonts, radius, spacing } from "@/src/lib/theme";
 import { api } from "@/src/lib/api";
 import { setHealthPerson } from "@/src/lib/healthPerson";
+import { dayLine } from "@/src/lib/people";
 
 export const FOCUS_AREAS_KEY = "hymn.focusAreas";
 
@@ -38,10 +39,18 @@ export default function LifeScreen() {
   const [areas, setAreas] = useState<Area[]>(AREAS);
   const [planCount, setPlanCount] = useState<number | null>(null);
   const [healthLine, setHealthLine] = useState("");
+  const [familyLine, setFamilyLine] = useState("");
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
+      api.getPeopleSummary()
+        .then((s: any) => {
+          const h = s?.might_like_to_hear_from_you?.[0];
+          const c = s?.coming_up?.[0];
+          if (alive) setFamilyLine(h ? `${h.name} might like to hear from you` : c ? dayLine(c) : "");
+        })
+        .catch(() => { if (alive) setFamilyLine(""); });
       // The Life tab always shows my own health line.
       setHealthPerson(null);
       api.getHealthProfile()
@@ -71,7 +80,7 @@ export default function LifeScreen() {
         <Text style={styles.header}>Life</Text>
         <View style={styles.list}>
           {areas.map((a) => {
-            const line = a.key === "plans" && planCount !== null ? `${planCount} ${planCount === 1 ? "plan" : "plans"}` : a.key === "health" ? healthLine : a.line;
+            const line = a.key === "plans" && planCount !== null ? `${planCount} ${planCount === 1 ? "plan" : "plans"}` : a.key === "health" ? healthLine : a.key === "family" ? familyLine : a.line;
             return (
             <Pressable
               key={a.key}

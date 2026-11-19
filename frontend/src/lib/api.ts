@@ -831,6 +831,17 @@ export const api = {
   listMyFoods: () => request<any[]>("/food/my-foods", { auth: true }),
   addMyFood: (payload: Record<string, any>) => request<any>("/food/my-foods", { method: "POST", body: payload, auth: true }),
   deleteMyFood: (id: string) => request<any>(`/food/my-foods/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  // -- Family & Relationships (people) --
+  getPeopleSummary: () => request<any>("/people/summary", { auth: true }),
+  listPeople: () => request<any[]>("/people", { auth: true }),
+  getPerson: (id: string) => request<any>(`/people/${encodeURIComponent(id)}`, { auth: true }),
+  createPerson: (payload: Record<string, any>) => request<any>("/people", { method: "POST", body: payload, auth: true }),
+  updatePerson: (id: string, payload: Record<string, any>) =>
+    request<any>(`/people/${encodeURIComponent(id)}`, { method: "PATCH", body: payload, auth: true }),
+  deletePerson: (id: string) => request<any>(`/people/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
+  logMoment: (payload: { person_ids: string[]; date: string; kind: string; minutes?: number; note?: string }) =>
+    request<any>("/people/moments", { method: "POST", body: payload, auth: true }),
+  deleteMoment: (id: string) => request<any>(`/people/moments/${encodeURIComponent(id)}`, { method: "DELETE", auth: true }),
   // -- People I look after (care) + watch sync --
   listCare: () => request<any[]>("/care", { auth: true }),
   addCare: (payload: { name: string; relation: string; their_consent: true }) =>
