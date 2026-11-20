@@ -27,7 +27,7 @@ and loan rules, IST.
 
 | Part | Who / what |
 |---|---|
-| Server (all logic, AI, data) | Claude Code, in GitHub `sagarpandurangi-dev/Hymn`, folder `backend/` (Python FastAPI). Every change has automated tests; ~1,100 tests run on each change. |
+| Server (all logic, AI, data) | Claude Code, in GitHub `sagarpandurangi-dev/Hymn`, folder `backend/` (Python FastAPI). Every change has automated tests; about 460 run on each change. |
 | App screens | **Emergent** (an AI app builder; Expo / React Native). Works from ready-made prompts Claude Code writes. Credits renew around the **17th–18th of each month** and ran out on 19 Nov. |
 | Hosting | **Railway** (Singapore), auto-deploys `main`. Live server: `https://hymn-production-4828.up.railway.app` |
 | Database | **MongoDB Atlas** (Mumbai); daily backup on; a test restore is still to do |
