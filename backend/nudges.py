@@ -484,6 +484,12 @@ async def nudge_loop() -> None:
             await whatsapp_tick(get_db())
         except Exception:
             logger.exception("whatsapp: tick failed")
+        try:
+            import metering
+            await metering.flush(get_db())
+            await metering.purge(get_db())
+        except Exception:
+            logger.exception("metering: tick failed")
         await asyncio.sleep(TICK_SECONDS)
 
 

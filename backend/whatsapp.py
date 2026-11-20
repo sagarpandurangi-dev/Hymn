@@ -487,6 +487,8 @@ async def parse_and_card(db, link: dict, text: str, wamids: List[str], now: date
         await send_text(db, wa_id, LIMIT_REACHED, user_id=uid, now=now)
         return
     tz = _tz(user)
+    import metering
+    metering.set_actor(uid, "whatsapp")
     try:
         p, usage = await whatsapp_ai.parse_task(text, str(tz.key), now.astimezone(tz))
     except AssistantUnavailable:
