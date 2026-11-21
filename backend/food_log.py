@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import os
 import uuid
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
@@ -33,7 +32,6 @@ from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
 from food_catalog import FOODS
 from health import METRICS, _date, _profile, _store
-from plans import user_plan
 
 food_router = APIRouter(prefix="/food", tags=["food"])
 
@@ -58,12 +56,9 @@ def _r1(x: Decimal) -> float:
 
 
 def photo_allowance(user: dict) -> int:
-    key, default = (("HYMN_FOOD_PHOTOS_PREMIUM", 300) if user_plan(user) == "premium"
-                    else ("HYMN_FOOD_PHOTOS_FREE", 30))
-    try:
-        return max(0, int(os.environ.get(key, default)))
-    except ValueError:
-        return default
+    import plans
+    cap = plans.limit(user, "food_photos_month")
+    return 10 ** 6 if cap is None else cap
 
 
 async def _my_foods(db, user_id: str) -> List[dict]:

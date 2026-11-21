@@ -127,7 +127,7 @@ function signin(msg) {
     email, pw, el("button", {class: "primary", onclick: go}, "Sign in"), out);
 }
 
-const TABS = [["overview", "Overview"], ["people", "People"], ["ai", "AI"], ["invites", "Invites"],
+const TABS = [["overview", "Overview"], ["people", "People"], ["revenue", "Revenue"], ["ai", "AI"], ["invites", "Invites"],
               ["system", "System"], ["settings", "Settings"], ["log", "Log"]];
 
 async function render(msg) {
@@ -264,7 +264,46 @@ const SCREENS = {
         const v = k => +document.getElementById("s-" + k).value;
         try { await call("PUT", "/admin/settings", {ai_warn_inr: v("ai_warn_inr"), ai_stop_inr: v("ai_stop_inr"), usd_inr: v("usd_inr"),
           beta_cap: v("beta_cap"), invites_per_person: v("invites_per_person"), invite_only: invite.checked}); out.textContent = "Saved."; out.className = "small ok"; }
-        catch (e) { out.textContent = e.message; out.className = "small err"; } }}, "Save"), out)];
+        catch (e) { out.textContent = e.message; out.className = "small err"; } }}, "Save"), out),
+      premiumSettings(s, f)];
+  },
+
+  async revenue() {
+    const d = await call("GET", "/admin/billing");
+    const ready = d.payments_ready;
+    const days = el("input", {type: "number", min: 1, max: 365, value: 30, style: "width:80px", "aria-label": "Free days"});
+    const count = el("input", {type: "number", min: 1, max: 50, value: 5, style: "width:80px", "aria-label": "How many codes"});
+    const out = el("div", {class: "small"});
+    const betaDate = el("input", {type: "date", "aria-label": "Beta pass until"});
+    const betaAll = el("input", {type: "checkbox"});
+    return [
+      card("Premium", el("div", {class: "grid"}, stat(num(d.subscribers), "paying"), stat(inr(d.monthly_revenue_inr), "monthly revenue (est.)"),
+        stat(num(d.premium_now), "Premium now (all reasons)"), stat(num(d.on_trial), "on the free trial"),
+        stat(num(d.on_beta_pass), "on the beta pass"), stat(num(d.founding_members), "founding members"),
+        stat(num(d.new_30_days), "new subscriptions (30 days)"), stat(num(d.ended_30_days), "ended (30 days)"),
+        stat(num(d.in_grace), "payment failing", d.in_grace ? "warning" : ""), stat(num(d.cancelling), "cancelled, still active"))),
+      card("Payments set up?", el("p", {class: "small"},
+        (ready.razorpay ? "✓" : "○") + " Razorpay keys   " + (ready.razorpay_webhook ? "✓" : "○") + " Razorpay webhook   " +
+        (ready.revenuecat ? "✓" : "○") + " RevenueCat webhook"),
+        el("p", {class: "small muted"}, "These switch on when the keys are added in Railway. Until then nobody can be charged.")),
+      card("By plan", table([{h: "Where : plan", f: r => r.key}, {h: "People", num: 1, f: r => num(r.count)}], d.by_provider_plan)),
+      card("Beta pass (Premium for testers, and the founding price)",
+        el("div", {class: "row"}, el("label", {class: "small muted"}, "Until ", betaDate),
+          el("label", {class: "row small"}, betaAll, "also everyone already signed up"),
+          el("button", {class: "primary", onclick: async () => {
+            const r = await call("POST", "/admin/billing/beta", {until: betaDate.value || null, apply_to_everyone_now: betaAll.checked});
+            out.textContent = r.beta_premium_until ? `Beta pass until ${r.beta_premium_until}` + (r.applied_to ? `, given to ${r.applied_to} people` : "") : "Beta pass off";
+            setTimeout(render, 2500); }}, "Save")), out),
+      card("Promo codes (free Premium days)", el("div", {class: "row"},
+          el("label", {class: "small muted"}, "Days ", days), el("label", {class: "small muted"}, "Codes ", count),
+          el("button", {class: "primary", onclick: async () => {
+            const r = await call("POST", "/admin/billing/promos", {days: +days.value, count: +count.value});
+            out.replaceChildren(el("p", {}, "New codes: ", el("code", {}, r.codes.join("  ")))); setTimeout(render, 4000); }}, "Make")),
+        table([{h: "Code", f: r => el("code", {}, r.code)}, {h: "Days", num: 1, f: r => r.days}, {h: "Used", num: 1, f: r => `${r.uses} / ${r.max_uses}`},
+          {h: "", f: r => r.active ? el("button", {onclick: async () => { await call("POST", `/admin/billing/promos/${r.code}/off`); render(); }}, "Turn off") : el("span", {class: "pill"}, "off")}], d.promos)),
+      card("Latest payment events", table([{h: "When", f: r => when(r.at)}, {h: "From", f: r => r.provider}, {h: "What", f: r => r.type},
+        {h: "Person", f: r => r.email || "—"}], d.events)),
+    ];
   },
 
   async log() {
@@ -273,6 +312,37 @@ const SCREENS = {
       {h: "Person", f: r => r.target || "—"}, {h: "Details", f: r => el("code", {}, Object.keys(r.detail || {}).length ? JSON.stringify(r.detail) : "")}], d))];
   },
 };
+
+function premiumSettings(s, f) {
+  const out = el("p", {class: "small"});
+  const only = new Set(s.premium_only);
+  const boxes = s.premium_only_choices.map(k => { const b = el("input", {type: "checkbox", checked: only.has(k)}); b.dataset.k = k; return b; });
+  const limitRows = Object.entries(s.limits).map(([k, v]) => ({k, v}));
+  const inputs = {};
+  const cell = (k, p, v) => { const i = el("input", {type: "number", min: 0, value: v === null ? "" : v, placeholder: "no limit", style: "width:96px"}); inputs[k + "." + p] = i; return i; };
+  return card("Premium: prices, trial and what's free",
+    el("div", {class: "grid"}, f("price_monthly_inr", "Monthly price (₹)"), f("price_yearly_inr", "Yearly price (₹)"),
+      f("price_founding_yearly_inr", "Founding members, first year (₹)"), f("trial_days", "Free trial for new people (days)"),
+      f("grace_days", "Keep Premium after a failed payment (days)")),
+    el("p", {class: "small muted"}, "Changing a price here changes what the app shows. Also create a new plan at that price in Razorpay and paste its id below; the store prices are set in Google Play and the App Store."),
+    el("div", {class: "grid"}, f("razorpay_plan_monthly", "Razorpay plan id: monthly", {type: "text"}),
+      f("razorpay_plan_yearly", "Razorpay plan id: yearly", {type: "text"}), f("razorpay_plan_founding", "Razorpay plan id: founding yearly", {type: "text"})),
+    el("h3", {class: "small muted"}, "Premium only"),
+    el("div", {class: "row"}, boxes.map(b => el("label", {class: "row small"}, b, b.dataset.k === "statements" ? "Reading statements, investments, payslips" : "Things I own & owe"))),
+    el("h3", {class: "small muted"}, "Limits (empty = no limit)"),
+    table([{h: "What", f: r => s.limit_names[r.k] || r.k}, {h: "Free", f: r => cell(r.k, "free", r.v.free)}, {h: "Premium", f: r => cell(r.k, "premium", r.v.premium)}], limitRows),
+    el("button", {class: "primary", onclick: async () => {
+      const v = k => document.getElementById("s-" + k).value;
+      const limits = {};
+      for (const {k} of limitRows) limits[k] = {free: inputs[k + ".free"].value === "" ? null : +inputs[k + ".free"].value,
+                                                premium: inputs[k + ".premium"].value === "" ? null : +inputs[k + ".premium"].value};
+      try { await call("PUT", "/admin/settings", {price_monthly_inr: +v("price_monthly_inr"), price_yearly_inr: +v("price_yearly_inr"),
+          price_founding_yearly_inr: +v("price_founding_yearly_inr"), trial_days: +v("trial_days"), grace_days: +v("grace_days"),
+          razorpay_plan_monthly: v("razorpay_plan_monthly"), razorpay_plan_yearly: v("razorpay_plan_yearly"), razorpay_plan_founding: v("razorpay_plan_founding"),
+          premium_only: boxes.filter(b => b.checked).map(b => b.dataset.k), limits});
+        out.textContent = "Saved."; out.className = "small ok"; }
+      catch (e) { out.textContent = e.message; out.className = "small err"; } }}, "Save"), out);
+}
 
 // --- one person -------------------------------------------------------------------------
 async function person(id) {
@@ -286,7 +356,8 @@ async function person(id) {
     el("p", {class: "small muted"}, `${u.name || ""} · joined ${day(u.joined)} · last active ${when(u.last_active)}` +
       (u.app_version ? ` · app ${u.app_version}` : "") +
       (u.invited_by ? ` · invited by ${u.invited_by}` : "") + (u.cohort ? ` · ${u.cohort}` : "")),
-    el("div", {class: "grid"}, stat(u.plan, "plan"), stat(num(u.active_days_30), "active days (30)"),
+    el("div", {class: "grid"}, stat(u.plan, "plan" + (u.premium && u.premium.source ? ` (${u.premium.source}${u.premium.until ? " until " + day(u.premium.until) : ""})` : "") +
+        (u.premium && u.premium.founding_member ? " · founding" : "")), stat(num(u.active_days_30), "active days (30)"),
       stat(inr2(u.ai_month_inr), "AI this month"), stat(num(u.invites_used), "friends invited"), stat(num(u.errors_7_days), "errors (7 days)", u.errors_7_days ? "err" : "")),
     el("h3", {class: "small muted"}, "Activity, last 30 days"), bars(u.activity_30_days.map(d => ({k: d.day.slice(5), v: d.calls})), "Uses per day"),
     el("h3", {class: "small muted"}, "Setup"), el("div", {class: "small"}, u.setup.map(s => el("div", {class: s.done ? "ok" : "muted"}, (s.done ? "✓ " : "○ ") + s.title))),

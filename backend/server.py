@@ -914,6 +914,9 @@ async def signup(body: SignUpRequest):
     await db.users.insert_one(user_doc)
     if invite:
         await _admin.use_invite(db, invite)
+    import billing as _billing
+    await _billing.on_signup(db, user_doc)
+    user_doc = await db.users.find_one({"id": user_id}) or user_doc
     await ensure_hymn_id(db, user_doc)
     token = create_access_token(user_doc)
     return TokenResponse(
@@ -2946,6 +2949,7 @@ from hymn_ids import hymn_id_router, ensure_hymn_id_indexes, ensure_hymn_id  # n
 from planned_money import planned_money_router, ensure_planned_money_indexes  # noqa: E402
 from whatsapp import whatsapp_router, ensure_whatsapp_indexes  # noqa: E402
 from metering import ensure_metering_indexes  # noqa: E402
+from billing import billing_router, billing_admin_router, ensure_billing_indexes  # noqa: E402
 from admin import admin_router, invites_router, admin_page_router, ensure_admin_indexes  # noqa: E402
 import ledger_conversion  # noqa: F401,E402  (registers conversion routes on ledger_router)
 from statements import statements_router, ensure_statement_indexes  # noqa: E402
@@ -2987,6 +2991,8 @@ api_router.include_router(statements_router)
 api_router.include_router(whatsapp_router)
 api_router.include_router(admin_router)
 api_router.include_router(invites_router)
+api_router.include_router(billing_router)
+api_router.include_router(billing_admin_router)
 app.include_router(api_router)
 app.include_router(admin_page_router)
 
@@ -3031,6 +3037,10 @@ async def _usage(request, call_next):
         except JWTError:
             uid = None
     metering.set_actor(uid, feature)
+    try:
+        await metering.get_settings(db)          # keeps plans' limits current (cached 30 s)
+    except Exception:
+        logger.exception("settings: could not load")
     try:
         response = await call_next(request)
     except Exception:
@@ -3107,6 +3117,7 @@ async def startup_indexes():
     await ensure_whatsapp_indexes(db)
     await ensure_metering_indexes(db)
     await ensure_admin_indexes(db)
+    await ensure_billing_indexes(db)
     try:
         touched = await backfill_fc_into_allocations(db)
         if touched:

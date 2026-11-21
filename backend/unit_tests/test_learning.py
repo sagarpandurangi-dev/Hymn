@@ -56,6 +56,13 @@ def driving_structure():
         requirements=[])
 
 
+@pytest.fixture(autouse=True)
+def _any_number_of_journeys(server):
+    """These tests are about learning itself; the free plan's journey limit is tested in test_billing."""
+    import metering
+    asyncio.run(metering.save_settings(server.db, {"limits": {"learning_journeys": {"free": None, "premium": None}}}))
+
+
 @pytest.fixture()
 def user(client):
     b = client.post("/api/auth/signup", json={"name": "Asha", "email": "learn@example.com",

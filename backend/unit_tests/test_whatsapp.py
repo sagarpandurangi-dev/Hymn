@@ -486,3 +486,13 @@ def test_a_task_that_starts_with_complete_is_a_new_task(client, db, linked, cloc
     _say(client, db, clock, _msg("complete the report by friday"))
     assert "Complete the report" in _texts(sent)[-1]
     assert [t["status"] for t in _tasks(db, linked["id"])] == ["todo"]
+
+
+def test_the_free_plan_has_a_monthly_whatsapp_limit(client, db, linked, clock, sent, ai):
+    import metering
+    asyncio.run(metering.save_settings(db, {"limits": {"whatsapp_tasks_month": {"free": 1, "premium": None}}}))
+    _add_task(client, db, clock, sent, ai, "pay rent", "Pay rent")
+    calls = len(ai.calls)
+    _say(client, db, clock, _msg("call the plumber tomorrow"))
+    assert len(ai.calls) == calls                                      # no AI spent once the limit is reached
+    assert "free plan's limit" in _texts(sent)[-1]

@@ -1,8 +1,8 @@
-# Emergent prompts, A to R
+# Emergent prompts, A to S
 
 Paste **one prompt at a time, in order**. After each one, use **"Save to GitHub"** onto the `emergent-frontend` branch and tell Claude, so it can check the work before the next. Every prompt starts with the same two safety lines: keep them.
 
-**Status (19 Nov 2026):** A–M are built and saved. N–R are what's left: the old N–U, merged into five tighter prompts to save credits (old U, statement polish, moved to "Later").
+**Status (19 Nov 2026):** A–M are built and saved. N–S are what's left (S, Premium, added 21 Nov): the old N–U, merged into five tighter prompts to save credits (old U, statement polish, moved to "Later").
 
 A–B finish the earlier fixes. C lays the groundwork the rest builds on. D–E are the first-time experience and the Me screen. F–L are Money, time and plans. M–O are Health. P–R are Family, Learning and Work.
 
@@ -330,6 +330,28 @@ Build Work (Life tab → Work): work pays for the life you want and grows you, w
 
 Tell me what you changed.
 ```
+
+## S. Premium
+
+```text
+Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
+
+Add Premium to the app.
+1. Me → "Premium" (GET /api/billing): the plan in one line — "Premium · free trial, 9 days left" (in_trial, trial_days_left), "Premium · beta pass", "Premium · renews 12 Jan" (subscription.renews_on), "Premium · ends 12 Jan" (subscription.ends_on), or "Free". "Founding member" tag when founding_member is true.
+2. The Premium screen (GET /api/billing/plans, no sign-in needed): a calm comparison — the limits table (name, free, premium; empty premium = "No limit") and the Premium-only list ("Reading statements, investments and payslips", "Things I own & owe"). Prices: ₹monthly a month, ₹yearly a year ("save N%"); founding members see prices.founding_yearly from GET /api/billing instead of the yearly price, with "Founding member price for your first year". A line "Try every Premium feature free for {trial_days} days" for people who never had a trial. Never pushy; a clear "Not now".
+3. Buying (website payments for now): when can_buy_on_web is true, "Get Premium monthly / yearly" → POST /api/billing/checkout {plan} → open short_url in the browser (expo-web-browser). When the browser closes, reload GET /api/billing. 409 → "You already have Premium". 503 → "Payments are coming soon." When can_buy_on_web is false, show the prices with "Coming soon".
+4. Cancel (only when subscription.provider is "razorpay" and there's no ends_on): "Cancel Premium" → confirm → POST /api/billing/cancel → show its detail. For store subscriptions show "Manage in Google Play / the App Store".
+5. "Have a code?" → POST /api/billing/redeem {code} → show its detail; 400 shows the server's message.
+6. Anywhere the server answers 403 with a detail that mentions Premium, show that message with a "See Premium" button to this screen.
+7. Today: a small line while in_trial: "Premium trial: N days left" → the Premium screen.
+
+Tell me what you changed.
+```
+
+## Later: in-app purchases (with the native build)
+
+When the native build exists: install react-native-purchases (RevenueCat), configure it with the RevenueCat public SDK keys, call Purchases.logIn(<the Hymn user id from GET /api/auth/me>) after sign-in, show the "premium" offering's monthly and yearly packages on the Premium screen instead of the website buttons on Android/iPhone, buy with Purchases.purchasePackage, then reload GET /api/billing (the server learns about the purchase from RevenueCat). "Restore purchases" → Purchases.restorePurchases.
 
 ---
 
