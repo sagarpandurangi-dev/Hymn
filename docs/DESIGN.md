@@ -62,3 +62,26 @@ is good with money and time, never like accounting software, and never like an o
 | `GET /api/screens/finance` | as before, plus `headline` {currency, net_worth, net_worth_label, left_to_spend, left_to_spend_label, coming_up [{id, title, direction, when, amount_label}]} |
 
 Every part is optional: a part with nothing to say is null, never zeros.
+
+## Movement and feedback
+
+Owner, 21 Nov 2026: "things must move upon touch; something must happen". The live demo is in the "Hymn
+Redesign" artifact ("How it feels: tap it").
+
+- **Every tap answers.** Anything tappable sinks slightly when pressed (scale 0.97, 120 ms) and springs back.
+  Important taps (ticking a task, primary buttons, switches) also give a light haptic buzz; finishing something
+  gives a "success" buzz. Errors give a gentle shake of the field plus a line saying how to fix it.
+- **Nothing just appears.** New screens slide in from the side; sheets spring up from the bottom; lists and
+  cards rise in (fade + 8 px) one after another (40–60 ms apart) on first load only; numbers count up
+  (600 ms); bars and meters fill from zero.
+- **Waiting is never blank.** First loads show shimmering placeholders in the shape of what's coming (no lone
+  spinner, no empty screen). Lists pull down to refresh. A button that saves shows a small spinner and its
+  action word ("Adding…", "Saving…") and can't be tapped twice.
+- **Finishing feels good.** Ticking a task: the box springs, a tick draws, the line fades and slides out, the next
+  one slides in, and a short message says what's left ("Nice. 2 left today."). All three done: "All done for
+  today ॥" with a small bounce of the ॥.
+- **Messages** slide down from the top and leave by themselves after about 2.5 s; anything you can undo says
+  "Undo" ("Deleted · Undo").
+- **The + button** turns into × while the add sheet is open.
+- **Gentle and quick:** under a third of a second, eased out; springs never wobble more than once. When the
+  phone asks for reduced motion, keep fades, drop movement. Haptics can be switched off in Me → Settings.

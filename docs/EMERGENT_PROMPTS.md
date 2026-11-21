@@ -2,7 +2,7 @@
 
 Paste **one prompt at a time, in order**. After each one, use **"Save to GitHub"** onto the `emergent-frontend` branch and tell Claude, so it can check the work before the next. Every prompt starts with the same two safety lines: keep them.
 
-**Status (19 Nov 2026):** A–M are built and saved. Next: **0. Design pass** first (added 21 Nov, attach the four mock-up images), then N–S (S, Premium, added 21 Nov): the old N–U, merged into five tighter prompts to save credits (old U, statement polish, moved to "Later").
+**Status (19 Nov 2026):** A–M are built and saved. Next: **0. Design pass** first (added 21 Nov, attach the four mock-up images), then **0b. Movement and feedback**, then N–S (S, Premium, added 21 Nov): the old N–U, merged into five tighter prompts to save credits (old U, statement polish, moved to "Later").
 
 A–B finish the earlier fixes. C lays the groundwork the rest builds on. D–E are the first-time experience and the Me screen. F–L are Money, time and plans. M–O are Health. P–R are Family, Learning and Work.
 
@@ -261,6 +261,27 @@ Give the whole app a new, warmer look. Today it feels like accounting software. 
 9. My week: a one-sentence summary at the top in heading size (e.g. "Work ran 3 hours over this week." from the existing numbers), then each area as a simple horizontal bar of actual hours with a thin mark for planned; the existing tables move under "See the full 168 hours".
 10. Words: "Required Check-ins" → "Check-ins due"; anywhere a status code shows (todo, pending_account_assignment, on_track), show plain words instead.
 11. Small touches: the checkbox tick animates (150 ms); cards fade in once on load; nothing moves when the phone's "reduce motion" is on.
+
+Tell me what you changed.
+```
+
+## 0b. Movement and feedback (run right after 0)
+
+```text
+Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here. Keep every testID.
+
+Make the app respond to every touch. Today taps do nothing visible and screens just appear. Use react-native-reanimated (already a dependency) and add expo-haptics. Put the pieces in src/components/ui so every screen uses the same ones.
+
+1. Tap: a Tap wrapper (replaces bare TouchableOpacity/Pressable for rows, cards and buttons): presses down to scale 0.97 in 120 ms and springs back. A haptics helper: light impact for ticking a task, primary buttons and switches; success notification when something is finished; error notification with a gentle horizontal shake of the field when a form has a problem (show the server's message under it). A "Vibration on taps" switch in Me → Settings (on by default, remembered in AsyncStorage).
+2. Loading: a Skeleton component (soft shimmering blocks in border #ECE6DB / paper #F7F3EC). Every screen's first load shows skeleton blocks shaped like its content instead of a spinner or a blank screen. Every list and the Today, Money and Life screens pull down to refresh (RefreshControl tinted ink #1F2340).
+3. Saving: a Button component with a loading state: small spinner + action word ("Adding…", "Saving…", "Deleting…"), disabled until done.
+4. Arrival: cards and list rows fade in and rise 8 px, staggered 50 ms, on a screen's first load only. Numbers in display or title size (money, hours) count up over 600 ms. Progress bars and meters fill from zero over 800 ms.
+5. Screens: stack screens slide in from the side (native stack defaults); tab switches cross-fade in 150 ms; pickers and add forms open as bottom sheets that spring up, with a dim backdrop that closes them on tap.
+6. Today's 3 things: tapping an open one → the checkbox fills sage with a small spring (scale 1.15 then back), the tick draws, the title fades and strikes through; after 650 ms the row fades and slides out and the next task (if any) slides in; a toast says "Nice. N left today." When all are done: "All done for today ॥" with a small bounce of the ॥ and a success buzz.
+7. Toasts: a ToastHost upgrade — slide down from the top, ink background, white text, auto-hide after 2.5 s; for deletes show "Undo" (re-creates the item) when the API allows.
+8. The + button rotates into × while the add sheet is open.
+9. Everything is quick (under 300 ms, ease-out; springs damping ~15, no repeated wobble). When the phone has "reduce motion" on, keep fades and drop movement and count-ups.
 
 Tell me what you changed.
 ```
