@@ -32,6 +32,7 @@ invites_router = APIRouter(prefix="/invites", tags=["invites"])
 admin_page_router = APIRouter()
 
 FRESH_LOGIN_HOURS = 12
+PREMIUM_ONLY_CHOICES = ["statements", "life_objects"]
 PRIVATE = "private"                      # what health features are called in per-person views
 _SAFE_USER_FIELDS = {"_id": 0, "id": 1, "email": 1, "name": 1, "plan": 1, "created_at": 1, "last_active_at": 1,
                      "cohort": 1, "invited_by": 1, "suspended": 1, "ai_bonus": 1, "timezone": 1,
@@ -267,7 +268,12 @@ async def user_detail(user_id: str, admin: dict = Depends(require_admin)):
             "invites_used": (code or {}).get("uses", 0),
             "errors_7_days": await db.errors.count_documents({"user_id": user_id,
                                                               "day": {"$gte": _day(now - timedelta(days=6))}}),
-            "ai_bonus": u.get("ai_bonus")}
+            "ai_bonus": u.get("ai_bonus"),
+            "premium": {"source": "manual" if u.get("plan") else full.get("premium_source"),
+                        "until": full.get("premium_until"), "founding_member": bool(full.get("founding_member")),
+                        "subscription": await db.subscriptions.find_one(
+                            {"user_id": user_id, "status": {"$in": ["active", "grace", "cancelling"]}},
+                            {"_id": 0, "provider": 1, "plan": 1, "status": 1, "current_period_end": 1})}}
 
 
 class PlanChange(BaseModel):
@@ -434,11 +440,27 @@ class SettingsUpdate(BaseModel):
     invite_only: Optional[bool] = None
     beta_cap: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     invites_per_person: Optional[int] = Field(default=None, ge=0, le=1000)
+    price_monthly_inr: Optional[int] = Field(default=None, ge=1, le=100000)
+    price_yearly_inr: Optional[int] = Field(default=None, ge=1, le=1000000)
+    price_founding_yearly_inr: Optional[int] = Field(default=None, ge=1, le=1000000)
+    trial_days: Optional[int] = Field(default=None, ge=0, le=90)
+    grace_days: Optional[int] = Field(default=None, ge=0, le=30)
+    razorpay_plan_monthly: Optional[str] = Field(default=None, max_length=60)
+    razorpay_plan_yearly: Optional[str] = Field(default=None, max_length=60)
+    razorpay_plan_founding: Optional[str] = Field(default=None, max_length=60)
+    premium_only: Optional[List[str]] = None
+    limits: Optional[dict] = None
+
+
+def _with_choices(s: dict) -> dict:
+    import plans
+    return {**s, "ai_features": metering.AI_FEATURES, "premium_only_choices": PREMIUM_ONLY_CHOICES,
+            "limit_names": plans.LIMIT_NAMES}
 
 
 @admin_router.get("/settings")
 async def get_settings(admin: dict = Depends(require_admin)):
-    return {**await metering.get_settings(get_db()), "ai_features": metering.AI_FEATURES}
+    return _with_choices(await metering.get_settings(get_db()))
 
 
 @admin_router.put("/settings")
@@ -449,6 +471,24 @@ async def put_settings(body: SettingsUpdate, admin: dict = Depends(require_admin
         unknown = set(changes["ai_off"]) - set(metering.AI_FEATURES)
         if unknown:
             raise HTTPException(status_code=400, detail=f"Unknown AI features: {sorted(unknown)}")
+    import plans
+    if "premium_only" in changes:
+        unknown = set(changes["premium_only"]) - set(PREMIUM_ONLY_CHOICES)
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Unknown Premium features: {sorted(unknown)}")
+    if "limits" in changes:
+        clean = {}
+        for key, row in changes["limits"].items():
+            if key not in plans.default_limits() or not isinstance(row, dict):
+                raise HTTPException(status_code=400, detail=f"Unknown limit: {key}")
+            vals = {}
+            for p in ("free", "premium"):
+                v = row.get(p)
+                if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v < 0 or v > 100000):
+                    raise HTTPException(status_code=400, detail=f"{key}.{p} must be a whole number or empty")
+                vals[p] = v
+            clean[key] = vals
+        changes["limits"] = {**(await metering.get_settings(db))["limits_overrides"], **clean}
     current = await metering.get_settings(db)
     warn = changes.get("ai_warn_inr", current["ai_warn_inr"])
     stop = changes.get("ai_stop_inr", current["ai_stop_inr"])
@@ -456,7 +496,7 @@ async def put_settings(body: SettingsUpdate, admin: dict = Depends(require_admin
         raise HTTPException(status_code=400, detail="The warning has to be at or below the stop.")
     saved = await metering.save_settings(db, changes)
     await audit(db, admin, "settings", None, changes)
-    return {**saved, "ai_features": metering.AI_FEATURES}
+    return _with_choices(saved)
 
 
 @admin_router.get("/audit")

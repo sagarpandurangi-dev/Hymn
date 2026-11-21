@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time as _time
 from collections import defaultdict
 from contextvars import ContextVar
@@ -150,6 +151,18 @@ DEFAULT_SETTINGS = {
     "invite_only": False,         # switch on once the app's sign-up has an invite box
     "beta_cap": 200,              # most accounts while invite-only
     "invites_per_person": 5,      # each person's invite link works this many times
+    # Premium (see billing.py and plans.py)
+    "price_monthly_inr": 199,
+    "price_yearly_inr": 1499,
+    "price_founding_yearly_inr": 999,   # first year for founding members (beta testers)
+    "trial_days": int(os.environ.get("HYMN_TRIAL_DAYS", "14") or 14),   # Premium for new people, no card
+    "grace_days": 7,                    # Premium continues this long after a failed payment
+    "beta_premium_until": None,         # "YYYY-MM-DD": everyone who signs up before then gets Premium + founding
+    "razorpay_plan_monthly": "",        # Razorpay plan ids (not secret); create a new plan when the price changes
+    "razorpay_plan_yearly": "",
+    "razorpay_plan_founding": "",
+    "premium_only": None,               # None = plans.DEFAULT_PREMIUM_ONLY
+    "limits": None,                     # only the limits changed on the admin page; see plans.default_limits()
 }
 _cache: dict = {}
 
@@ -164,6 +177,12 @@ async def get_settings(db) -> dict:
         return hit[1]
     doc = await db.admin_settings.find_one({"_id": "global"}) or {}
     merged = {**DEFAULT_SETTINGS, **{k: v for k, v in doc.items() if k in DEFAULT_SETTINGS}}
+    import plans
+    if merged.get("premium_only") is None:
+        merged["premium_only"] = list(plans.DEFAULT_PREMIUM_ONLY)
+    merged["limits_overrides"] = dict(merged.get("limits") or {})
+    merged["limits"] = {**plans.default_limits(), **merged["limits_overrides"]}
+    plans.mirror(merged)
     _cache["settings"] = (_time.monotonic(), merged)
     return merged
 

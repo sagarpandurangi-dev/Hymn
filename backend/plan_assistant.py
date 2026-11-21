@@ -30,6 +30,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, List, Optional
 
 import anthropic
+import plans
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
@@ -458,6 +459,10 @@ async def chat(body: ChatMessage, current_user: dict = Depends(get_current_user)
         if not convo:
             raise HTTPException(status_code=404, detail="Conversation not found")
     else:
+        month_start = datetime.now(timezone.utc).strftime("%Y-%m-01")
+        used = await db.plan_chats.count_documents({"user_id": current_user["id"],
+                                                    "created_at": {"$gte": month_start}})
+        plans.require_within(current_user, "planner_chats_month", used)
         convo = {"id": str(uuid.uuid4()), "user_id": current_user["id"], "messages": [], "plan_ids": [],
                  "created_at": datetime.now(timezone.utc).isoformat()}
     before = list(convo["messages"])

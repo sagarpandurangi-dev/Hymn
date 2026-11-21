@@ -40,8 +40,11 @@ async def add_person(body: CareCreate, current_user: dict = Depends(get_current_
     if not body.their_consent:
         raise HTTPException(status_code=400, detail="Please confirm they know and agree, or that you are their "
                                                     "guardian.")
-    if await db.care_profiles.count_documents({"owner_id": current_user["id"]}) >= MAX_PEOPLE:
+    count = await db.care_profiles.count_documents({"owner_id": current_user["id"]})
+    if count >= MAX_PEOPLE:
         raise HTTPException(status_code=400, detail=f"You can look after up to {MAX_PEOPLE} people.")
+    import plans
+    plans.require_within(current_user, "care_profiles", count)
     doc = {"id": f"care_{uuid.uuid4().hex}", "owner_id": current_user["id"], "name": body.name.strip(),
            "relation": body.relation, "consent_confirmed_at": datetime.now(timezone.utc).isoformat()}
     await db.care_profiles.insert_one(dict(doc))

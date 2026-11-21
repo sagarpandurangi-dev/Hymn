@@ -24,7 +24,10 @@ def user(client):
     return {"id": uid, "headers": h}
 
 
-def test_ai_calls_are_capped_per_person_per_day(client, user, monkeypatch):
+def test_ai_calls_are_capped_per_person_per_day(client, server, user, monkeypatch):
+    import metering
+    asyncio.run(metering.save_settings(server.db, {"limits": {"learning_journeys": {"free": None, "premium": None}}}))
+
     async def intake(goal):
         return Intake(title="X", shape="skill", questions=[Question(key="level", question="Level?")])
     monkeypatch.setattr(learning_ai, "intake", intake)

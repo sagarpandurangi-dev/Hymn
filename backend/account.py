@@ -79,7 +79,6 @@ async def delete_account(body: DeleteAccount, current_user: dict = Depends(get_c
     from server import verify_password
 
     db = get_db()
-    uid = current_user["id"]
     if body.confirm != "DELETE":
         raise HTTPException(status_code=400, detail='Type DELETE to confirm.')
     hashed = current_user.get("hashed_password")
@@ -92,6 +91,9 @@ async def delete_account(body: DeleteAccount, current_user: dict = Depends(get_c
 async def erase_user(db, current_user: dict) -> int:
     """Delete everything a person has (also used by the admin page for test accounts)."""
     uid = current_user["id"]
+    import billing
+    if billing.razorpay_ready():
+        await billing.cancel_on_delete(db, uid)
     ids = [uid] + await _care_ids(db, uid)
     removed = 0
     for name in await db.list_collection_names():

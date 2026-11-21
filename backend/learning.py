@@ -436,6 +436,9 @@ async def _view(db, j: dict) -> dict:
 @learning_router.post("", status_code=201, dependencies=[Depends(ai_budget.daily("light"))])
 async def start(body: Start, current_user: dict = Depends(get_current_user)):
     db = get_db()
+    import plans
+    plans.require_within(current_user, "learning_journeys", await db.learning_journeys.count_documents(
+        {"user_id": current_user["id"], "status": {"$in": ["asking", "draft", "active"]}}))
     try:
         intake = await learning_ai.intake(body.goal)
     except AssistantUnavailable:
