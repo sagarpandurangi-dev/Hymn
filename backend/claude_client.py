@@ -33,7 +33,7 @@ class AssistantUnavailable(Exception):
 _client: Optional[anthropic.AsyncAnthropic] = None
 
 
-def get_client() -> anthropic.AsyncAnthropic:
+def get_client():
     global _client
     if not os.environ.get("ANTHROPIC_API_KEY"):
         logger.warning("assistant unavailable: ANTHROPIC_API_KEY is not configured")
@@ -41,7 +41,65 @@ def get_client() -> anthropic.AsyncAnthropic:
     if _client is None:
         # Someone is waiting in the app; fail fast rather than hang.
         _client = anthropic.AsyncAnthropic(timeout=120.0, max_retries=1)
-    return _client
+    return Metered(_client)
+
+
+class Metered:
+    """The client, with every messages.create / messages.parse checked and counted.
+
+    Before the call: is this AI feature switched off, or the month's budget
+    used up? (``metering.guard`` → AssistantUnavailable, which every caller
+    already handles.) After it: tokens and cost go to ``metering.record_ai``.
+    Metering trouble never blocks or breaks a call."""
+
+    def __init__(self, inner, path: tuple = ()):
+        self._inner = inner
+        self._path = path
+
+    def __getattr__(self, name):
+        attr = getattr(self._inner, name)
+        if name == "with_options":
+            return lambda *a, **kw: Metered(attr(*a, **kw), self._path)
+        if name in ("beta", "messages"):
+            return Metered(attr, self._path + (name,))
+        if name in ("create", "parse") and self._path and self._path[-1] == "messages":
+            return _metered_call(attr)
+        return attr
+
+
+def _metered_call(fn):
+    async def call(*args, **kwargs):
+        import time
+        import metering
+        from deps import get_db
+
+        try:
+            db = get_db()
+        except Exception:  # pragma: no cover - no database (scripts)
+            db = None
+        if db is not None:
+            try:
+                await metering.guard(db, metering.actor().get("feature"))
+            except metering.Paused as exc:
+                logger.warning("assistant paused: %s", exc)
+                raise AssistantUnavailable(f"paused: {exc}") from exc
+            except Exception:
+                logger.exception("metering: guard failed; allowing the call")
+        start = time.monotonic()
+        ok, response = False, None
+        try:
+            response = await fn(*args, **kwargs)
+            ok = True
+            return response
+        finally:
+            if db is not None:
+                try:
+                    await metering.record_ai(db, kwargs.get("model") or getattr(response, "model", None),
+                                             getattr(response, "usage", None), ok,
+                                             int((time.monotonic() - start) * 1000))
+                except Exception:
+                    logger.exception("metering: could not record an AI call")
+    return call
 
 
 def fallback_kwargs(model: str) -> Dict[str, Any]:

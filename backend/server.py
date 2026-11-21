@@ -55,6 +55,7 @@ class SignUpRequest(BaseModel):
     password: str
     security_question: str = Field(min_length=1)
     security_answer: str = Field(min_length=1)
+    invite_code: Optional[str] = Field(default=None, max_length=40)
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -663,6 +664,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     # until the first logout / reset bumps the user's version.
     if payload.get("tv", 0) != user.get("token_version", 0):
         raise credentials_exc
+    if user.get("suspended"):
+        raise HTTPException(status_code=403, detail="This account is paused. Please contact Hymn support.")
     return user
 
 
@@ -890,6 +893,8 @@ async def signup(body: SignUpRequest):
     # Batch 2B5 — canonical display name.
     name = _normalise_account_name(body.name)
     _validate_new_password(body.password)
+    import admin as _admin
+    invite = await _admin.check_signup_invite(db, body.invite_code)
     user_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     user_doc = {
@@ -903,7 +908,12 @@ async def signup(body: SignUpRequest):
         "created_at": now,
         "updated_at": now,
     }
+    if invite:
+        user_doc.update({"invited_by": invite.get("created_by"), "invite_code": invite["code"],
+                         "cohort": invite.get("cohort")})
     await db.users.insert_one(user_doc)
+    if invite:
+        await _admin.use_invite(db, invite)
     await ensure_hymn_id(db, user_doc)
     token = create_access_token(user_doc)
     return TokenResponse(
@@ -927,6 +937,8 @@ async def login(body: LoginRequest):
         await auth_throttle.record_failure(db, "login", email)
         raise invalid_credentials
     await auth_throttle.clear(db, "login", email)
+    if user.get("suspended"):
+        raise HTTPException(status_code=403, detail="This account is paused. Please contact Hymn support.")
     token = create_access_token(user)
     await ensure_hymn_id(db, user)
     return TokenResponse(access_token=token, user=user_to_response(user))
@@ -2933,6 +2945,8 @@ from life_objects import life_objects_router, ensure_life_object_indexes  # noqa
 from hymn_ids import hymn_id_router, ensure_hymn_id_indexes, ensure_hymn_id  # noqa: E402
 from planned_money import planned_money_router, ensure_planned_money_indexes  # noqa: E402
 from whatsapp import whatsapp_router, ensure_whatsapp_indexes  # noqa: E402
+from metering import ensure_metering_indexes  # noqa: E402
+from admin import admin_router, invites_router, admin_page_router, ensure_admin_indexes  # noqa: E402
 import ledger_conversion  # noqa: F401,E402  (registers conversion routes on ledger_router)
 from statements import statements_router, ensure_statement_indexes  # noqa: E402
 from statement_matching import ensure_matching_indexes  # noqa: E402  (registers matching routes)
@@ -2971,7 +2985,10 @@ api_router.include_router(hymn_id_router)
 api_router.include_router(planned_money_router)
 api_router.include_router(statements_router)
 api_router.include_router(whatsapp_router)
+api_router.include_router(admin_router)
+api_router.include_router(invites_router)
 app.include_router(api_router)
+app.include_router(admin_page_router)
 
 # Auth is a bearer header, never a cookie, so credentialed CORS is not
 # needed. CORS_ORIGINS (comma-separated) narrows the allowed origins.
@@ -2996,6 +3013,34 @@ async def _limits_and_headers(request, call_next):
     response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
     if request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+@app.middleware("http")
+async def _usage(request, call_next):
+    """Count each API call per person and feature (never its content); log 5xx."""
+    import metering
+    feature = metering.feature_of(request.url.path)
+    if feature is None:
+        return await call_next(request)
+    uid = None
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        try:
+            uid = jwt.decode(auth[7:], JWT_SECRET, algorithms=[JWT_ALG]).get("sub")
+        except JWTError:
+            uid = None
+    metering.set_actor(uid, feature)
+    try:
+        response = await call_next(request)
+    except Exception:
+        metering.count_request(uid, feature, 500)
+        await metering.record_error(db, request.method, getattr(request.scope.get("route"), "path", None), 500, uid)
+        raise
+    metering.count_request(uid, feature, response.status_code, app_version=request.headers.get("x-app-version"))
+    if response.status_code >= 500:
+        await metering.record_error(db, request.method, getattr(request.scope.get("route"), "path", None),
+                                    response.status_code, uid)
     return response
 
 
@@ -3060,6 +3105,8 @@ async def startup_indexes():
     await ensure_statement_indexes(db)
     await ensure_matching_indexes(db)
     await ensure_whatsapp_indexes(db)
+    await ensure_metering_indexes(db)
+    await ensure_admin_indexes(db)
     try:
         touched = await backfill_fc_into_allocations(db)
         if touched:

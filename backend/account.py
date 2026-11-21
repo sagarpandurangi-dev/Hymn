@@ -85,6 +85,13 @@ async def delete_account(body: DeleteAccount, current_user: dict = Depends(get_c
     hashed = current_user.get("hashed_password")
     if not isinstance(hashed, str) or not verify_password(body.password, hashed):
         raise HTTPException(status_code=400, detail="That password isn't right.")
+    removed = await erase_user(db, current_user)
+    return {"detail": "Your account and data have been deleted.", "records_removed": removed}
+
+
+async def erase_user(db, current_user: dict) -> int:
+    """Delete everything a person has (also used by the admin page for test accounts)."""
+    uid = current_user["id"]
     ids = [uid] + await _care_ids(db, uid)
     removed = 0
     for name in await db.list_collection_names():
@@ -109,8 +116,9 @@ async def delete_account(body: DeleteAccount, current_user: dict = Depends(get_c
     # The Pamphlet ID is retired, never reissued.
     await db.hymn_ids.update_many({"owner_user_id": uid}, {"$set": {"owner_user_id": None, "status": "retired"}})
     await db.auth_attempts.delete_many({"subject": f"email:{current_user.get('email', '')}"})
+    await db.invites.delete_many({"created_by": uid})
     await db.users.delete_one({"id": uid})
-    return {"detail": "Your account and data have been deleted.", "records_removed": removed}
+    return removed
 
 
 # ---------------------------------------------------------------------------

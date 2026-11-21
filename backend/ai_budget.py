@@ -31,9 +31,15 @@ _ENV = {("strong", "free"): "HYMN_AI_STRONG_PER_DAY", ("strong", "premium"): "HY
 def limit_for(user: dict, kind: str) -> int:
     key = (kind, user_plan(user))
     try:
-        return max(0, int(os.environ.get(_ENV[key], DEFAULTS[key])))
+        base = max(0, int(os.environ.get(_ENV[key], DEFAULTS[key])))
     except ValueError:
-        return DEFAULTS[key]
+        base = DEFAULTS[key]
+    # Extra allowance given from the admin page, until a date (inclusive).
+    bonus = user.get("ai_bonus") or {}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if (bonus.get("until") or "") >= today:
+        base += max(0, int(bonus.get(kind) or 0))
+    return base
 
 
 async def spend(db, user: dict, kind: str) -> int:

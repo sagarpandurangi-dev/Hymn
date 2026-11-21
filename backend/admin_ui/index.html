@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Hymn Admin</title>
+<style>
+/* Layout: a sign-in card, then a top bar with tabs (Overview, People, AI, Invites, System, Settings, Log).
+   Each tab is a stack of cards: big numbers, simple bar charts and plain tables. Phone first. */
+:root{--bg:#F7F3EC;--surface:#FFFDF9;--ink:#1F2340;--muted:#5D6770;--line:#E4DED3;--accent:#E8892B;--good:#4F7A5A;--warn:#C9822B;--bad:#B5483B;--bar:#1F2340;
+--ui:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14172B;--surface:#1C2038;--ink:#F1ECE3;--muted:#A7AEBA;--line:#2E3352;--accent:#F0A04F;--good:#8DBA97;--warn:#E3A857;--bad:#E07A6C;--bar:#F1ECE3;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#14172B;--surface:#1C2038;--ink:#F1ECE3;--muted:#A7AEBA;--line:#2E3352;--accent:#F0A04F;--good:#8DBA97;--warn:#E3A857;--bad:#E07A6C;--bar:#F1ECE3;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 var(--ui);padding:0 max(16px,env(safe-area-inset-left)) 48px}
+header{position:sticky;top:0;background:var(--bg);padding:14px 0 8px;z-index:2;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.brand b{font-size:18px;letter-spacing:.01em}.brand b span{color:var(--accent)}
+nav{display:flex;gap:6px;overflow-x:auto;padding-top:10px;scrollbar-width:none}
+nav button{flex:none}
+main{max-width:1040px;margin:16px auto 0;display:grid;gap:14px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:16px;min-width:0}
+.card h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 10px;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.stat .n{font-size:26px;font-weight:650;font-variant-numeric:tabular-nums}
+.stat .l{color:var(--muted);font-size:13px}
+.ok{color:var(--good)}.warning{color:var(--warn)}.stopped,.err{color:var(--bad)}
+button{font:inherit;font-size:14px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:7px 12px;cursor:pointer}
+button.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+button.primary{background:var(--accent);border-color:var(--accent);color:#1F2340;font-weight:600}
+button.danger{color:var(--bad);border-color:var(--bad)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input,select{font:inherit;border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--bg);color:var(--ink);min-width:0}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.scroll{overflow-x:auto}
+.bars{display:flex;align-items:flex-end;gap:2px;height:90px}
+.bars i{flex:1;background:var(--bar);opacity:.8;border-radius:2px 2px 0 0;min-height:1px}
+.bars i:hover{opacity:1}
+.meter{height:10px;background:var(--line);border-radius:5px;overflow:hidden}.meter i{display:block;height:100%}
+.muted{color:var(--muted)}.small{font-size:13px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.pill{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;border:1px solid var(--line);color:var(--muted)}
+.signin{max-width:380px;margin:12vh auto 0;display:grid;gap:10px}
+.signin h1{font-size:28px;margin:0}.signin h1 span{color:var(--accent)}
+#msg{min-height:20px}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--surface);color:var(--ink);width:min(720px,94vw);padding:16px}
+dialog::backdrop{background:rgba(0,0,0,.4)}
+code{font-family:ui-monospace,Menlo,monospace;font-size:13px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<dialog id="dlg"></dialog>
+<script>
+"use strict";
+const API = "/api";
+let token = null;
+try { token = sessionStorage.getItem("hymn.admin.token"); } catch (e) {}
+let tab = "overview";
+
+// --- tiny DOM helpers: every value goes in as text, never as HTML --------------------
+function el(tag, attrs, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") n.className = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined && v !== false) n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const k of kids.flat()) if (k !== null && k !== undefined && k !== false)
+    n.appendChild(typeof k === "string" || typeof k === "number" ? document.createTextNode(String(k)) : k);
+  return n;
+}
+const inr = v => "₹" + Number(v || 0).toLocaleString("en-IN", {maximumFractionDigits: 0});
+const inr2 = v => "₹" + Number(v || 0).toLocaleString("en-IN", {maximumFractionDigits: 2});
+const num = v => Number(v || 0).toLocaleString("en-IN");
+const when = s => s ? new Date(s).toLocaleString("en-IN", {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"}) : "—";
+const day = s => s ? new Date(s).toLocaleDateString("en-IN", {day: "numeric", month: "short", year: "numeric"}) : "—";
+const card = (title, ...kids) => el("section", {class: "card"}, title ? el("h2", {}, title) : null, ...kids);
+const stat = (n, l, cls) => el("div", {class: "stat"}, el("div", {class: "n " + (cls || "")}, n), el("div", {class: "l"}, l));
+function bars(values, label) {
+  const max = Math.max(1, ...values.map(v => v.v));
+  return el("div", {}, el("div", {class: "bars", role: "img", "aria-label": label},
+    values.map(v => el("i", {style: `height:${Math.round(100 * v.v / max)}%`, title: `${v.k}: ${v.t || v.v}`}))),
+    el("div", {class: "row small muted", style: "justify-content:space-between"}, el("span", {}, values[0]?.k || ""), el("span", {}, values[values.length - 1]?.k || "")));
+}
+function table(cols, rows) {
+  return el("div", {class: "scroll"}, el("table", {},
+    el("thead", {}, el("tr", {}, cols.map(c => el("th", {class: c.num ? "num" : ""}, c.h)))),
+    el("tbody", {}, rows.length ? rows.map(r => el("tr", {}, cols.map(c => el("td", {class: c.num ? "num" : ""}, c.f(r))))) :
+      el("tr", {}, el("td", {colspan: cols.length, class: "muted"}, "Nothing yet")))));
+}
+
+// --- API ------------------------------------------------------------------------------
+async function call(method, path, body) {
+  const r = await fetch(API + path, {method, headers: Object.assign({"Content-Type": "application/json"},
+    token ? {Authorization: "Bearer " + token} : {}), body: body ? JSON.stringify(body) : undefined});
+  let data = null; try { data = await r.json(); } catch (e) {}
+  if (r.status === 401) { signOut("Please sign in again."); throw new Error("signed out"); }
+  if (!r.ok) throw new Error((data && (typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail))) || ("Error " + r.status));
+  return data;
+}
+function signOut(msg) { token = null; try { sessionStorage.removeItem("hymn.admin.token"); } catch (e) {} render(msg); }
+
+// --- screens --------------------------------------------------------------------------
+function signin(msg) {
+  const email = el("input", {type: "email", placeholder: "Email", autocomplete: "username", required: true});
+  const pw = el("input", {type: "password", placeholder: "Password", autocomplete: "current-password", required: true});
+  const out = el("div", {id: "msg", class: "small err"}, msg || "");
+  const go = async () => {
+    out.textContent = "";
+    try {
+      const r = await fetch(API + "/auth/login", {method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({email: email.value, password: pw.value})});
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "Couldn't sign in");
+      token = d.access_token; try { sessionStorage.setItem("hymn.admin.token", token); } catch (e) {}
+      render();
+    } catch (e) { out.textContent = e.message; }
+  };
+  pw.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  return el("div", {class: "signin card"}, el("h1", {}, "hymn ", el("span", {}, "॥"), " admin"),
+    el("p", {class: "muted small"}, "For Hymn's admin only. Signing in again every 12 hours keeps this page safe."),
+    email, pw, el("button", {class: "primary", onclick: go}, "Sign in"), out);
+}
+
+const TABS = [["overview", "Overview"], ["people", "People"], ["ai", "AI"], ["invites", "Invites"],
+              ["system", "System"], ["settings", "Settings"], ["log", "Log"]];
+
+async function render(msg) {
+  const app = document.getElementById("app");
+  app.replaceChildren();
+  if (!token) { app.appendChild(signin(msg)); return; }
+  const main = el("main", {}, el("p", {class: "muted"}, "Loading…"));
+  app.append(el("header", {}, el("div", {class: "brand"}, el("b", {}, "hymn ", el("span", {}, "॥"), " admin"),
+    el("div", {class: "row"}, el("button", {onclick: () => render()}, "Refresh"), el("button", {onclick: () => signOut()}, "Sign out"))),
+    el("nav", {}, TABS.map(([k, label]) => el("button", {class: tab === k ? "on" : "", onclick: () => { tab = k; render(); }}, label)))), main);
+  try { main.replaceChildren(...await SCREENS[tab]()); }
+  catch (e) { if (e.message !== "signed out") main.replaceChildren(card("Couldn't load", el("p", {class: "err"}, e.message))); }
+}
+
+const SCREENS = {
+  async overview() {
+    const o = await call("GET", "/admin/overview");
+    const p = o.people, a = o.ai, ret = o.returned;
+    const pct = r => r.percent === null ? "—" : r.percent + "%";
+    const meterColor = a.status === "stopped" ? "var(--bad)" : a.status === "warning" ? "var(--warn)" : "var(--good)";
+    return [
+      card("People", el("div", {class: "grid"}, stat(num(p.total), "accounts"), stat(num(p.active_today), "active today"),
+        stat(num(p.active_7_days), "active this week"), stat(num(p.active_30_days), "active this month"),
+        stat(num(p.new_7_days), "new this week"))),
+      card("Active people, last 30 days", bars(o.active_by_day.map(d => ({k: d.day.slice(5), v: d.people})), "Active people per day")),
+      card("AI spend this month", el("div", {class: "grid"}, stat(inr(a.month_inr), "this month", a.status), stat(inr2(a.today_inr), "today"),
+          stat(inr(a.warn_inr), "warning at"), stat(inr(a.stop_inr), "AI pauses at")),
+        el("div", {class: "meter", style: "margin-top:12px"}, el("i", {style: `width:${Math.min(100, a.used_percent || 0)}%;background:${meterColor}`})),
+        el("p", {class: "small muted"}, a.status === "stopped" ? "The month's budget is used up: AI features are paused until the 1st or until you raise the stop." :
+          a.status === "warning" ? "Past the warning level." : "Within budget."),
+        a.switched_off.length ? el("p", {class: "small warning"}, "Switched off: " + a.switched_off.join(", ")) : null),
+      card("Coming back", el("div", {class: "grid"}, stat(pct(ret.day_1), "came back after a day"),
+        stat(pct(ret.day_7), "after a week"), stat(pct(ret.day_30), "after a month")),
+        el("p", {class: "small muted"}, "Of people who joined in the last 90 days and are old enough to count.")),
+      card("From sign-up to habit", table([{h: "Step", f: r => r[0]}, {h: "People", num: 1, f: r => num(r[1])}],
+        [["Signed up", o.funnel.signed_up], ["Used a feature", o.funnel.used_a_feature],
+         ["Came on 3 different days", o.funnel.active_3_days], ["Active in the last 7 days", o.funnel.active_last_7_days]])),
+      card("Areas used, last 7 days", table([{h: "Area", f: r => r.area}, {h: "People", num: 1, f: r => num(r.people)},
+        {h: "Uses", num: 1, f: r => num(r.calls)}], o.areas_7_days)),
+      card("Features used, last 7 days", table([{h: "Feature", f: r => r.feature}, {h: "Area", f: r => r.area},
+        {h: "People", num: 1, f: r => num(r.people)}, {h: "Uses", num: 1, f: r => num(r.calls)},
+        {h: "Errors", num: 1, f: r => r.errors ? el("span", {class: "err"}, num(r.errors)) : "0"}], o.features_7_days)),
+      card("Beta", el("div", {class: "grid"}, stat(`${num(o.beta.people)} / ${num(o.beta.cap)}`, "accounts / cap"),
+        stat(o.beta.invite_only ? "On" : "Off", "invite-only"), stat(num(o.errors_today), "errors today", o.errors_today ? "err" : ""))),
+    ];
+  },
+
+  async people() {
+    const q = el("input", {type: "search", placeholder: "Search email, name or group", value: SCREENS._q || ""});
+    const sort = el("select", {}, [["last_active", "Last active"], ["ai", "AI spend"], ["joined", "Newest"]]
+      .map(([v, l]) => el("option", {value: v, selected: (SCREENS._sort || "last_active") === v}, l)));
+    const go = () => { SCREENS._q = q.value; SCREENS._sort = sort.value; render(); };
+    q.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+    sort.addEventListener("change", go);
+    const d = await call("GET", `/admin/users?q=${encodeURIComponent(SCREENS._q || "")}&sort=${SCREENS._sort || "last_active"}`);
+    return [card(`People (${d.count})`, el("div", {class: "row", style: "margin-bottom:10px"}, q, sort, el("button", {onclick: go}, "Search")),
+      table([{h: "Person", f: r => el("div", {}, el("div", {}, r.email), el("div", {class: "small muted"}, (r.name || "") + (r.cohort ? " · " + r.cohort : "")))},
+        {h: "Plan", f: r => el("span", {class: "pill"}, r.plan)},
+        {h: "Last active", f: r => when(r.last_active)},
+        {h: "Days (30)", num: 1, f: r => num(r.active_days_30)},
+        {h: "AI (month)", num: 1, f: r => inr2(r.ai_month_inr)},
+        {h: "Uses most", f: r => r.top_features.join(", ") || "—"},
+        {h: "", f: r => el("div", {class: "row"}, r.suspended ? el("span", {class: "pill err"}, "paused") : null,
+          el("button", {onclick: () => person(r.id)}, "Open"))}], d.users))];
+  },
+
+  async ai() {
+    const d = await call("GET", "/admin/ai?days=30");
+    return [
+      card("AI spend, last 30 days", el("div", {class: "grid"}, stat(inr(d.month_inr), "this month"), stat(inr(d.warn_inr), "warning at"),
+        stat(inr(d.stop_inr), "pauses at"), stat("₹" + d.usd_inr, "per US$")),
+        bars(d.by_day.map(x => ({k: x.day.slice(5), v: x.inr, t: inr2(x.inr) + " · " + x.calls + " calls"})), "AI spend per day")),
+      card("By feature this month", table([{h: "Feature", f: r => r.feature}, {h: "Calls", num: 1, f: r => num(r.calls)},
+        {h: "Failed", num: 1, f: r => num(r.failed)}, {h: "Cost", num: 1, f: r => inr2(r.inr)},
+        {h: "", f: r => r.on ? "" : el("span", {class: "pill warning"}, "off")}], d.by_feature)),
+      card("By model this month", table([{h: "Model", f: r => el("span", {style: "white-space:nowrap"}, r.model.replace(/^claude-/, ""))}, {h: "Calls", num: 1, f: r => num(r.calls)},
+        {h: "Read", num: 1, f: r => num(r.input)}, {h: "Wrote", num: 1, f: r => num(r.output)},
+        {h: "Searches", num: 1, f: r => num(r.searches)}, {h: "Cost", num: 1, f: r => inr2(r.inr)}], d.by_model)),
+      card("Top spenders this month", table([{h: "Person", f: r => r.email || "(deleted)"}, {h: "Calls", num: 1, f: r => num(r.calls)},
+        {h: "Cost", num: 1, f: r => inr2(r.inr)}, {h: "", f: r => r.user_id ? el("button", {onclick: () => person(r.user_id)}, "Open") : ""}], d.top_people)),
+      card("Switch AI features on or off", el("p", {class: "small muted"}, "Switching one off makes it say “not available right now” in the app. Nothing is lost."),
+        el("div", {class: "row"}, d.features.map(f => el("button", {class: f.on ? "on" : "danger", onclick: async () => {
+          const s = await call("GET", "/admin/settings");
+          const off = new Set(s.ai_off); if (f.on) off.add(f.feature); else off.delete(f.feature);
+          await call("PUT", "/admin/settings", {ai_off: [...off]}); render(); }}, (f.on ? "✓ " : "✕ ") + f.feature)))),
+    ];
+  },
+
+  async invites() {
+    const d = await call("GET", "/admin/invites");
+    const count = el("input", {type: "number", min: 1, max: 50, value: 5, style: "width:80px", "aria-label": "How many codes"});
+    const uses = el("input", {type: "number", min: 1, max: 1000, value: 1, style: "width:80px", "aria-label": "Uses per code"});
+    const cohort = el("input", {placeholder: "Group, e.g. friends", maxlength: 40});
+    const out = el("div", {class: "small"});
+    return [card("Make invite codes", el("div", {class: "row"}, el("label", {class: "small muted"}, "Codes ", count),
+        el("label", {class: "small muted"}, "Uses each ", uses), cohort,
+        el("button", {class: "primary", onclick: async () => {
+          const r = await call("POST", "/admin/invites", {count: +count.value, max_uses: +uses.value, cohort: cohort.value});
+          out.replaceChildren(el("p", {}, "New codes: ", el("code", {}, r.codes.join("  ")))); setTimeout(render, 4000); }}, "Make")), out,
+        el("p", {class: "small muted"}, "Every person also gets their own code to share (see Settings for how many uses).")),
+      card(`Codes (${d.length})`, table([{h: "Code", f: r => el("code", {}, r.code)}, {h: "From", f: r => r.from || "—"},
+        {h: "Group", f: r => r.cohort || "—"}, {h: "Used", num: 1, f: r => `${r.uses} / ${r.max_uses}`},
+        {h: "", f: r => r.active ? el("button", {onclick: async () => { await call("POST", `/admin/invites/${r.code}/off`); render(); }}, "Turn off") : el("span", {class: "pill"}, "off")}], d))];
+  },
+
+  async system() {
+    const d = await call("GET", "/admin/system");
+    const w = d.whatsapp;
+    return [
+      card("Errors, last 7 days", table([{h: "Where", f: r => el("code", {}, r.route)}, {h: "Count", num: 1, f: r => num(r.count)}], d.errors_7_days_by_route)),
+      card("Latest errors", table([{h: "When", f: r => when(r.at)}, {h: "Where", f: r => el("code", {}, r.method + " " + r.route)},
+        {h: "Status", num: 1, f: r => r.status}], d.errors_recent)),
+      card("Notifications today", el("div", {class: "grid"}, Object.keys(d.nudges_today).length ?
+        Object.entries(d.nudges_today).map(([k, v]) => stat(num(v), k)) : [stat("0", "sent")], stat(num(d.push_devices), "phones registered"))),
+      card("WhatsApp", w.set_up ? el("div", {class: "grid"}, stat(num(w.linked), "connected"), stat(num(w.paused), "paused / stopped"),
+        stat(num(w.messages_in_24h), "messages in, 24h"), stat(`${num(w.reminder_numbers_24h)} / ${num(w.daily_number_limit)}`, "reminder numbers today / limit"))
+        : el("p", {class: "muted"}, "Not set up yet: waiting for Meta's approval and the WhatsApp keys in Railway.")),
+    ];
+  },
+
+  async settings() {
+    const s = await call("GET", "/admin/settings");
+    const f = (key, label, attrs) => el("label", {class: "small muted", style: "display:grid;gap:4px"}, label,
+      el("input", Object.assign({id: "s-" + key, value: s[key]}, attrs || {type: "number"})));
+    const invite = el("input", {type: "checkbox", id: "s-invite_only", checked: s.invite_only});
+    const out = el("p", {class: "small"});
+    return [card("Budget and beta", el("div", {class: "grid"},
+        f("ai_warn_inr", "AI warning at (₹ a month)"), f("ai_stop_inr", "AI pauses at (₹ a month)"),
+        f("usd_inr", "₹ per US$ (for cost figures)", {type: "number", step: "0.1"}),
+        f("beta_cap", "Most accounts while invite-only"), f("invites_per_person", "Uses of each person's own code")),
+      el("label", {class: "row", style: "margin-top:12px"}, invite, "Invite-only sign-up"),
+      el("p", {class: "small muted"}, "Turn invite-only on once the app's sign-up screen has the invite box; until then it would stop everyone signing up."),
+      el("button", {class: "primary", onclick: async () => {
+        const v = k => +document.getElementById("s-" + k).value;
+        try { await call("PUT", "/admin/settings", {ai_warn_inr: v("ai_warn_inr"), ai_stop_inr: v("ai_stop_inr"), usd_inr: v("usd_inr"),
+          beta_cap: v("beta_cap"), invites_per_person: v("invites_per_person"), invite_only: invite.checked}); out.textContent = "Saved."; out.className = "small ok"; }
+        catch (e) { out.textContent = e.message; out.className = "small err"; } }}, "Save"), out)];
+  },
+
+  async log() {
+    const d = await call("GET", "/admin/audit");
+    return [card("What the admin changed", table([{h: "When", f: r => when(r.at)}, {h: "Action", f: r => r.action},
+      {h: "Person", f: r => r.target || "—"}, {h: "Details", f: r => el("code", {}, Object.keys(r.detail || {}).length ? JSON.stringify(r.detail) : "")}], d))];
+  },
+};
+
+// --- one person -------------------------------------------------------------------------
+async function person(id) {
+  const dlg = document.getElementById("dlg");
+  dlg.replaceChildren(el("p", {class: "muted"}, "Loading…")); dlg.showModal();
+  const u = await call("GET", `/admin/users/${encodeURIComponent(id)}`);
+  const act = async (fn) => { try { await fn(); dlg.close(); render(); } catch (e) { alert(e.message); } };
+  dlg.replaceChildren(
+    el("div", {class: "row", style: "justify-content:space-between"}, el("h2", {style: "margin:0;font-size:18px"}, u.email),
+      el("button", {onclick: () => dlg.close()}, "Close")),
+    el("p", {class: "small muted"}, `${u.name || ""} · joined ${day(u.joined)} · last active ${when(u.last_active)}` +
+      (u.app_version ? ` · app ${u.app_version}` : "") +
+      (u.invited_by ? ` · invited by ${u.invited_by}` : "") + (u.cohort ? ` · ${u.cohort}` : "")),
+    el("div", {class: "grid"}, stat(u.plan, "plan"), stat(num(u.active_days_30), "active days (30)"),
+      stat(inr2(u.ai_month_inr), "AI this month"), stat(num(u.invites_used), "friends invited"), stat(num(u.errors_7_days), "errors (7 days)", u.errors_7_days ? "err" : "")),
+    el("h3", {class: "small muted"}, "Activity, last 30 days"), bars(u.activity_30_days.map(d => ({k: d.day.slice(5), v: d.calls})), "Uses per day"),
+    el("h3", {class: "small muted"}, "Setup"), el("div", {class: "small"}, u.setup.map(s => el("div", {class: s.done ? "ok" : "muted"}, (s.done ? "✓ " : "○ ") + s.title))),
+    table([{h: "Feature (30 days)", f: r => r.feature}, {h: "Uses", num: 1, f: r => num(r.calls)}], u.features_30_days),
+    table([{h: "AI by feature (month)", f: r => r.feature}, {h: "Calls", num: 1, f: r => num(r.calls)}, {h: "Cost", num: 1, f: r => inr2(r.inr)}], u.ai_month_by_feature),
+    el("p", {class: "small muted"}, "“private” is Health: it's never shown per person."),
+    el("h3", {class: "small muted"}, "Actions"),
+    el("div", {class: "row"},
+      el("button", {onclick: () => act(() => call("POST", `/admin/users/${id}/plan`, {plan: u.plan === "premium" ? "free" : "premium"}))},
+        u.plan === "premium" ? "Make free" : "Give Premium"),
+      el("button", {onclick: () => act(() => call("POST", `/admin/users/${id}/plan`, {plan: "default"}))}, "Plan from Railway setting"),
+      el("button", {onclick: () => act(() => call("POST", `/admin/users/${id}/ai-allowance`, {strong: 30, light: 200, days: 7}))}, "Extra AI for a week"),
+      el("button", {onclick: () => act(() => call("POST", `/admin/users/${id}/sign-out`))}, "Sign out everywhere"),
+      el("button", {class: "danger", onclick: () => act(() => call("POST", `/admin/users/${id}/suspend`, {suspended: !u.suspended}))}, u.suspended ? "Un-pause account" : "Pause account"),
+      el("button", {class: "danger", onclick: () => { const e = prompt("This deletes the account and all its data. Type their email to confirm:");
+        if (e) act(() => call("DELETE", `/admin/users/${id}`, {confirm_email: e})); }}, "Delete account")));
+}
+
+render();
+</script>
+</body>
+</html>
