@@ -481,6 +481,14 @@ async def parse_and_card(db, link: dict, text: str, wamids: List[str], now: date
     user = await _user(db, uid)
     if not user:
         return
+    import plans
+    month_start = now.strftime("%Y-%m-01")
+    used = await db.tasks.count_documents({"user_id": uid, "source": "whatsapp", "created_at": {"$gte": month_start}})
+    if not plans.within(user, "whatsapp_tasks_month", used):
+        await send_text(db, wa_id, f"You've added {plans.limit(user, 'whatsapp_tasks_month')} tasks from WhatsApp "
+                                   "this month — the free plan's limit. Premium has no limit, or add tasks in the app.",
+                        user_id=uid, now=now)
+        return
     try:
         await ai_budget.spend(db, user, "light")
     except HTTPException:

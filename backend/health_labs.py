@@ -30,7 +30,6 @@ import claude_client
 from claude_client import AssistantUnavailable
 from deps import get_current_user, get_db
 from health import METRICS, _d, _date, _profile, _store, rate, subject
-from plans import user_plan
 
 labs_router = APIRouter(prefix="/health/labs", tags=["health"])
 
@@ -138,11 +137,9 @@ def to_hymn_unit(metric: str, value: str, unit: str) -> Optional[Decimal]:
 
 
 def allowance(user: dict) -> int:
-    key, default = (("HYMN_LAB_READS_PREMIUM", 20) if user_plan(user) == "premium" else ("HYMN_LAB_READS_FREE", 3))
-    try:
-        return max(0, int(os.environ.get(key, default)))
-    except ValueError:
-        return default
+    import plans
+    cap = plans.limit(user, "lab_reads_month")
+    return 10 ** 6 if cap is None else cap
 
 
 class Upload(BaseModel):

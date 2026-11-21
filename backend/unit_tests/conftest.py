@@ -19,6 +19,21 @@ if str(_BACKEND_DIR) not in sys.path:
 os.environ["HYMN_RUNTIME_MODE"] = "test"
 os.environ.setdefault("MONGO_URL", "mongodb://127.0.0.1:1")  # never contacted
 os.environ.setdefault("DB_NAME", "hymn_unit_tests")
+# New people get a 14-day Premium trial in production; tests start them on the free plan unless a test
+# switches the trial on (see test_billing.py).
+os.environ.setdefault("HYMN_TRIAL_DAYS", "0")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_settings():
+    """Settings are cached in memory; each test starts from the defaults."""
+    import metering
+    import plans
+    metering.reset_cache()
+    plans.mirror({})
+    yield
+    metering.reset_cache()
+    plans.mirror({})
 
 
 @pytest.fixture()
