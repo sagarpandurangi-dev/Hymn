@@ -344,6 +344,7 @@ Build Family & Relationships (Life tab). Gentle by design: never "overdue", no s
 3. Person screen (GET /api/people/{id}): details, next day, recent moments.
 4. Log a moment: quick buttons Called, Video call, Met, Meal, Messaged, Helped; time chips 15m / 30m / 1h / 2h+; optional note; several people allowed. POST /api/people/moments {person_ids[], date, kind: call|video_call|visit|meal|outing|message|help|celebration|other, minutes, note}. Delete: DELETE /api/people/moments/{id}.
 5. Life tab → Family card line: the first of might_like_to_hear_from_you or coming_up.
+6. No limit on how many people (the server takes up to 300): a search box at the top of the list once there are more than 10, and "Add from contacts" (expo-contacts, ask permission only when tapped; pick several; name + birthday if the contact has one; relation and circle default to friend / close, editable after). In the welcome "People who matter" step change the subtitle to "Start with up to 3. You can add everyone else later."
 
 Tell me what you changed.
 ```

@@ -132,6 +132,12 @@ missing response fields on the backend rather than spending Emergent credits. Af
 `frontend/` from `emergent-frontend` into `main` (never its `backend/`) and switch on
 `HYMN_REQUIRE_CHECKIN_DURATION=1`.
 
+Ideas parked by the owner (22 Nov 2026: "remember it, don't build it now"; focus is making what exists work and feel intuitive):
+- "Call back" reminders: a quick in-app button (pick a person → in 1 hour / this evening) and WhatsApp "call back Ramesh at 6". Phones don't let apps hook the decline/voicemail screen; later, Android-only opt-in call-screening role ("Remind me to call back?" after a missed call) — replaces Truecaller, so a setting, never default.
+- SMS money reading (Android only, native build): bank/card SMS → spending, via Google Play's "SMS-based money management" declaration. iPhone never allows it. Call-log access: never (Play allows it only for dialer/caller-ID apps).
+- Home city + pincode on the profile, prefilling plan intents (demand.py).
+- Pamphlet handoff for the Claude session building Pamphlet (how to call `/api/partner/demand`).
+
 Later (owner's strategy; the anonymous counting part is built as `demand.py`, sharing switched off): intent marketplace —
 classify fulfillable brain-dump items (category, locality, time window),
 aggregate demand counts with minimum-count suppression, per-item opt-in
