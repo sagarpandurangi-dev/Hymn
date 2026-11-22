@@ -450,6 +450,8 @@ class SettingsUpdate(BaseModel):
     razorpay_plan_founding: Optional[str] = Field(default=None, max_length=60)
     premium_only: Optional[List[str]] = None
     limits: Optional[dict] = None
+    demand_sharing_on: Optional[bool] = None
+    demand_min_count: Optional[int] = Field(default=None, ge=10, le=100000)
 
 
 def _with_choices(s: dict) -> dict:

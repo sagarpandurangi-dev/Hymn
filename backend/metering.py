@@ -163,6 +163,9 @@ DEFAULT_SETTINGS = {
     "razorpay_plan_founding": "",
     "premium_only": None,               # None = plans.DEFAULT_PREMIUM_ONLY
     "limits": None,                     # only the limits changed on the admin page; see plans.default_limits()
+    # Demand reports for local sellers (demand.py): off until a lawyer has reviewed sharing.
+    "demand_sharing_on": False,
+    "demand_min_count": 20,             # sellers only see groups of at least this many people
 }
 _cache: dict = {}
 

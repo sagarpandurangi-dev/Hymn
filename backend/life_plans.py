@@ -287,6 +287,8 @@ class PlanCreate(BaseModel):
     serves_plan_id: Optional[str] = None
     requirements: List[Requirement] = Field(min_length=1, max_length=50)
     risks: List[Risk] = Field(default_factory=list, max_length=50)
+    # What it is, where and for how much (counted anonymously for local sellers only with consent; demand.py).
+    intent: Optional[Dict[str, Any]] = None
 
 
 class QuickTime(BaseModel):
@@ -347,7 +349,8 @@ def _clean_requirement(r: dict, target: str) -> dict:
 
 async def _save(db, user_id: str, title: str, target: str, requirements: List[dict], risks: List[dict],
                 status: str = "active", chat_id: Optional[str] = None, for_what: str = "",
-                serves_plan_id: Optional[str] = None) -> dict:
+                serves_plan_id: Optional[str] = None, intent: Optional[dict] = None,
+                template: Optional[str] = None) -> dict:
     _date(target, "target_date")
     if serves_plan_id and not await db.life_plans.find_one({"id": serves_plan_id, "user_id": user_id}, {"_id": 1}):
         raise HTTPException(status_code=400, detail="The plan this serves wasn't found.")
@@ -356,6 +359,8 @@ async def _save(db, user_id: str, title: str, target: str, requirements: List[di
             "serves_plan_id": serves_plan_id,
             "requirements": [_clean_requirement(r, target) for r in requirements],
             "risks": [{**k, "id": str(uuid.uuid4())} for k in risks], "created_at": _now(), "updated_at": _now()}
+    import demand
+    plan["intent"] = demand.clean_intent({**plan, "template": template}, intent)
     await db.life_plans.insert_one(dict(plan))
     plan.pop("_id", None)
     return plan
@@ -388,7 +393,7 @@ async def create_plan(body: PlanCreate, current_user: dict = Depends(get_current
     db = get_db()
     plan = await _save(db, current_user["id"], body.title, body.target_date,
                        [r.model_dump() for r in body.requirements], [k.model_dump() for k in body.risks],
-                       for_what=body.for_what, serves_plan_id=body.serves_plan_id)
+                       for_what=body.for_what, serves_plan_id=body.serves_plan_id, intent=body.intent)
     return await _evaluated(db, current_user["id"], plan)
 
 
