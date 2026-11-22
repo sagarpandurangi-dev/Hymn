@@ -1,8 +1,8 @@
-# Emergent prompts, A to S
+# Emergent prompts, A to S (plus 0, the design pass)
 
 Paste **one prompt at a time, in order**. After each one, use **"Save to GitHub"** onto the `emergent-frontend` branch and tell Claude, so it can check the work before the next. Every prompt starts with the same two safety lines: keep them.
 
-**Status (19 Nov 2026):** A–M are built and saved. N–S are what's left (S, Premium, added 21 Nov): the old N–U, merged into five tighter prompts to save credits (old U, statement polish, moved to "Later").
+**Status (19 Nov 2026):** A–M are built and saved. Next: **0. Design pass** first (added 21 Nov, attach the four mock-up images), then **0b. Movement and feedback**, then N–S (S, Premium, added 21 Nov): the old N–U, merged into five tighter prompts to save credits (old U, statement polish, moved to "Later").
 
 A–B finish the earlier fixes. C lays the groundwork the rest builds on. D–E are the first-time experience and the Me screen. F–L are Money, time and plans. M–O are Health. P–R are Family, Learning and Work.
 
@@ -229,11 +229,69 @@ Build the Health screens (Life tab → Health). Tone: calm, never scary, never g
 Tell me what you changed.
 ```
 
+## 0. Design pass (run this first, before N)
+
+```text
+Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here. Keep every testID.
+
+Give the whole app a new, warmer look. Today it feels like accounting software. I've attached mock-ups of the new Today, Money, Life and My week screens; match them.
+
+1. Fonts: add @expo-google-fonts/outfit (400, 500, 600) and @expo-google-fonts/figtree (400, 500, 600). Load them in app/_layout.tsx with useFonts and keep the splash screen until they're loaded.
+2. src/lib/theme.ts — keep every existing key so screens keep working, change the values:
+   colors: surface #FAF7F1, onSurface #1F2340, surfaceSecondary #FFFFFF, onSurfaceSecondary #6B7180, surfaceTertiary #F1ECE3, onSurfaceTertiary #A3A7B0, surfaceInverse #1F2340, onSurfaceInverse #FAF7F1, brand #1F2340, brandPrimary #1F2340, onBrandPrimary #FFFFFF, brandSecondary #E0812A, brandTertiary #FBEBDB, onBrandTertiary #7A3E0C, success #5E7B63, warning #C9822B, error #B5483B, border #ECE6DB, borderStrong #DDD5C8, divider #ECE6DB; add accent #E0812A, accentSoft #FBEBDB, successSoft #E4ECE3.
+   fonts: display Outfit_500Medium, displayLight Outfit_400Regular, displayBold Outfit_600SemiBold, body Figtree_400Regular, bodyMedium Figtree_500Medium, bodyBold Figtree_600SemiBold.
+   Add a type scale (only these six): display 34/40 Outfit 400, title 26/32 Outfit 500, heading 20/26 Outfit 500, body 16/24 Figtree, small 14/20 Figtree, label 12/16 Figtree 600 uppercase letter-spacing 1. Spacing: keep the scale, side gutter 20. Radius: card 18, button 14.
+3. Add src/components/ui/: Text (variants display, title, heading, body, small, label; default body), Card (white, radius 18, soft shadow; variants highlight = accentSoft, good = successSoft), ListRow (plain row, hairline divider, left text + optional right value), SectionLabel. Then across app/ and src/: remove every fontFamily "Georgia"/"System", and replace every fontSize literal with the nearest type style (10–12 → label or small, 13–15 → small, 16–17 → body, 18–22 → heading, 24–28 → title, 32+ → display). No new sizes or colours anywhere.
+4. Add src/lib/format.ts and use it wherever money, dates or durations are shown:
+   - formatMoney: ₹12,450 (Indian grouping), ₹1.84 L from 1 lakh, ₹2.5 Cr from 1 crore; no ".00"; never "INR" before rupee amounts; other currencies "USD 1,250"; incoming "+ ₹1.1 L".
+   - formatDay: Today / Tomorrow / Yesterday, a weekday within the coming week, else "24 Nov" (year only if not this year). Never show YYYY-MM-DD.
+   - formatDuration: "45 min", "3h", "3h 20m".
+5. Layout everywhere: screen titles left-aligned with no full stop ("Today", not "Today."); sections are a SectionLabel and plain ListRows on the paper background, not a grey box per section; Card only for things that stand apart; hide rows whose value is zero; empty states are one friendly line plus a button, never a table of zeros. The + button and primary buttons use ink #1F2340.
+6. Today (app/(tabs)/today.tsx) — rebuild from GET /api/screens/today (one call):
+   - date_label as label; greeting in title size followed by " ॥" in accent.
+   - "Your 3 things": things[] as rows with a rounded checkbox; tapping an open one → PUT /api/tasks/{task_id} {"status": "done"}, then it shows a sage tick and a faint strikethrough; note in small soft text on the right; if more_things > 0 a "+N more" link to the tasks list. If things is empty: "Nothing due today." with an Add button.
+   - highlight (when not null): a highlight Card with when (small, soft), title (heading), detail (small); tap → its screen (people → Family & Relationships, finance/planned → Planned money).
+   - Two small Cards side by side: "Free {free_time.when}" with free_time.label, and "Left to spend" with money.label (hide either when null).
+   - review (when not null): one row "Daily review · {open} waiting" → the review screen.
+   - setup (when not null): one slim row "Finish setting up · {done} of {of}" → next.screen (same screen keys as before).
+   - Remove the My week, Daily review, Planning and Required Check-ins cards from Today (those screens stay reachable from their tabs and Life).
+7. Life tab — from GET /api/screens/life: a two-column grid of Cards, Plans full width at the end. Each: a small rounded icon tile in a soft tint (Health sage, Family saffron soft, Learning #E6E8F3, Work #F1E9DE, Plans saffron soft), title (heading), line (small, soft). status "attention" adds a small saffron dot; status "setup" shows the line in accent as an invitation. Tap → its screen.
+8. Finance tab (rename the tab and title to "Money") — top part from the headline in GET /api/screens/finance: label "You're worth", net_worth_label in display size; a Card "Free to spend this month" with left_to_spend_label; "Coming up": coming_up as ListRows (title with when underneath in small soft, amount_label on the right; direction "in" in sage). The existing sections stay below with the new look, zero rows hidden, and these words: Liquid → Ready to use, Semi-liquid → Takes a few days, Illiquid → Long-term, Recurring income → Comes in every month, Recurring expenses → Goes out every month.
+9. My week: a one-sentence summary at the top in heading size (e.g. "Work ran 3 hours over this week." from the existing numbers), then each area as a simple horizontal bar of actual hours with a thin mark for planned; the existing tables move under "See the full 168 hours".
+10. Words: "Required Check-ins" → "Check-ins due"; anywhere a status code shows (todo, pending_account_assignment, on_track), show plain words instead.
+11. Small touches: the checkbox tick animates (150 ms); cards fade in once on load; nothing moves when the phone's "reduce motion" is on.
+
+Tell me what you changed.
+```
+
+## 0b. Movement and feedback (run right after 0)
+
+```text
+Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
+Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here. Keep every testID.
+
+Make the app respond to every touch. Today taps do nothing visible and screens just appear. Use react-native-reanimated (already a dependency) and add expo-haptics. Put the pieces in src/components/ui so every screen uses the same ones.
+
+1. Tap: a Tap wrapper (replaces bare TouchableOpacity/Pressable for rows, cards and buttons): presses down to scale 0.97 in 120 ms and springs back. A haptics helper: light impact for ticking a task, primary buttons and switches; success notification when something is finished; error notification with a gentle horizontal shake of the field when a form has a problem (show the server's message under it). A "Vibration on taps" switch in Me → Settings (on by default, remembered in AsyncStorage).
+2. Loading: a Skeleton component (soft shimmering blocks in border #ECE6DB / paper #F7F3EC). Every screen's first load shows skeleton blocks shaped like its content instead of a spinner or a blank screen. Every list and the Today, Money and Life screens pull down to refresh (RefreshControl tinted ink #1F2340).
+3. Saving: a Button component with a loading state: small spinner + action word ("Adding…", "Saving…", "Deleting…"), disabled until done.
+4. Arrival: cards and list rows fade in and rise 8 px, staggered 50 ms, on a screen's first load only. Numbers in display or title size (money, hours) count up over 600 ms. Progress bars and meters fill from zero over 800 ms.
+5. Screens: stack screens slide in from the side (native stack defaults); tab switches cross-fade in 150 ms; pickers and add forms open as bottom sheets that spring up, with a dim backdrop that closes them on tap.
+6. Today's 3 things: tapping an open one → the checkbox fills sage with a small spring (scale 1.15 then back), the tick draws, the title fades and strikes through; after 650 ms the row fades and slides out and the next task (if any) slides in; a toast says "Nice. N left today." When all are done: "All done for today ॥" with a small bounce of the ॥ and a success buzz.
+7. Toasts: a ToastHost upgrade — slide down from the top, ink background, white text, auto-hide after 2.5 s; for deletes show "Undo" (re-creates the item) when the API allows.
+8. The + button rotates into × while the add sheet is open.
+9. Everything is quick (under 300 ms, ease-out; springs damping ~15, no repeated wobble). When the phone has "reduce motion" on, keep fades and drop movement and count-ups.
+
+Tell me what you changed.
+```
+
 ## N. Health 2: food log and habits to change
 
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
 Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
+Use the design pass: Text / Card / ListRow / SectionLabel from src/components/ui and formatMoney / formatDay / formatDuration from src/lib/format.ts; no new font sizes or colours.
 
 Add two parts to Health (both need health consent). Tone: supportive, never shaming; no streaks anywhere.
 
@@ -259,6 +317,7 @@ Tell me what you changed.
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
 Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
+Use the design pass: Text / Card / ListRow / SectionLabel from src/components/ui and formatMoney / formatDay / formatDuration from src/lib/format.ts; no new font sizes or colours.
 
 Show <DraftNote/> wherever rules_reviewed is false.
 1. Check-ups (GET /api/health/checkups): overdue first, then never done, due soon, OK: label, why, last done, next due, "Ask your doctor" tag when ask_doctor. "Done" → date → POST /api/health/checkups/{key}/done {date}. If missing_profile is not empty: "Add your date of birth and sex for a better list."
@@ -277,6 +336,7 @@ Tell me what you changed.
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
 Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
+Use the design pass: Text / Card / ListRow / SectionLabel from src/components/ui and formatMoney / formatDay / formatDuration from src/lib/format.ts; no new font sizes or colours.
 
 Build Family & Relationships (Life tab). Gentle by design: never "overdue", no streaks.
 1. Home (GET /api/people/summary): hours with your inner circle this month, people reached, "Might like to hear from you" (up to 3, "It's been N days"), "Coming up" ("Amma's birthday · Friday · turns 70"). Below it, people (GET /api/people) grouped Inner circle / Close / Wider, each with relation, last together ("3 days ago"), a soft dot when might_like_to_hear_from_you, and next_day.
@@ -293,6 +353,7 @@ Tell me what you changed.
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
 Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
+Use the design pass: Text / Card / ListRow / SectionLabel from src/components/ui and formatMoney / formatDay / formatDuration from src/lib/format.ts; no new font sizes or colours.
 
 Build Learning (Life tab → Learning; the old Knowledge screen stays reachable as "Older learning goals").
 1. List (GET /api/learning): title, status, pace (on_track / behind by N h / ahead), today_minutes. Button "Start learning something".
@@ -314,6 +375,7 @@ Tell me what you changed.
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
 Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
+Use the design pass: Text / Card / ListRow / SectionLabel from src/components/ui and formatMoney / formatDay / formatDuration from src/lib/format.ts; no new font sizes or colours.
 
 Build Work (Life tab → Work): work pays for the life you want and grows you, without eating everything else.
 1. Roles (GET /api/work/roles): type, organisation, title, planned hours a week, commute hours a week. Add / edit (POST /api/work/roles, PATCH /api/work/roles/{id}): type, organisation, title, started_on, work days, start/end time, office days, commute minutes each way, next appraisal date, and — only for salaried / articleship — leave types (key earned/casual/sick/other, label, per year, carried forward, carry-forward limit, leave year starts MM-DD). "I left this job" → PATCH {ended_on}. Show only the parts in the role's features {leave, appraisal, payslips, wins, time}.
@@ -336,6 +398,7 @@ Tell me what you changed.
 ```text
 Do not modify anything under backend/. Do not change the backend URL in frontend/src/lib/api.ts.
 Keep testing light: one quick check per screen with the existing QA account. Don't create new accounts, don't run long test suites, and don't add anything not listed here.
+Use the design pass: Text / Card / ListRow / SectionLabel from src/components/ui and formatMoney / formatDay / formatDuration from src/lib/format.ts; no new font sizes or colours.
 
 Add Premium to the app.
 1. Me → "Premium" (GET /api/billing): the plan in one line — "Premium · free trial, 9 days left" (in_trial, trial_days_left), "Premium · beta pass", "Premium · renews 12 Jan" (subscription.renews_on), "Premium · ends 12 Jan" (subscription.ends_on), or "Free". "Founding member" tag when founding_member is true.
