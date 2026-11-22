@@ -2950,6 +2950,7 @@ from planned_money import planned_money_router, ensure_planned_money_indexes  # 
 from whatsapp import whatsapp_router, ensure_whatsapp_indexes  # noqa: E402
 from metering import ensure_metering_indexes  # noqa: E402
 from billing import billing_router, billing_admin_router, ensure_billing_indexes  # noqa: E402
+from demand import demand_router, demand_admin_router, partner_router  # noqa: E402
 from admin import admin_router, invites_router, admin_page_router, ensure_admin_indexes  # noqa: E402
 import ledger_conversion  # noqa: F401,E402  (registers conversion routes on ledger_router)
 from statements import statements_router, ensure_statement_indexes  # noqa: E402
@@ -2993,6 +2994,9 @@ api_router.include_router(admin_router)
 api_router.include_router(invites_router)
 api_router.include_router(billing_router)
 api_router.include_router(billing_admin_router)
+api_router.include_router(demand_router)
+api_router.include_router(demand_admin_router)
+api_router.include_router(partner_router)
 app.include_router(api_router)
 app.include_router(admin_page_router)
 

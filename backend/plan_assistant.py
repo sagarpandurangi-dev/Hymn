@@ -83,6 +83,10 @@ tracks. If it says health isn't shared, ask once whether they'd like to switch i
 pressure. If "weight_loss_needs_doctor" is present, don't build a weight-loss plan: suggest seeing a doctor
 first. If they look after someone, remember that care takes time and money too.
 
+Buying something big (a home, a car, a two-wheeler, a wedding, a renovation): find out, among your questions,
+the city and area, the size or type (2 or 3 BHK, plot; SUV, hatchback, electric) and the full budget they have
+in mind, and pass them in propose_plan's intent. Don't ask again for what they already said.
+
 Time off: a plan that needs days away from work (a trip, a wedding, study leave) — call check_leave.
 
 Learning goals (an exam, a licence, a skill, a language): don't plan them here — tell the person to start a
@@ -146,6 +150,16 @@ TOOLS = [
          "title": {"type": "string"}, "target_date": {"type": "string"},
          "for_what": {"type": "string", "description": "The life / dream this plan serves, in their words"},
          "serves_plan_id": {"type": "string", "description": "id of the dream plan this serves, if any"},
+         "intent": {"type": "object", "description": (
+             "What is being bought or done, as the person told you (leave out what you don't know)"),
+             "properties": {
+                 "category": {"type": "string", "enum": ["property", "car", "two_wheeler", "wedding", "education",
+                                                         "travel", "gadget", "renovation", "business", "health",
+                                                         "child", "other"]},
+                 "form": {"type": "string", "description": "e.g. 2 BHK, 3 BHK, Villa, Plot; SUV, Sedan, Electric"},
+                 "budget_inr": {"type": "number", "description": "the full price they have in mind, in rupees"},
+                 "city": {"type": "string"}, "area": {"type": "string", "description": "locality, e.g. Whitefield"},
+                 "pincode": {"type": "string"}}},
          "requirements": {"type": "array", "items": {"type": "object", "properties": {
              "area": {"type": "string", "enum": list(life_plans.AREAS)}, "what": {"type": "string"},
              "kind": {"type": "string", "enum": ["time", "money", "condition", "health"]},
@@ -387,7 +401,8 @@ async def run_tool(db, user: dict, chat: dict, name: str, args: dict) -> Any:
     if name == "propose_plan":
         plan = await life_plans._save(db, uid, args["title"], args["target_date"], args["requirements"],
                                       args.get("risks") or [], status="draft", chat_id=chat["id"],
-                                      for_what=args.get("for_what") or "", serves_plan_id=args.get("serves_plan_id"))
+                                      for_what=args.get("for_what") or "", serves_plan_id=args.get("serves_plan_id"),
+                                      intent=args.get("intent"))
         evaluated = await life_plans._evaluated(db, uid, plan)
         chat.setdefault("plan_ids", []).append(plan["id"])
         return {"plan_id": plan["id"], "verdict": evaluated["verdict"],

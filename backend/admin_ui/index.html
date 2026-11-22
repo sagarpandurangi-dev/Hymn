@@ -6,7 +6,7 @@
 <meta name="robots" content="noindex, nofollow">
 <title>Hymn Admin</title>
 <style>
-/* Layout: a sign-in card, then a top bar with tabs (Overview, People, AI, Invites, System, Settings, Log).
+/* Layout: a sign-in card, then a top bar with tabs (Overview, People, Revenue, AI, Invites, Demand, System, Settings, Log).
    Each tab is a stack of cards: big numbers, simple bar charts and plain tables. Phone first. */
 :root{--bg:#F7F3EC;--surface:#FFFDF9;--ink:#1F2340;--muted:#5D6770;--line:#E4DED3;--accent:#E8892B;--good:#4F7A5A;--warn:#C9822B;--bad:#B5483B;--bar:#1F2340;
 --ui:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -128,7 +128,7 @@ function signin(msg) {
 }
 
 const TABS = [["overview", "Overview"], ["people", "People"], ["revenue", "Revenue"], ["ai", "AI"], ["invites", "Invites"],
-              ["system", "System"], ["settings", "Settings"], ["log", "Log"]];
+              ["demand", "Demand"], ["system", "System"], ["settings", "Settings"], ["log", "Log"]];
 
 async function render(msg) {
   const app = document.getElementById("app");
@@ -304,6 +304,44 @@ const SCREENS = {
       card("Latest payment events", table([{h: "When", f: r => when(r.at)}, {h: "From", f: r => r.provider}, {h: "What", f: r => r.type},
         {h: "Person", f: r => r.email || "—"}], d.events)),
     ];
+  },
+
+  async demand() {
+    const sel = SCREENS._dem || {};
+    const qs = Object.entries(sel).filter(([k, v]) => v).map(([k, v]) => k + "=" + encodeURIComponent(v)).join("&");
+    const d = await call("GET", "/admin/demand" + (qs ? "?" + qs : ""));
+    const cat = el("select", {}, [el("option", {value: ""}, "Pick what people are planning")].concat(d.categories.map(c =>
+      el("option", {value: c.category, selected: sel.category === c.category}, c.label))));
+    const inp = (k, ph, type) => el("input", {type: type || "text", placeholder: ph, value: sel[k] || "", style: "width:140px", "aria-label": ph});
+    const city = inp("city", "City"), area = inp("area", "Area"), form = inp("form", "Size / type, e.g. 3 BHK"), within = inp("within_days", "Within days", "number");
+    const go = () => { SCREENS._dem = {category: cat.value, city: city.value, area: area.value, form: form.value, within_days: within.value}; render(); };
+    const hidden = v => v === null ? el("span", {class: "muted"}, "under 5") : num(v);
+    const show = s => s.hidden ? el("p", {class: "muted"}, "Not enough people (" + s.note + ").") : el("div", {},
+      el("div", {class: "grid"}, stat(num(s.people), "people"), s.budget ? stat(s.budget.average, "average budget") : null,
+        s.budget ? stat(s.budget.most_common_range, "most common range") : null),
+      s.forms.length ? el("p", {class: "small"}, "Size / type: " + s.forms.map(f => `${f.form} ${f.share}%`).join(" · ")) : null,
+      s.areas.length ? el("p", {class: "small"}, "Areas: " + s.areas.map(a => `${a.area} (${a.people})`).join(" · ")) : null,
+      el("p", {class: "small muted"}, "When: " + Object.entries(s.when).filter(([k, v]) => v).map(([k, v]) => `${k} ${v}`).join(" · ")));
+    const on = el("input", {type: "checkbox", checked: d.sharing_on});
+    const min = el("input", {type: "number", min: 10, value: d.vendor_min, style: "width:80px", "aria-label": "Smallest group sellers see"});
+    const out = el("p", {class: "small"});
+    return [
+      card("What people are planning", el("p", {class: "small muted"}, `Active plans with a date ahead. ${num(d.people_sharing)} people have agreed to share with sellers.`),
+        table([{h: "Plan", f: r => r.label}, {h: "People", num: 1, f: r => hidden(r.people)},
+          {h: "Agreed to share", num: 1, f: r => r.never_shared ? el("span", {class: "muted"}, "never shared") : hidden(r.shareable_people)}], d.categories),
+        d.cities.length ? el("p", {class: "small"}, "Top cities: " + d.cities.map(c => `${c.city} (${c.plans})`).join(" · ")) : null),
+      card("Look closer", el("div", {class: "row"}, cat, city, area, form, within, el("button", {class: "primary", onclick: go}, "Show"))),
+      sel.category ? card("All plans (only you see this)", show(d.all_plans)) : null,
+      sel.category ? card("What a seller would get", show(d.for_sellers),
+        d.report_preview ? el("p", {style: "margin-top:10px"}, el("b", {}, d.report_preview)) : null,
+        el("p", {class: "small muted"}, `Only people who agreed, only groups of ${d.vendor_min} or more, never names or numbers.`)) : null,
+      card("Sharing with Pamphlet", el("label", {class: "row"}, on, "Pamphlet can pull these reports"),
+        el("label", {class: "small muted row"}, "Smallest group a seller sees ", min),
+        el("p", {class: "small warning"}, "Keep this off until a lawyer has reviewed it (DPDP). Health, family-planning and 'other' plans are never shared."),
+        el("button", {class: "primary", onclick: async () => {
+          try { await call("PUT", "/admin/settings", {demand_sharing_on: on.checked, demand_min_count: +min.value}); out.textContent = "Saved."; out.className = "small ok"; }
+          catch (e) { out.textContent = e.message; out.className = "small err"; } }}, "Save"), out),
+    ].filter(Boolean);
   },
 
   async log() {

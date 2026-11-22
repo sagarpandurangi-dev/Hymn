@@ -389,6 +389,8 @@ Build Work (Life tab → Work): work pays for the life you want and grows you, w
 9. Me → WhatsApp (show only when GET /api/whatsapp returns available: true): if not linked, the consent_text with a checkbox and "Connect WhatsApp" → POST /api/whatsapp/link {"consent": true} → open the returned url (it opens WhatsApp with the code typed in; the person taps send). If linked: the number, a "Pause messages" switch (POST /api/whatsapp/pause {"paused": true|false}) and "Disconnect" (DELETE /api/whatsapp/link).
 10. Invites: on the sign-up screen add an optional "Invite code" box sent as invite_code with POST /api/auth/signup (a 403 shows the server's message). Me → "Invite friends": GET /api/invites/mine → show the code big with a copy and share button and "N invites left".
 11. On every API call send the header X-App-Version with the app's version (from app.json).
+12. Plans "What and where": on a plan's detail screen, a small "What and where" row showing intent {category, form, budget_inr, city, area} (hide empty parts; money with formatMoney). Tapping it opens a sheet: category and size/type pickers from GET /api/demand/options, budget, city, area, pincode → PATCH /api/demand/plans/{plan_id}.
+13. Me → Privacy: a switch "Help local sellers understand what people are planning" with the server's text under it (GET /api/demand/consent → {on, text}; PUT /api/demand/consent {"on": true|false}). Off unless the person turns it on.
 
 Tell me what you changed.
 ```
