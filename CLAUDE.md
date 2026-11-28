@@ -132,6 +132,14 @@ missing response fields on the backend rather than spending Emergent credits. Af
 `frontend/` from `emergent-frontend` into `main` (never its `backend/`) and switch on
 `HYMN_REQUIRE_CHECKIN_DURATION=1`.
 
+Product direction (owner, 28 Nov 2026, after a Stable Money "Money OS" post and his wife's first test run: "looks like a planning app but not very clear what will be tracked and what to be planned"): don't chase daily use of dashboards; **show up at the moments that matter and follow through**. Apply when writing the December prompts (0 first), no new build now:
+1. Lead with moments, not tabs: Today opens on "what needs you" (bill/EMI/card due, salary landed, renewal, payslip that doesn't add up, plan slipping to short, birthday, exam, appraisal, check-up overdue); areas sit behind it.
+2. Each moment has one clear next step and follows up until done ("Card bill ₹18,400 due Friday. Paid? ✓"), not a report.
+3. Ledger statements and net worth are the "look deeper" layer, never the front door. Service before advice (Hymn never recommends products).
+4. Hymn's edge over money-only apps: life moments (people, learning, work, health) happen weekly, so they answer "the second visit".
+5. Later "connected data": SMS reading (parked) then Account Aggregator via a licensed partner. Not for the beta.
+Wife's test run notes so far (artifact "Hymn Test Run", collection `results`): add email verification, Google/phone sign-in, privacy policy + T&C; better city search for time zone; voice input wherever possible, clearer "Empty your head"; office-hours picker not working in welcome; welcome shouldn't push "add bank account"; a short tutorial and tips.
+
 Ideas parked by the owner (22 Nov 2026: "remember it, don't build it now"; focus is making what exists work and feel intuitive):
 - "Call back" reminders: a quick in-app button (pick a person → in 1 hour / this evening) and WhatsApp "call back Ramesh at 6". Phones don't let apps hook the decline/voicemail screen; later, Android-only opt-in call-screening role ("Remind me to call back?" after a missed call) — replaces Truecaller, so a setting, never default.
 - SMS money reading (Android only, native build): bank/card SMS → spending, via Google Play's "SMS-based money management" declaration. iPhone never allows it. Call-log access: never (Play allows it only for dialer/caller-ID apps).
